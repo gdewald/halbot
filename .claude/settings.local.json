@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -c \"import discord; s = discord.SoundboardSound; print\\([m for m in dir\\(s\\) if not m.startswith\\('_'\\)]\\)\")"
+    ]
+  }
+}
