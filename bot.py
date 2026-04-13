@@ -1,3 +1,4 @@
+import argparse
 import base64
 import io
 import json
@@ -56,6 +57,14 @@ def db_init():
                 image BLOB NOT NULL,
                 description TEXT DEFAULT '',
                 description_attempted INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS personas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                directive TEXT NOT NULL,
+                set_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         # Migrate: add description_attempted column if missing
@@ -135,6 +144,58 @@ def db_delete(name: str) -> bool:
     with _db() as conn:
         cur = conn.execute("DELETE FROM saved_sounds WHERE name = ?", (name,))
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Persona / behavior directives
+# ---------------------------------------------------------------------------
+PERSONA_MAX_CHARS = 200
+PERSONA_MAX_TOTAL = 10
+
+
+def persona_list() -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, directive, set_by, created_at FROM personas ORDER BY created_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def persona_add(directive: str, set_by: str) -> int:
+    if len(directive) > PERSONA_MAX_CHARS:
+        raise ValueError(f"Directive too long ({len(directive)} chars). Max is {PERSONA_MAX_CHARS}.")
+    current = persona_list()
+    if len(current) >= PERSONA_MAX_TOTAL:
+        raise ValueError(f"Too many directives ({len(current)}). Max is {PERSONA_MAX_TOTAL}. Ask someone to clear some first.")
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO personas (directive, set_by) VALUES (?, ?)",
+            (directive, set_by),
+        )
+        return cur.lastrowid
+
+
+def persona_update(persona_id: int, directive: str) -> bool:
+    if len(directive) > PERSONA_MAX_CHARS:
+        raise ValueError(f"Directive too long ({len(directive)} chars). Max is {PERSONA_MAX_CHARS}.")
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE personas SET directive = ? WHERE id = ?",
+            (directive, persona_id),
+        )
+        return cur.rowcount > 0
+
+
+def persona_remove(persona_id: int) -> bool:
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM personas WHERE id = ?", (persona_id,))
+        return cur.rowcount > 0
+
+
+def persona_clear() -> int:
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM personas")
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -358,11 +419,16 @@ SAVED LIBRARY (stored locally, can be restored to the soundboard):
 CUSTOM EMOJIS available on this server:
 {custom_emojis}
 
+ACTIVE BEHAVIOR DIRECTIVES (follow these when composing any user-facing message):
+{persona_directives}
+
 Today's date is {today}.
 
 Based on the user's request, return a JSON response. If the request involves a single action, return a single JSON object. If it involves multiple steps (e.g. "back up and clear"), return a JSON array of action objects — they will be executed in order.
 
 Available actions:
+
+OPTIONAL "message" FIELD: Any action can include an optional "message" field with a short, flavored intro or commentary (1 sentence max). When ACTIVE BEHAVIOR DIRECTIVES are set, you SHOULD include a "message" that reflects the persona. The bot will display your message above the factual data. Example: {{"action": "list", "names": [...], "message": "Arr, here be yer sounds, matey!"}}. Without directives, omit this field.
 
 --- Live soundboard actions ---
 
@@ -423,6 +489,26 @@ If the source clip already has effects applied (shown in the SAVED LIBRARY listi
 {{"action": "emoji_list", "names": [...]}}
 List custom emojis available on this server. Include all emoji names from the CUSTOM EMOJIS list, or filter to matching ones. Use the emoji name (not the full format string).
 
+--- Persona / behavior actions ---
+
+{{"action": "persona_set", "directive": "<short behavior instruction>", "message": "<confirmation to the user>"}}
+The user wants to add a NEW behavior or personality trait (e.g. "from now on respond like a pirate", "be more sarcastic", "speak in haiku").
+Write the "directive" as a short, clear instruction to yourself (max 200 chars). Distill what the user wants into an actionable behavior rule. Do NOT just copy their message — rephrase it as a directive.
+"message" is a fun confirmation to show the user that you've adopted the behavior.
+Only use this action when the user is clearly asking you to change your personality or communication style. Normal soundboard requests should NOT trigger this.
+
+{{"action": "persona_update", "id": <directive id>, "directive": "<revised behavior instruction>", "message": "<confirmation>"}}
+The user wants to MODIFY an existing directive (e.g. "be a little less grumpy", "tone it down", "make the pirate thing more subtle").
+"id" must match a directive from the ACTIVE BEHAVIOR DIRECTIVES list. Write a new "directive" that incorporates the user's adjustment.
+Use this instead of persona_set when the user is clearly refining an existing behavior rather than adding a new one.
+
+{{"action": "persona_remove", "id": <directive id>, "message": "<confirmation>"}}
+The user wants to REMOVE a specific behavior directive (e.g. "stop being a pirate", "drop the grumpy act").
+"id" must match a directive from the ACTIVE BEHAVIOR DIRECTIVES list.
+
+{{"action": "persona_list"}}
+The user wants to see what behavior directives are currently active.
+
 --- Fallback ---
 
 {{"action": "unknown", "message": "<your response>"}}
@@ -433,6 +519,8 @@ SOUNDBOARD LIMITS: Max file size 512KB, max duration 5.2 seconds, formats: MP3/O
 {attachments}
 
 IMPORTANT: Names must be EXACT matches from the appropriate list (live or saved). Use your judgement to match typos, abbreviations, or descriptions to the correct names.
+
+IMPORTANT: Messages marked [BOT REPLY] in the conversation history are results I already sent to the user. Do NOT copy or repeat them. Always return a JSON action so the bot can execute it.
 
 Reply with ONLY the JSON (single object or array of objects). No explanation.\
 """
@@ -500,6 +588,13 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     else:
         emojis_str = "(none)"
 
+    personas = persona_list()
+    if personas:
+        persona_lines = [f"- [id:{p['id']}] {p['directive']} (set by {p['set_by']})" for p in personas]
+        persona_str = "\n".join(persona_lines)
+    else:
+        persona_str = "(none — use your default personality)"
+
     if attachment_info:
         att_lines = ["ATTACHMENTS on this message:"]
         for att in attachment_info:
@@ -520,6 +615,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             sound_details=format_sound_details(sounds),
             saved_details=format_saved_details(saved),
             custom_emojis=emojis_str,
+            persona_directives=persona_str,
             today=date.today().isoformat(),
             attachments=attachments_str,
         )},
@@ -533,9 +629,9 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             json={
                 "messages": messages,
                 "temperature": 0.1,
-                "max_tokens": 300,
+                "max_tokens": 512,
             },
-            timeout=15,
+            timeout=30,
         )
         resp.raise_for_status()
         raw_json = resp.json()
@@ -556,18 +652,23 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
                 content = content[:-3]
             content = content.strip()
             log.debug("After stripping code fences: %s", content)
-        parsed = json.loads(content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # Model responded with prose instead of JSON — use it as a friendly message
+            log.warning("LM Studio returned non-JSON, treating as unknown: %s", content[:200])
+            return [{"action": "unknown", "message": content}]
         log.info("Parsed actions: %s", json.dumps(parsed, indent=2))
         # Normalize to a list of actions
         if isinstance(parsed, dict):
             return [parsed]
         if isinstance(parsed, list):
             return parsed
-        return [{"action": "unknown"}]
+        return [{"action": "unknown", "message": str(parsed)}]
     except requests.ConnectionError:
         log.error("Could not connect to LM Studio at %s", LMSTUDIO_URL)
         return [{"action": "error", "message": "I'm having trouble thinking right now — is LM Studio running?"}]
-    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
+    except (requests.RequestException, KeyError, IndexError) as e:
         log.error("Failed to parse intent: %s", e)
         return [{"action": "unknown"}]
 
@@ -670,7 +771,7 @@ async def on_message(message: discord.Message):
         if audio_atts:
             text = (text + "\n" if text else "") + " ".join(audio_atts)
         if msg.author == client.user:
-            channel_history.append({"role": "assistant", "content": text})
+            channel_history.append({"role": "assistant", "content": f"[BOT REPLY — this is what I said to the user, NOT a JSON action]: {text}"})
         else:
             channel_history.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
     channel_history.reverse()
@@ -683,6 +784,13 @@ async def on_message(message: discord.Message):
     actions = parse_intent(user_text, sounds, saved, channel_history, attachment_info or None)
     replies = []
 
+    def _reply(default: str, intent: dict = None) -> str:
+        """Use LLM-provided message as intro if present, otherwise use default."""
+        llm_msg = (intent or {}).get("message")
+        if llm_msg:
+            return f"{llm_msg}\n\n{default}" if default else llm_msg
+        return default
+
     for intent in actions:
         action = intent.get("action")
 
@@ -692,9 +800,10 @@ async def on_message(message: discord.Message):
 
         elif action == "list":
             names = intent.get("names", [])
-            matched = [sound_map[n] for n in names if n in sound_map]
+            # Empty names = list all sounds
+            matched = [sound_map[n] for n in names if n in sound_map] if names else list(sounds)
             if not matched:
-                replies.append("No sounds match that.")
+                replies.append(_reply("The soundboard is empty." if not names else "No sounds match that.", intent))
             else:
                 lines = []
                 for s in matched:
@@ -707,7 +816,7 @@ async def on_message(message: discord.Message):
                     user_str = f" (by {s.user})" if s.user else ""
                     date_str = f" — {s.created_at.strftime('%Y-%m-%d')}" if s.created_at else ""
                     lines.append(f"- {emoji_str}**{s.name}**{user_str}{date_str}")
-                replies.append(f"**Soundboard sounds ({len(matched)}):**\n" + "\n".join(lines))
+                replies.append(_reply(f"**Soundboard sounds ({len(matched)}):**\n" + "\n".join(lines), intent))
 
         elif action == "remove":
             names = intent.get("names", [])
@@ -726,7 +835,7 @@ async def on_message(message: discord.Message):
                 reply = f"Removed **{', '.join(deleted)}**." if deleted else ""
                 if errors:
                     reply += f" Failed to remove: {', '.join(errors)}."
-                replies.append(reply)
+                replies.append(_reply(reply, intent))
 
         elif action == "edit":
             target_name = intent.get("name", "")
@@ -749,7 +858,7 @@ async def on_message(message: discord.Message):
                             changes.append(f"emoji → {kwargs['emoji']}")
                         if "name" in kwargs:
                             changes.append(f"name → **{kwargs['name']}**")
-                        replies.append(f"Updated **{target_name}**: {', '.join(changes)}")
+                        replies.append(_reply(f"Updated **{target_name}**: {', '.join(changes)}", intent))
                     except discord.HTTPException as e:
                         log.error("Failed to edit sound %s: %s", target_name, e)
                         replies.append(f'Failed to edit "{target_name}". Do I have the right permissions?')
@@ -768,7 +877,7 @@ async def on_message(message: discord.Message):
                 reply = f"Cleared **{deleted}** sound(s)."
                 if errors:
                     reply += f" Failed to remove {errors} sound(s)."
-                replies.append(reply)
+                replies.append(_reply(reply, intent))
 
         elif action == "upload":
             target_filename = intent.get("filename")
@@ -817,7 +926,7 @@ async def on_message(message: discord.Message):
                 reply = f"Saved **{', '.join(saved_names)}** to the library." if saved_names else ""
                 if errors:
                     reply += " Errors:\n" + "\n".join(f"- {e}" for e in errors)
-                replies.append(reply or "No valid audio files to save.")
+                replies.append(_reply(reply or "No valid audio files to save.", intent))
 
         elif action == "save":
             names = intent.get("names", [])
@@ -841,7 +950,7 @@ async def on_message(message: discord.Message):
                 reply = f"Saved **{', '.join(saved_names)}** to the library." if saved_names else ""
                 if errors:
                     reply += f" Failed to save: {', '.join(errors)}."
-                replies.append(reply)
+                replies.append(_reply(reply, intent))
 
         elif action == "saved_list":
             names = intent.get("names", [])
@@ -855,7 +964,7 @@ async def on_message(message: discord.Message):
                     size_kb = round(s.get("size_bytes", 0) / 1024, 1)
                     meta_str = f" — {s['metadata']}" if s.get("metadata") else ""
                     lines.append(f"- {emoji_str}**{s['name']}** ({size_kb}KB, saved by {s.get('saved_by', '?')}){meta_str}")
-                replies.append(f"**Saved library ({len(matched)}):**\n" + "\n".join(lines))
+                replies.append(_reply(f"**Saved library ({len(matched)}):**\n" + "\n".join(lines), intent))
 
         elif action == "saved_update":
             target_name = intent.get("name", "")
@@ -874,7 +983,7 @@ async def on_message(message: discord.Message):
                         changes.append(f"emoji → {emoji}")
                     if metadata is not None:
                         changes.append("metadata updated")
-                    replies.append(f"Updated saved sound **{target_name}**: {', '.join(changes)}")
+                    replies.append(_reply(f"Updated saved sound **{target_name}**: {', '.join(changes)}", intent))
                 except ValueError as e:
                     replies.append(str(e))
 
@@ -885,7 +994,7 @@ async def on_message(message: discord.Message):
             reply = f"Deleted **{', '.join(deleted)}** from the library." if deleted else ""
             if missed:
                 reply += f" Not found: {', '.join(missed)}."
-            replies.append(reply or "No matching saved sounds found.")
+            replies.append(_reply(reply or "No matching saved sounds found.", intent))
 
         elif action == "restore":
             names = intent.get("names", [])
@@ -910,7 +1019,7 @@ async def on_message(message: discord.Message):
             reply = f"Restored **{', '.join(restored)}** to the soundboard." if restored else ""
             if errors:
                 reply += f" Failed: {', '.join(errors)}."
-            replies.append(reply or "Nothing to restore.")
+            replies.append(_reply(reply or "Nothing to restore.", intent))
 
         elif action == "effect_ask":
             # LLM is asking the user to pick effect parameters — just relay the message
@@ -973,15 +1082,63 @@ async def on_message(message: discord.Message):
                     effects=json.dumps(combined_effects),
                 )
                 effect_desc = " + ".join(e["type"] for e in combined_effects)
-                replies.append(
+                default_msg = (
                     f"Created **{save_as}** ({effect_desc} applied to **{original['name']}**). "
                     f"Saved to the library."
                 )
+                replies.append(_reply(default_msg, intent))
                 # Refresh saved_map so subsequent actions in this batch can see it
                 saved_map[save_as] = db_get(save_as)
             except Exception as e:
                 log.error("Failed to save processed sound %s: %s", save_as, e)
                 replies.append(f"Effect applied but failed to save: {e}")
+
+        elif action == "persona_set":
+            directive = intent.get("directive", "")
+            confirm_msg = intent.get("message", "Got it!")
+            try:
+                persona_add(directive, str(message.author))
+                log.info("Persona directive added by %s: %s", message.author, directive)
+                replies.append(confirm_msg)
+            except ValueError as e:
+                replies.append(str(e))
+
+        elif action == "persona_update":
+            pid = intent.get("id")
+            directive = intent.get("directive", "")
+            confirm_msg = intent.get("message", "Updated!")
+            if pid is None:
+                replies.append("No directive ID specified.")
+            else:
+                try:
+                    if persona_update(int(pid), directive):
+                        log.info("Persona directive %s updated by %s: %s", pid, message.author, directive)
+                        replies.append(confirm_msg)
+                    else:
+                        replies.append(f"Couldn't find directive #{pid}.")
+                except ValueError as e:
+                    replies.append(str(e))
+
+        elif action == "persona_remove":
+            pid = intent.get("id")
+            confirm_msg = intent.get("message", "Removed!")
+            if pid is None:
+                replies.append("No directive ID specified.")
+            elif persona_remove(int(pid)):
+                log.info("Persona directive %s removed by %s", pid, message.author)
+                replies.append(confirm_msg)
+            else:
+                replies.append(f"Couldn't find directive #{pid}.")
+
+        elif action == "persona_list":
+            personas = persona_list()
+            if not personas:
+                replies.append("No behavior directives are active. I'm using my default personality.")
+            else:
+                lines = []
+                for p in personas:
+                    lines.append(f"- [#{p['id']}] \"{p['directive']}\" (set by {p['set_by']} on {p['created_at']})")
+                replies.append(_reply(f"**Active behavior directives ({len(personas)}):**\n" + "\n".join(lines), intent))
 
         elif action == "emoji_list":
             names = intent.get("names", [])
@@ -997,7 +1154,7 @@ async def on_message(message: discord.Message):
                     fmt = f"<{prefix}:{e['name']}:{e['emoji_id']}>"
                     desc = f" — {e['description']}" if e.get("description") else ""
                     lines.append(f"- {fmt} **{e['name']}**{desc}")
-                replies.append(f"**Custom emojis ({len(matched)}):**\n" + "\n".join(lines))
+                replies.append(_reply(f"**Custom emojis ({len(matched)}):**\n" + "\n".join(lines), intent))
 
         else:
             replies.append(intent.get("message", "I didn't understand that."))
@@ -1024,8 +1181,31 @@ async def on_message(message: discord.Message):
 
 
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
+    parser = argparse.ArgumentParser(description="ShowMeBot — Discord soundboard manager")
+    parser.add_argument("--clear-personas", action="store_true",
+                        help="Clear all persona/behavior directives and exit")
+    parser.add_argument("--list-personas", action="store_true",
+                        help="List all persona/behavior directives and exit")
+    args = parser.parse_args()
+
+    if not DISCORD_TOKEN and not (args.clear_personas or args.list_personas):
         print("Error: DISCORD_TOKEN not set. Copy .env.example to .env and fill it in.")
         raise SystemExit(1)
+
     db_init()
+
+    if args.list_personas:
+        personas = persona_list()
+        if not personas:
+            print("No active persona directives.")
+        else:
+            for p in personas:
+                print(f"  [{p['id']}] \"{p['directive']}\" — set by {p['set_by']} on {p['created_at']}")
+        raise SystemExit(0)
+
+    if args.clear_personas:
+        count = persona_clear()
+        print(f"Cleared {count} persona directive(s).")
+        raise SystemExit(0)
+
     client.run(DISCORD_TOKEN)
