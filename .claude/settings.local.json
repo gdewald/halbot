@@ -5,7 +5,9 @@
       "Bash(python -c \"import discord; s = discord.SoundboardSound; print\\([m for m in dir\\(s\\) if not m.startswith\\('_'\\)]\\)\")",
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git tag:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('bot.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

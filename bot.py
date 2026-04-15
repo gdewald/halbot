@@ -16,6 +16,61 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions")
+# Model to target in LM Studio. Source-controlled so JIT re-loads after idle unload
+# use the same model every time.
+LMSTUDIO_MODEL = "google/gemma-4-e4b"
+
+
+def _lmstudio_base() -> str:
+    """Strip the OpenAI path suffix to get the LM Studio server root."""
+    for marker in ("/v1/", "/api/"):
+        idx = LMSTUDIO_URL.find(marker)
+        if idx != -1:
+            return LMSTUDIO_URL[:idx]
+    return LMSTUDIO_URL.rstrip("/")
+
+
+def ensure_model_loaded(model: str = LMSTUDIO_MODEL, timeout: int = 180) -> bool:
+    """Make sure `model` is loaded in LM Studio, triggering a JIT load if not.
+
+    Returns True if the model ends up loaded (or was already), False otherwise.
+    LM Studio auto-unloads models after an idle TTL; this re-loads on demand.
+    """
+    base = _lmstudio_base()
+    # Check current state via LM Studio's native REST API
+    try:
+        resp = requests.get(f"{base}/api/v0/models", timeout=5)
+        resp.raise_for_status()
+        entries = resp.json().get("data", []) or []
+        match = next(
+            (m for m in entries if model in (m.get("id"), m.get("model_key"))),
+            None,
+        )
+        if match and match.get("state") == "loaded":
+            return True
+        state = match.get("state") if match else "unknown"
+        log.info("Model %r not loaded (state=%s) — triggering JIT load", model, state)
+    except requests.RequestException as e:
+        log.warning("Could not query LM Studio model state: %s — will try a direct load", e)
+
+    # Trigger JIT load with a minimal chat completion carrying the target model.
+    # LM Studio with JIT enabled will load the requested model before responding.
+    try:
+        resp = requests.post(
+            LMSTUDIO_URL,
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        log.info("JIT load completed for %r", model)
+        return True
+    except requests.RequestException as e:
+        log.error("Failed to load model %r: %s", model, e)
+        return False
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
@@ -241,24 +296,23 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
     b64 = base64.b64encode(image_bytes).decode()
     # Discord emojis are PNG or GIF
     mime = "image/gif" if image_bytes[:4] == b"GIF8" else "image/png"
+    body = {
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text",
+                 "text": f"This is a Discord custom emoji called '{name}'. "
+                         "Describe what it depicts in one short sentence (under 100 characters). "
+                         "Just the description, nothing else."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            ]},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 60,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
     try:
-        resp = requests.post(
-            LMSTUDIO_URL,
-            json={
-                "messages": [
-                    {"role": "user", "content": [
-                        {"type": "text",
-                         "text": f"This is a Discord custom emoji called '{name}'. "
-                                 "Describe what it depicts in one short sentence (under 100 characters). "
-                                 "Just the description, nothing else."},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                    ]},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 60,
-            },
-            timeout=30,
-        )
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -624,16 +678,26 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         {"role": "user", "content": user_text},
     ]
 
+    body = {
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 1536,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+
     try:
-        resp = requests.post(
-            LMSTUDIO_URL,
-            json={
-                "messages": messages,
-                "temperature": 0.1,
-                "max_tokens": 1536,
-            },
-            timeout=30,
-        )
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        if resp.status_code >= 400:
+            log.warning("LM Studio %s response: %s", resp.status_code, resp.text[:500])
+            # LM Studio may have idle-unloaded the model. Try reload+retry once.
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    log.info("Retrying chat completion after model load")
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=60)
+                    if resp.status_code >= 400:
+                        log.warning("LM Studio retry %s response: %s",
+                                    resp.status_code, resp.text[:500])
         resp.raise_for_status()
         raw_json = resp.json()
         log.debug("LM Studio raw response: %s", json.dumps(raw_json, indent=2))
