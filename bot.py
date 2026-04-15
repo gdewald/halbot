@@ -19,7 +19,7 @@ LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completi
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("showmebot")
+log = logging.getLogger("halbot")
 
 # ---------------------------------------------------------------------------
 # SQLite database for saved sounds
@@ -827,7 +827,7 @@ async def on_message(message: discord.Message):
                 deleted, errors = [], []
                 for sound in matched:
                     try:
-                        await sound.delete(reason=f"Removed by {message.author} via ShowMeBot")
+                        await sound.delete(reason=f"Removed by {message.author} via Halbot")
                         deleted.append(sound.name)
                     except discord.HTTPException as e:
                         log.error("Failed to delete sound %s: %s", sound.name, e)
@@ -852,7 +852,7 @@ async def on_message(message: discord.Message):
                     replies.append("Nothing to change.")
                 else:
                     try:
-                        await sound.edit(reason=f"Edited by {message.author} via ShowMeBot", **kwargs)
+                        await sound.edit(reason=f"Edited by {message.author} via Halbot", **kwargs)
                         changes = []
                         if "emoji" in kwargs:
                             changes.append(f"emoji → {kwargs['emoji']}")
@@ -870,7 +870,7 @@ async def on_message(message: discord.Message):
                 deleted, errors = 0, 0
                 for sound in sounds:
                     try:
-                        await sound.delete(reason=f"Cleared by {message.author} via ShowMeBot")
+                        await sound.delete(reason=f"Cleared by {message.author} via Halbot")
                         deleted += 1
                     except discord.HTTPException:
                         errors += 1
@@ -1010,7 +1010,7 @@ async def on_message(message: discord.Message):
                         name=row["name"],
                         sound=row["audio"],
                         emoji=emoji,
-                        reason=f"Restored by {message.author} via ShowMeBot",
+                        reason=f"Restored by {message.author} via Halbot",
                     )
                     restored.append(name)
                 except discord.HTTPException as e:
@@ -1181,7 +1181,7 @@ async def on_message(message: discord.Message):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ShowMeBot — Discord soundboard manager")
+    parser = argparse.ArgumentParser(description="Halbot — Discord soundboard manager")
     parser.add_argument("--clear-personas", action="store_true",
                         help="Clear all persona/behavior directives and exit")
     parser.add_argument("--list-personas", action="store_true",
