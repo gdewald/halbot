@@ -73,8 +73,35 @@ def ensure_model_loaded(model: str = LMSTUDIO_MODEL, timeout: int = 180) -> bool
         return False
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("halbot")
+
+
+def configure_logging(log_path=None) -> None:
+    """Install stdout + optional rotating file handler on the root logger.
+
+    Idempotent. Clears existing root handlers first so repeated calls (e.g.
+    from bot.py main and halbot_tray.py) don't stack up duplicates.
+    """
+    from pathlib import Path
+    from logging.handlers import RotatingFileHandler
+
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.setLevel(level)
+
+    stream = logging.StreamHandler()
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    if log_path is not None:
+        p = Path(log_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(p, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
 
 # ---------------------------------------------------------------------------
 # SQLite database for saved sounds
@@ -738,26 +765,36 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         return [{"action": "unknown"}]
 
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
+# The discord.Client is built lazily via build_client() so the tray app can
+# recreate a fresh client on each Start (a closed Client can't be reused).
+# Handlers below reference `client` at call time, so after build_client()
+# reassigns it, they operate on the current instance.
+client: "discord.Client | None" = None
 
-client = discord.Client(intents=intents)
+
+def build_client() -> discord.Client:
+    """Create (or recreate) the module-level discord.Client with handlers wired up."""
+    global client
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.guilds = True
+    client = discord.Client(intents=intents)
+    client.event(on_ready)
+    client.event(on_guild_emojis_update)
+    client.event(on_message)
+    return client
 
 
-@client.event
 async def on_ready():
     log.info("Logged in as %s (id: %s)", client.user, client.user.id)
     for guild in client.guilds:
         await sync_emojis(guild)
 
 
-@client.event
 async def on_guild_emojis_update(guild, before, after):
     await sync_emojis(guild)
 
 
-@client.event
 async def on_message(message: discord.Message):
     log.info("Message received: %r from %s, mentions: %s", message.content, message.author, message.mentions)
     # Ignore own messages and messages that don't mention the bot
@@ -1253,6 +1290,8 @@ if __name__ == "__main__":
                         help="List all persona/behavior directives and exit")
     args = parser.parse_args()
 
+    configure_logging()
+
     if not DISCORD_TOKEN and not (args.clear_personas or args.list_personas):
         print("Error: DISCORD_TOKEN not set. Copy .env.example to .env and fill it in.")
         raise SystemExit(1)
@@ -1273,4 +1312,5 @@ if __name__ == "__main__":
         print(f"Cleared {count} persona directive(s).")
         raise SystemExit(0)
 
+    build_client()
     client.run(DISCORD_TOKEN)
