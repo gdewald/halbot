@@ -1,4 +1,4 @@
-# ShowMeBot — Agent Configuration
+# Halbot — Agent Configuration
 
 ## Project Overview
 

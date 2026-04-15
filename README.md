@@ -1,4 +1,4 @@
-# ShowMeBot
+# Halbot
 
 A Discord bot that manages your server's soundboard using natural language. Mention the bot and tell it what to do — it uses a local LLM (via LM Studio) to interpret your requests and take action.
 
@@ -78,12 +78,12 @@ The bot reads the last 50 messages in the channel and passes them to the LLM, so
 Mention the bot in any server channel:
 
 ```
-@ShowMeBot what sounds are on the soundboard
-@ShowMeBot remove the airhorn sound
-@ShowMeBot save all sounds to the library
-@ShowMeBot add reverb to big-yoshi
-@ShowMeBot from now on talk like a pirate
-@ShowMeBot what custom emojis do we have
+@Halbot what sounds are on the soundboard
+@Halbot remove the airhorn sound
+@Halbot save all sounds to the library
+@Halbot add reverb to big-yoshi
+@Halbot from now on talk like a pirate
+@Halbot what custom emojis do we have
 ```
 
 You can also attach audio files (MP3, OGG, WAV) to your message to save them to the library.
