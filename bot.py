@@ -79,8 +79,9 @@ def db_init():
             conn.execute("ALTER TABLE saved_sounds ADD COLUMN effects TEXT DEFAULT ''")
 
 
-def db_save(name: str, audio: bytes, emoji: str | None, metadata: str, saved_by: str,
+def db_save(name: str, audio: bytes, emoji: str | None, metadata: str | None, saved_by: str,
             parent_id: int | None = None, effects: str = "") -> int:
+    metadata = metadata or ""
     if len(metadata.encode()) > METADATA_MAX_BYTES:
         raise ValueError(f"Metadata exceeds {METADATA_MAX_BYTES} bytes")
     if len(audio) > SOUNDBOARD_MAX_BYTES:
@@ -629,7 +630,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             json={
                 "messages": messages,
                 "temperature": 0.1,
-                "max_tokens": 512,
+                "max_tokens": 1536,
             },
             timeout=30,
         )
