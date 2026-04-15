@@ -27,11 +27,26 @@ Single-file Python app: `bot.py`. SQLite database: `sounds.db`. Infrastructure: 
 
 ```bash
 pip install -r requirements.txt    # install dependencies
-python bot.py                      # run the bot
+python bot.py                      # run the bot (foreground)
 python bot.py --list-personas      # inspect stored persona directives
 python bot.py --clear-personas     # wipe all persona directives
 LOG_LEVEL=DEBUG python bot.py      # verbose LLM request/response logging
 ```
+
+### Windows tray app (halbot_tray.py)
+
+```powershell
+pythonw halbot_tray.py                        # run as tray app (no console)
+python halbot_tray.py --install-autostart     # auto-run at Windows login (HKCU Run key)
+python halbot_tray.py --uninstall-autostart   # remove autostart
+python halbot_tray.py --autostart-status      # show current autostart registration
+```
+
+Tray menu: Start/Stop bot, Open log window (live tail), Open log file, Quit.
+Logs live in `logs/halbot.log` (rotated). The tray app imports `bot` and drives
+`bot.client` on a private asyncio loop; `bot.build_client()` is called each
+time the bot is started so a fresh `discord.Client` is used (a closed client
+cannot be reused).
 
 ## Code Conventions
 

@@ -1,3 +1,4 @@
 .env
 sounds.db
 __pycache__/
+logs/
