@@ -15,12 +15,13 @@ from tinytag import TinyTag
 
 # Voice module — optional, only needed when voice features are used
 try:
-    from voice import VoiceListener, HalbotVoiceRecvClient, VOICE_RECV_AVAILABLE, load_whisper
+    from voice import VoiceListener, HalbotVoiceRecvClient, VOICE_RECV_AVAILABLE, load_whisper, unload_whisper
 except ImportError:
     VoiceListener = None
     HalbotVoiceRecvClient = None
     VOICE_RECV_AVAILABLE = False
     load_whisper = None
+    unload_whisper = None
 
 load_dotenv()
 
@@ -1400,6 +1401,15 @@ async def on_guild_emojis_update(guild, before, after):
     await sync_emojis(guild)
 
 
+def _maybe_unload_whisper() -> None:
+    """Free whisper VRAM once the last voice session ends.  Run off-thread
+    since GC + torch.cuda.empty_cache() can take a beat."""
+    if unload_whisper is None or voice_listeners:
+        return
+    import threading
+    threading.Thread(target=unload_whisper, daemon=True).start()
+
+
 async def on_voice_state_update(member, before, after):
     """Clean up voice listener when the bot is disconnected from voice."""
     if client is None or member != client.user:
@@ -1410,6 +1420,7 @@ async def on_voice_state_update(member, before, after):
         if listener:
             listener.stop()
             log.info("Voice listener removed (bot left %s)", before.channel.name)
+            _maybe_unload_whisper()
 
 
 async def on_message(message: discord.Message):
@@ -1936,6 +1947,7 @@ async def on_message(message: discord.Message):
                     await listener.vc.disconnect()
                 except Exception:
                     pass
+                _maybe_unload_whisper()
                 replies.append(_reply("Left the voice channel.", intent))
             else:
                 replies.append("I'm not in a voice channel.")

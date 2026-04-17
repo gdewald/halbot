@@ -191,6 +191,33 @@ def load_whisper():
         return _whisper_model
 
 
+def unload_whisper() -> None:
+    """Release the whisper model and free its VRAM.
+
+    Safe to call when nothing is loaded (no-op).  The next transcribe() call
+    will lazily reload.  Called when the bot leaves voice so the ~5-6 GB
+    faster-whisper footprint doesn't sit on the GPU while LM Studio wants it.
+    """
+    global _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            return
+        _whisper_model = None
+
+    # faster-whisper/ctranslate2 hold the CUDA allocation as long as the
+    # model object is reachable; force GC so the destructor runs, then nudge
+    # torch (if present) to return the cached CUDA blocks to the driver.
+    import gc
+    gc.collect()
+    try:
+        import torch  # type: ignore[import-not-found]
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    log.info("[whisper] Model unloaded")
+
+
 def transcribe(audio_float32: np.ndarray) -> str:
     """Transcribe 16 kHz mono float32 audio.  **Blocking** — run in executor."""
     model = load_whisper()
