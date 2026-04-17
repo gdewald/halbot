@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import base64
 import io
 import json
@@ -11,6 +12,15 @@ import requests
 from dotenv import load_dotenv
 from pydub import AudioSegment
 from tinytag import TinyTag
+
+# Voice module — optional, only needed when voice features are used
+try:
+    from voice import VoiceListener, HalbotVoiceRecvClient, VOICE_RECV_AVAILABLE, load_whisper
+except ImportError:
+    VoiceListener = None
+    HalbotVoiceRecvClient = None
+    VOICE_RECV_AVAILABLE = False
+    load_whisper = None
 
 load_dotenv()
 
@@ -591,6 +601,23 @@ The user wants to REMOVE a specific behavior directive (e.g. "stop being a pirat
 {{"action": "persona_list"}}
 The user wants to see what behavior directives are currently active.
 
+--- Voice channel actions ---
+
+{{"action": "voice_join", "channel": "<voice channel name>"}}
+Join a voice channel. Once connected the bot listens for the wake word "Halbot" followed by a command, and plays sounds from the library or live soundboard.
+"channel" must match one of the VOICE CHANNELS listed below (fuzzy matching is OK).
+
+VOICE CHANNELS on this server:
+{voice_channels}
+
+VOICE STATUS: {voice_status}
+
+{{"action": "voice_leave"}}
+Leave the current voice channel and stop listening.
+
+{{"action": "voice_play", "name": "<exact sound name>"}}
+Play a sound from the saved library (or live soundboard) in the voice channel. Only works when already connected to a voice channel.
+
 --- Fallback ---
 
 {{"action": "unknown", "message": "<your response>"}}
@@ -655,7 +682,8 @@ CHANNEL_HISTORY_LIMIT = 50
 
 
 def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: list[dict],
-                  attachment_info: list[dict] | None = None) -> list[dict]:
+                  attachment_info: list[dict] | None = None,
+                  guild: discord.Guild | None = None) -> list[dict]:
     """Send user text + context to LM Studio, return a list of actions to execute."""
     from datetime import date
 
@@ -692,6 +720,19 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     else:
         attachments_str = "No attachments on this message."
 
+    # Voice channel context
+    if guild:
+        vc_names = [vc.name for vc in guild.voice_channels]
+        voice_channels_str = "\n".join(f"- {n}" for n in vc_names) if vc_names else "(none)"
+        listener = voice_listeners.get(guild.id)
+        if listener and listener.vc.is_connected():
+            voice_status_str = f'Connected to "{listener.vc.channel.name}". Listening for wake word "Halbot".'
+        else:
+            voice_status_str = "Not connected to any voice channel."
+    else:
+        voice_channels_str = "(unknown)"
+        voice_status_str = "Not connected to any voice channel."
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT.format(
             sound_details=format_sound_details(sounds),
@@ -700,6 +741,8 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             persona_directives=persona_str,
             today=date.today().isoformat(),
             attachments=attachments_str,
+            voice_channels=voice_channels_str,
+            voice_status=voice_status_str,
         )},
         *channel_history,
         {"role": "user", "content": user_text},
@@ -765,11 +808,346 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         return [{"action": "unknown"}]
 
 
+# ---------------------------------------------------------------------------
+# Voice state
+# ---------------------------------------------------------------------------
+# Active voice listeners per guild (guild_id → VoiceListener)
+voice_listeners: dict[int, VoiceListener] = {} if VoiceListener else {}
+
+# Remembered voice sessions for reconnect after restart.
+# Maps guild_id → (voice_channel_id, text_channel_id).
+# Populated on clean shutdown, consumed on on_ready.
+_voice_reconnect: dict[int, tuple[int, int]] = {}
+
+# Lightweight LLM prompt for voice commands (pick a sound to play)
+VOICE_COMMAND_PROMPT = """\
+You are a Discord soundboard bot. A user in the voice channel said the wake word \
+"Halbot" followed by a command. Pick the best sound to play.
+
+SAVED LIBRARY:
+{saved_details}
+
+LIVE SOUNDBOARD:
+{sound_details}
+
+{persona_directives_block}
+
+Return JSON:
+- To play a sound: {{"action": "voice_play", "name": "<exact sound name>"}}
+- If no match or the request is unclear: {{"action": "unknown", "message": "<brief response>"}}
+
+Match creatively — "something scary" → pick a scary-sounding name, \
+"play airhorn" → exact match. Names must be EXACT from the lists above.
+
+Reply with ONLY the JSON. No explanation.\
+"""
+
+
+HUMORIZE_ERROR_PROMPT = """\
+You are Halbot — a snarky Discord soundboard bot with personality.
+Something has gone wrong.  Your job is to rephrase the dry technical
+error message below into a short, in-character reply for the user.
+
+Rules:
+- 1 to 2 sentences.  Never more.
+- Be funny, self-deprecating, sassy, or theatrical — whatever fits the
+  active persona directives.  Punch up, not down.
+- The user must still roughly understand what went wrong.  Don't invent
+  a reason that isn't in the raw error.
+- Plain text only — no markdown, no JSON, no code blocks, no emoji
+  (the caller adds one).
+- Do NOT quote the raw error verbatim; rewrite it.
+{persona_directives_block}
+"""
+
+
+def humorize_error(raw_error: str, *, context: str = "") -> str:
+    """Rephrase a dry error message in the bot's voice via LM Studio.
+
+    Falls back to the raw error on any failure so a broken LLM never
+    prevents the user from seeing *something*.
+    """
+    if not raw_error:
+        return raw_error
+    personas = persona_list()
+    if personas:
+        pd_block = "\nACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(
+            f"- {p['directive']}" for p in personas
+        )
+    else:
+        pd_block = ""
+    system = HUMORIZE_ERROR_PROMPT.format(persona_directives_block=pd_block)
+    user_msg = f"Raw error: {raw_error}"
+    if context:
+        user_msg += f"\nContext: {context}"
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.9,
+        "max_tokens": 400,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+    try:
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=15)
+        if resp.status_code >= 400:
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        resp.raise_for_status()
+        message = resp.json()["choices"][0].get("message", {})
+        content = (message.get("content") or "").strip()
+        # Handle <think>…</think> wrappers
+        if "<think>" in content and "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        # Fall back to reasoning_content tail if content got truncated
+        if not content:
+            reasoning = (message.get("reasoning_content") or "").strip()
+            if reasoning:
+                content = reasoning.splitlines()[-1].strip()
+        # Strip surrounding quotes the model sometimes adds
+        if len(content) >= 2 and content[0] == content[-1] in ('"', "'"):
+            content = content[1:-1].strip()
+        if not content:
+            log.warning("[humorize] empty content; returning raw error")
+            return raw_error
+        log.info("[humorize] %r → %r", raw_error[:80], content[:120])
+        return content
+    except Exception as e:
+        log.warning("[humorize] failed (%s); returning raw error", e)
+        return raw_error
+
+
+async def humorize_error_async(raw_error: str, *, context: str = "") -> str:
+    """Async wrapper around humorize_error that runs the blocking HTTP
+    call in a worker thread so it doesn't block the event loop."""
+    return await asyncio.to_thread(humorize_error, raw_error, context=context)
+
+
+WAKE_WORD_PROMPT = """\
+You are a wake-word classifier for a Discord bot named "Halbot".
+
+Given a speech transcription (produced by an imperfect STT engine), decide
+whether the speaker is addressing Halbot and, if so, extract the command.
+
+Speech-to-text often mis-hears "Halbot" as phonetically similar words.
+Treat ALL of these (and any similar mishearing) as a wake word:
+  Halbot, Hal Bot, Albot, Owlbot, Palbot, Walbot, Halbert, Hellboy,
+  Hellbot, Howlbot, Holbot, Hal-Bot, Hal Bought, How Bout, Al Bought, etc.
+
+The wake word is usually the first word of the utterance but may appear
+later ("play big yoshi, halbot"). The COMMAND is everything the speaker
+said to the bot MINUS the wake word itself, with leading punctuation
+stripped. If the utterance has no command after the wake word (just the
+name alone), return command = "".
+
+Reply with ONLY this JSON object, no prose, no markdown:
+  {"wake": <true|false>, "command": "<extracted command or empty string>"}
+
+Err on the side of wake=false when the utterance is clearly not directed
+at the bot (e.g. general conversation, no phonetic match). Do not invent
+a command that was not spoken.
+"""
+
+
+def check_wake_word(transcript: str) -> tuple[bool, str]:
+    """Classify a transcription as a wake-word call and extract the command.
+
+    Returns (wake_detected, command). On any failure (LLM down, malformed
+    response, timeout) returns (False, "") so the utterance is silently
+    ignored rather than false-triggering.
+    """
+    body = {
+        "messages": [
+            {"role": "system", "content": WAKE_WORD_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 128,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+    try:
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=15)
+        if resp.status_code >= 400:
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        resp.raise_for_status()
+        content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        parsed = json.loads(content)
+        wake = bool(parsed.get("wake", False))
+        command = str(parsed.get("command", "") or "").strip()
+        log.info("[wake-llm] transcript=%r → wake=%s command=%r", transcript, wake, command)
+        return wake, command
+    except Exception as e:
+        log.warning("[wake-llm] classifier failed (%s); ignoring utterance", e)
+        return False, ""
+
+
+def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]:
+    """Lightweight LLM call to pick a sound from a voice command transcript."""
+    personas = persona_list()
+    if personas:
+        persona_lines = [f"- {p['directive']}" for p in personas]
+        pd_block = "ACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(persona_lines)
+    else:
+        pd_block = ""
+
+    system = VOICE_COMMAND_PROMPT.format(
+        sound_details=format_sound_details(sounds),
+        saved_details=format_saved_details(saved),
+        persona_directives_block=pd_block,
+    )
+
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": transcript},
+        ],
+        "temperature": 0.1,
+        # Bumped from 256 — reasoning-capable models emit <think>…</think>
+        # tokens that eat into the budget before the JSON answer is produced.
+        "max_tokens": 1024,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+
+    content = ""
+    try:
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        if resp.status_code >= 400:
+            log.warning("Voice LLM %s: %s", resp.status_code, resp.text[:300])
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=60)
+        resp.raise_for_status()
+        raw_json = resp.json()
+        choice = raw_json["choices"][0]
+        message = choice.get("message", {})
+        finish_reason = choice.get("finish_reason", "unknown")
+        usage = raw_json.get("usage", {})
+        content = (message.get("content") or "").strip()
+        # Some reasoning models (DeepSeek-R1, gemma "thinking" variants) put
+        # their chain-of-thought in `reasoning_content` and the final answer
+        # in `content`.  Others leak the whole thing into `content` wrapped
+        # in <think>…</think>.  Handle both.
+        reasoning = (message.get("reasoning_content") or "").strip()
+        if "<think>" in content and "</think>" in content:
+            before, _, rest = content.partition("</think>")
+            content = rest.strip()
+            log.debug("[voice-llm] stripped <think> block (%d chars)", len(before))
+        if not content and reasoning:
+            # Fallback: some servers forget to populate `content` when
+            # reasoning_content is set and the model hit a token ceiling.
+            log.warning("[voice-llm] content empty, falling back to reasoning_content tail")
+            content = reasoning.splitlines()[-1].strip() if reasoning else ""
+        log.info("[voice-llm] finish_reason=%s usage=%s content=%r",
+                 finish_reason, usage, content[:200])
+        if not content:
+            log.error("[voice-llm] empty content (finish_reason=%s) — bump max_tokens or check model", finish_reason)
+            return [{"action": "unknown", "message": f"LLM returned no content (finish_reason={finish_reason})."}]
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return [parsed]
+        if isinstance(parsed, list):
+            return parsed
+        return [{"action": "unknown", "message": str(parsed)}]
+    except json.JSONDecodeError:
+        log.warning("Voice LLM returned non-JSON: %r", content[:200])
+        return [{"action": "unknown", "message": content or "(empty LLM response)"}]
+    except Exception as e:
+        log.error("Voice intent parse failed: %s", e)
+        return [{"action": "unknown", "message": "Couldn't process that voice command."}]
+
+
+async def handle_voice_command(guild, text_channel, user_id, transcript):
+    """Callback from VoiceListener when wake word + command detected."""
+    listener = voice_listeners.get(guild.id)
+    if not listener:
+        return
+
+    try:
+        sounds = list(await guild.fetch_soundboard_sounds())
+    except discord.HTTPException:
+        sounds = []
+    saved = db_list()
+    saved_map = {s["name"]: s for s in saved}
+    sound_map = {s.name: s for s in sounds}
+
+    actions = parse_voice_intent(transcript, sounds, saved)
+
+    for intent in actions:
+        action = intent.get("action")
+
+        if action == "voice_play":
+            name = intent.get("name", "")
+            # Try saved library first (has raw bytes)
+            row = db_get(name) if name else None
+            if row:
+                fmt = detect_audio_format(row["audio"])
+                await listener.play_sound(row["audio"], fmt)
+                member = guild.get_member(user_id)
+                who = member.display_name if member else f"user {user_id}"
+                await text_channel.send(f"\U0001f50a Playing **{name}** (requested by {who})")
+                return
+
+            # Try live soundboard
+            live = sound_map.get(name)
+            if live:
+                try:
+                    audio = await live.read()
+                    fmt = detect_audio_format(audio)
+                    await listener.play_sound(audio, fmt)
+                    member = guild.get_member(user_id)
+                    who = member.display_name if member else f"user {user_id}"
+                    await text_channel.send(f"\U0001f50a Playing **{name}** (requested by {who})")
+                except Exception:
+                    log.exception("Failed to read live sound %s for voice playback", name)
+                return
+
+            funny = await humorize_error_async(
+                f'Couldn\'t find a sound called "{name}".',
+                context="voice command: sound lookup miss",
+            )
+            await text_channel.send(f"\U0001f3a4 {funny}")
+
+        elif action == "unknown":
+            msg = intent.get("message", "I didn't understand that voice command.")
+            funny = await humorize_error_async(msg, context="voice command failure")
+            await text_channel.send(f"\U0001f3a4 {funny}")
+
+
 # The discord.Client is built lazily via build_client() so the tray app can
 # recreate a fresh client on each Start (a closed Client can't be reused).
 # Handlers below reference `client` at call time, so after build_client()
 # reassigns it, they operate on the current instance.
 client: "discord.Client | None" = None
+
+
+def snapshot_voice_state() -> None:
+    """Capture active voice sessions into _voice_reconnect before shutdown.
+
+    Must be called *before* client.close() — by the time the client disconnects,
+    on_voice_state_update has already cleared voice_listeners.
+    """
+    for gid, listener in list(voice_listeners.items()):
+        if listener.vc.is_connected():
+            _voice_reconnect[gid] = (listener.vc.channel.id, listener.text_channel.id)
+            log.info("[voice] Snapshotted session for guild %s: vc=%s tc=%s", gid, listener.vc.channel.id, listener.text_channel.id)
 
 
 def build_client() -> discord.Client:
@@ -778,10 +1156,13 @@ def build_client() -> discord.Client:
     intents = discord.Intents.default()
     intents.message_content = True
     intents.guilds = True
+    intents.voice_states = True  # needed for voice channel awareness
     client = discord.Client(intents=intents)
     client.event(on_ready)
     client.event(on_guild_emojis_update)
     client.event(on_message)
+    client.event(on_voice_state_update)
+    voice_listeners.clear()
     return client
 
 
@@ -790,9 +1171,45 @@ async def on_ready():
     for guild in client.guilds:
         await sync_emojis(guild)
 
+    # Reconnect to voice channels that were active before a restart.
+    if _voice_reconnect and VOICE_RECV_AVAILABLE:
+        for gid, (vc_id, tc_id) in list(_voice_reconnect.items()):
+            guild = client.get_guild(gid)
+            if not guild:
+                continue
+            vc_channel = guild.get_channel(vc_id)
+            tc_channel = guild.get_channel(tc_id)
+            if not vc_channel or not tc_channel:
+                log.warning("[voice] Reconnect skipped for guild %s — channel not found", gid)
+                continue
+            try:
+                log.info("[voice] Reconnecting to #%s in %s", vc_channel.name, guild.name)
+                vc = await vc_channel.connect(cls=HalbotVoiceRecvClient)
+                listener = VoiceListener(vc, tc_channel, handle_voice_command)
+                voice_listeners[gid] = listener
+                import threading
+                threading.Thread(target=load_whisper, daemon=True).start()
+                listener.start()
+                log.info("[voice] Reconnected to #%s", vc_channel.name)
+            except Exception:
+                log.exception("[voice] Failed to reconnect to #%s", vc_channel.name)
+        _voice_reconnect.clear()
+
 
 async def on_guild_emojis_update(guild, before, after):
     await sync_emojis(guild)
+
+
+async def on_voice_state_update(member, before, after):
+    """Clean up voice listener when the bot is disconnected from voice."""
+    if client is None or member != client.user:
+        return
+    if before.channel and not after.channel:
+        guild_id = before.channel.guild.id
+        listener = voice_listeners.pop(guild_id, None)
+        if listener:
+            listener.stop()
+            log.info("Voice listener removed (bot left %s)", before.channel.name)
 
 
 async def on_message(message: discord.Message):
@@ -883,7 +1300,7 @@ async def on_message(message: discord.Message):
     saved_map = {s["name"]: s for s in saved}
 
     # Ask LM Studio what to do
-    actions = parse_intent(user_text, sounds, saved, channel_history, attachment_info or None)
+    actions = parse_intent(user_text, sounds, saved, channel_history, attachment_info or None, guild=guild)
     replies = []
 
     def _reply(default: str, intent: dict = None) -> str:
@@ -897,7 +1314,9 @@ async def on_message(message: discord.Message):
         action = intent.get("action")
 
         if action == "error":
-            replies.append(intent.get("message", "Something went wrong."))
+            raw = intent.get("message", "Something went wrong.")
+            funny = await humorize_error_async(raw, context="bot-wide LLM error")
+            replies.append(funny)
             break
 
         elif action == "list":
@@ -1257,6 +1676,99 @@ async def on_message(message: discord.Message):
                     desc = f" — {e['description']}" if e.get("description") else ""
                     lines.append(f"- {fmt} **{e['name']}**{desc}")
                 replies.append(_reply(f"**Custom emojis ({len(matched)}):**\n" + "\n".join(lines), intent))
+
+        # -- Voice channel actions ------------------------------------------
+
+        elif action == "voice_join":
+            if not VOICE_RECV_AVAILABLE:
+                replies.append("Voice features are not available — install `discord-ext-voice-recv` and `faster-whisper`.")
+                continue
+
+            channel_name = intent.get("channel", "")
+            # Exact match first, then case-insensitive, then substring
+            vc_channel = discord.utils.get(guild.voice_channels, name=channel_name)
+            if not vc_channel:
+                vc_channel = discord.utils.find(
+                    lambda c: c.name.lower() == channel_name.lower(),
+                    guild.voice_channels,
+                )
+            if not vc_channel:
+                vc_channel = discord.utils.find(
+                    lambda c: channel_name.lower() in c.name.lower(),
+                    guild.voice_channels,
+                )
+            if not vc_channel:
+                vc_names = ", ".join(c.name for c in guild.voice_channels)
+                replies.append(f'Couldn\'t find voice channel "{channel_name}". Available: {vc_names}')
+                continue
+
+            # Disconnect from existing voice in this guild if any
+            existing = voice_listeners.pop(guild.id, None)
+            if existing:
+                existing.stop()
+                try:
+                    await existing.vc.disconnect()
+                except Exception:
+                    pass
+
+            try:
+                vc = await vc_channel.connect(cls=HalbotVoiceRecvClient)
+                listener = VoiceListener(vc, message.channel, handle_voice_command)
+                voice_listeners[guild.id] = listener
+
+                # Pre-load whisper model in background so first command is fast
+                import threading
+                threading.Thread(target=load_whisper, daemon=True).start()
+
+                listener.start()
+                replies.append(
+                    _reply(f'Joined **{vc_channel.name}**. Say "Halbot" followed by a command!', intent)
+                )
+            except Exception as e:
+                log.exception("Failed to join voice channel %s", vc_channel.name)
+                replies.append(f"Failed to join **{vc_channel.name}**: {e}")
+
+        elif action == "voice_leave":
+            listener = voice_listeners.pop(guild.id, None)
+            if listener:
+                listener.stop()
+                try:
+                    await listener.vc.disconnect()
+                except Exception:
+                    pass
+                replies.append(_reply("Left the voice channel.", intent))
+            else:
+                replies.append("I'm not in a voice channel.")
+
+        elif action == "voice_play":
+            listener = voice_listeners.get(guild.id)
+            if not listener or not listener.vc.is_connected():
+                replies.append("I need to be in a voice channel first. Ask me to join one!")
+                continue
+
+            name = intent.get("name", "")
+            # Try saved library
+            row = db_get(name) if name else None
+            if row:
+                fmt = detect_audio_format(row["audio"])
+                await listener.play_sound(row["audio"], fmt)
+                replies.append(_reply(f"\U0001f50a Playing **{name}** in voice.", intent))
+                continue
+
+            # Try live soundboard
+            live = sound_map.get(name)
+            if live:
+                try:
+                    audio = await live.read()
+                    fmt = detect_audio_format(audio)
+                    await listener.play_sound(audio, fmt)
+                    replies.append(_reply(f"\U0001f50a Playing **{name}** in voice.", intent))
+                except Exception:
+                    log.exception("Failed to read live sound %s for voice playback", name)
+                    replies.append(f"Failed to play **{name}**.")
+                continue
+
+            replies.append(f'Couldn\'t find a sound called "{name}".')
 
         else:
             replies.append(intent.get("message", "I didn't understand that."))

@@ -10,7 +10,11 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('bot.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('halbot_tray.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -m py_compile bot.py halbot_tray.py)",
-      "Bash(python -m py_compile halbot_tray.py)"
+      "Bash(python -m py_compile halbot_tray.py)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('bot.py'\\).read\\(\\)\\); print\\('bot.py: syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('voice.py'\\).read\\(\\)\\); print\\('voice.py: syntax OK'\\)\")"
     ]
   }
 }

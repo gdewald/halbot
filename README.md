@@ -57,9 +57,9 @@ The bot reads the last 50 messages in the channel and passes them to the LLM, so
 ## Setup
 
 1. Clone the repo
-2. Install dependencies:
+2. Install [uv](https://docs.astral.sh/uv/) and sync dependencies:
    ```
-   pip install -r requirements.txt
+   uv sync --all-extras
    ```
 3. Copy `.env.example` to `.env` and fill in your values:
    ```
@@ -70,7 +70,7 @@ The bot reads the last 50 messages in the channel and passes them to the LLM, so
 4. Start LM Studio and load a model
 5. Run the bot:
    ```
-   python bot.py
+   uv run bot.py
    ```
 
 ## Usage
@@ -93,6 +93,22 @@ You can also attach audio files (MP3, OGG, WAV) to your message to save them to 
 - Max file size: 512 KB
 - Max duration: 5.2 seconds
 - Formats: MP3, OGG, WAV
+
+## Windows Tray App
+
+Run Halbot as a background tray app (no console window):
+
+```
+.\start.bat
+```
+
+Right-click the tray icon for Start/Stop/Restart, log viewer, and quit.
+
+**Troubleshooting:** If the tray app reports "already running" but isn't visible, a previous `pythonw.exe` process is still lingering. Kill it and retry:
+
+```
+taskkill /f /im pythonw.exe
+```
 
 ## CLI Flags
 
