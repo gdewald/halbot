@@ -1,6 +1,6 @@
 [project]
 name = "halbot"
-version = "0.3.0"
+version = "0.4.0"
 description = "Discord soundboard management bot powered by a local LLM"
 readme = "README.md"
 requires-python = ">=3.12"

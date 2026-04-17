@@ -51,6 +51,13 @@ LLM_DISABLE_THINKING = _env_bool("LLM_DISABLE_THINKING", True)
 # the wake word was detected).
 VOICE_LLM_COMBINE_CALLS = _env_bool("VOICE_LLM_COMBINE_CALLS", True)
 
+# Auto-leave a voice channel after it has been empty (no non-bot members)
+# for this many seconds.  0 disables the timer.  Default: 30 minutes.
+try:
+    VOICE_IDLE_TIMEOUT_SECONDS = int(os.getenv("VOICE_IDLE_TIMEOUT_SECONDS", "1800"))
+except ValueError:
+    VOICE_IDLE_TIMEOUT_SECONDS = 1800
+
 
 def _apply_thinking_flag(body: dict) -> dict:
     """Stamp chat_template_kwargs.enable_thinking=False on a request body
@@ -1391,6 +1398,8 @@ async def on_ready():
                 import threading
                 threading.Thread(target=load_whisper, daemon=True).start()
                 listener.start()
+                if not _channel_has_humans(vc_channel):
+                    schedule_voice_idle_timer(gid)
                 log.info("[voice] Reconnected to #%s", vc_channel.name)
             except Exception:
                 log.exception("[voice] Failed to reconnect to #%s", vc_channel.name)
@@ -1410,17 +1419,98 @@ def _maybe_unload_whisper() -> None:
     threading.Thread(target=unload_whisper, daemon=True).start()
 
 
-async def on_voice_state_update(member, before, after):
-    """Clean up voice listener when the bot is disconnected from voice."""
-    if client is None or member != client.user:
+# Per-guild pending idle-disconnect tasks.  A task is scheduled when the
+# bot's voice channel goes empty of humans and cancelled if anyone comes
+# back before it fires.
+_voice_idle_tasks: dict[int, asyncio.Task] = {}
+
+
+def _channel_has_humans(channel) -> bool:
+    return channel is not None and any(not m.bot for m in channel.members)
+
+
+async def _voice_idle_disconnect(guild_id: int, delay: int) -> None:
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
         return
-    if before.channel and not after.channel:
+    listener = voice_listeners.get(guild_id)
+    if not listener:
+        return
+    # Final safety check in case everyone rejoined in the last instant and
+    # on_voice_state_update hasn't landed yet.
+    if _channel_has_humans(listener.vc.channel):
+        return
+    voice_listeners.pop(guild_id, None)
+    channel_name = listener.vc.channel.name if listener.vc.channel else "?"
+    text_channel = listener.text_channel
+    listener.stop()
+    try:
+        await listener.vc.disconnect()
+    except Exception:
+        pass
+    _maybe_unload_whisper()
+    log.info("[voice] Idle-disconnect from %s (guild %s) after %ds", channel_name, guild_id, delay)
+    try:
+        await text_channel.send(
+            f"\U0001f44b Left **{channel_name}** — empty for {delay // 60} min."
+        )
+    except Exception:
+        pass
+
+
+def cancel_voice_idle_timer(guild_id: int) -> None:
+    task = _voice_idle_tasks.pop(guild_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def schedule_voice_idle_timer(guild_id: int) -> None:
+    if VOICE_IDLE_TIMEOUT_SECONDS <= 0:
+        return
+    cancel_voice_idle_timer(guild_id)
+    log.info("[voice] Scheduling idle-disconnect for guild %s in %ds",
+             guild_id, VOICE_IDLE_TIMEOUT_SECONDS)
+    _voice_idle_tasks[guild_id] = asyncio.create_task(
+        _voice_idle_disconnect(guild_id, VOICE_IDLE_TIMEOUT_SECONDS)
+    )
+
+
+async def on_voice_state_update(member, before, after):
+    """React to voice state changes: clean up when the bot is kicked out,
+    and arm/disarm the idle-channel timer as humans come and go."""
+    if client is None:
+        return
+
+    # Bot itself was disconnected from voice
+    if member == client.user and before.channel and not after.channel:
         guild_id = before.channel.guild.id
+        cancel_voice_idle_timer(guild_id)
         listener = voice_listeners.pop(guild_id, None)
         if listener:
             listener.stop()
             log.info("Voice listener removed (bot left %s)", before.channel.name)
             _maybe_unload_whisper()
+        return
+
+    # A human came or went — only care if they touched the bot's channel.
+    if member.bot:
+        return
+    guild = (after.channel or before.channel).guild if (after.channel or before.channel) else None
+    if guild is None:
+        return
+    listener = voice_listeners.get(guild.id)
+    if not listener:
+        return
+    bot_channel = listener.vc.channel
+    if bot_channel is None:
+        return
+    entered = after.channel == bot_channel and before.channel != bot_channel
+    left = before.channel == bot_channel and after.channel != bot_channel
+    if entered:
+        cancel_voice_idle_timer(guild.id)
+    elif left and not _channel_has_humans(bot_channel):
+        schedule_voice_idle_timer(guild.id)
 
 
 async def on_message(message: discord.Message):
@@ -1914,6 +2004,7 @@ async def on_message(message: discord.Message):
                 continue
 
             # Disconnect from existing voice in this guild if any
+            cancel_voice_idle_timer(guild.id)
             existing = voice_listeners.pop(guild.id, None)
             if existing:
                 existing.stop()
@@ -1932,6 +2023,8 @@ async def on_message(message: discord.Message):
                 threading.Thread(target=load_whisper, daemon=True).start()
 
                 listener.start()
+                if not _channel_has_humans(vc_channel):
+                    schedule_voice_idle_timer(guild.id)
                 replies.append(
                     _reply(f'Joined **{vc_channel.name}**. Say "Halbot" followed by a command!', intent)
                 )
@@ -1940,6 +2033,7 @@ async def on_message(message: discord.Message):
                 replies.append(f"Failed to join **{vc_channel.name}**: {e}")
 
         elif action == "voice_leave":
+            cancel_voice_idle_timer(guild.id)
             listener = voice_listeners.pop(guild.id, None)
             if listener:
                 listener.stop()
