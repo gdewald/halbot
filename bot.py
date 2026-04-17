@@ -84,6 +84,14 @@ try:
 except ValueError:
     VOICE_IDLE_TIMEOUT_SECONDS = 1800
 
+# Per-guild rolling voice-history size (decision 3a: turn count).  A "turn"
+# is one (user transcript, bot response) pair.  Persisted in SQLite
+# (decision 2c) so history survives bot restarts.
+try:
+    VOICE_HISTORY_TURNS = max(0, int(os.getenv("VOICE_HISTORY_TURNS", "10")))
+except ValueError:
+    VOICE_HISTORY_TURNS = 10
+
 
 def _apply_thinking_flag(body: dict) -> dict:
     """Stamp chat_template_kwargs.enable_thinking=False on a request body
@@ -222,6 +230,18 @@ def db_init():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS voice_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
+                user_display_name TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                bot_response TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_history_guild_ts "
+                     "ON voice_history(guild_id, ts DESC)")
         # Migrate: add description_attempted column if missing
         cols = {row[1] for row in conn.execute("PRAGMA table_info(emojis)").fetchall()}
         if "description_attempted" not in cols:
@@ -351,6 +371,75 @@ def persona_remove(persona_id: int) -> bool:
 def persona_clear() -> int:
     with _db() as conn:
         cur = conn.execute("DELETE FROM personas")
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Voice history — rolling per-guild buffer of (transcript, bot response)
+# pairs, fed into the voice LLM so it can resolve "play it again" and
+# similar references.  See docs/plans/voice-text-decoupling.md decisions
+# 2c (persist to SQLite) and 3a (bound by turn count).
+# ---------------------------------------------------------------------------
+def voice_history_append(guild_id: int, user_display_name: str,
+                         transcript: str, bot_response: str) -> None:
+    """Record one completed voice turn.  Prunes rows beyond
+    ``VOICE_HISTORY_TURNS`` for this guild (oldest first)."""
+    if VOICE_HISTORY_TURNS <= 0:
+        return
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO voice_history (guild_id, ts, user_display_name, transcript, bot_response) "
+            "VALUES (?, strftime('%s','now'), ?, ?, ?)",
+            (guild_id, user_display_name, transcript, bot_response),
+        )
+        # Keep the newest N rows per guild.
+        conn.execute(
+            """
+            DELETE FROM voice_history
+            WHERE guild_id = ?
+              AND id NOT IN (
+                  SELECT id FROM voice_history
+                  WHERE guild_id = ?
+                  ORDER BY ts DESC, id DESC
+                  LIMIT ?
+              )
+            """,
+            (guild_id, guild_id, VOICE_HISTORY_TURNS),
+        )
+
+
+def voice_history_load(guild_id: int, limit: int | None = None) -> list[dict]:
+    """Return the guild's voice history oldest→newest, capped at *limit*."""
+    if limit is None:
+        limit = VOICE_HISTORY_TURNS
+    if limit <= 0:
+        return []
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT user_display_name, transcript, bot_response "
+            "FROM voice_history WHERE guild_id = ? "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (guild_id, limit),
+        ).fetchall()
+    turns = [
+        {
+            "user_display_name": r["user_display_name"],
+            "transcript": r["transcript"],
+            "bot_response": r["bot_response"],
+        }
+        for r in rows
+    ]
+    turns.reverse()  # oldest first
+    return turns
+
+
+def voice_history_clear(guild_id: int | None = None) -> int:
+    """Drop history for one guild, or all guilds if *guild_id* is None."""
+    with _db() as conn:
+        if guild_id is None:
+            cur = conn.execute("DELETE FROM voice_history")
+        else:
+            cur = conn.execute("DELETE FROM voice_history WHERE guild_id = ?", (guild_id,))
         return cur.rowcount
 
 
@@ -1099,8 +1188,26 @@ Match creatively — "something scary" → pick a scary-sounding name,
 """
 
 
+def _voice_history_messages(history: list[dict] | None) -> list[dict]:
+    """Turn a voice_history list into OpenAI-chat message dicts.
+
+    Each stored turn becomes one ``user`` + one ``assistant`` message so the
+    LLM can resolve references like "play it again" without seeing raw DB
+    rows.  Returns [] for None / empty to keep the call sites tidy.
+    """
+    if not history:
+        return []
+    msgs: list[dict] = []
+    for turn in history:
+        user_text = f"{turn['user_display_name']}: {turn['transcript']}"
+        msgs.append({"role": "user", "content": user_text})
+        msgs.append({"role": "assistant", "content": turn["bot_response"]})
+    return msgs
+
+
 def parse_voice_combined(
-    transcript: str, sounds, saved: list[dict]
+    transcript: str, sounds, saved: list[dict],
+    history: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Single-call wake detection + intent parsing.
 
@@ -1126,6 +1233,7 @@ def parse_voice_combined(
     body = {
         "messages": [
             {"role": "system", "content": system},
+            *_voice_history_messages(history),
             {"role": "user", "content": transcript},
         ],
         "temperature": 0.1,
@@ -1186,7 +1294,8 @@ def parse_voice_combined(
         return "error", []
 
 
-def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]:
+def parse_voice_intent(transcript: str, sounds, saved: list[dict],
+                       history: list[dict] | None = None) -> list[dict]:
     """Lightweight LLM call to pick a sound from a voice command transcript."""
     personas = persona_list()
     if personas:
@@ -1204,6 +1313,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]
     body = {
         "messages": [
             {"role": "system", "content": system},
+            *_voice_history_messages(history),
             {"role": "user", "content": transcript},
         ],
         "temperature": 0.1,
@@ -1273,6 +1383,15 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]
         return [{"action": "unknown", "message": "Couldn't process that voice command."}]
 
 
+async def _voice_feedback(session, sink, text: str) -> None:
+    """Deliver voice-session feedback per decision 4b: speak if TTS is on,
+    else fall back to the sink.  Always logged regardless."""
+    log.info("[voice-feedback] %s", text)
+    if await _speak(session, text):
+        return
+    await sink.send(text)
+
+
 async def handle_voice_command(guild, user_id, transcript):
     """Callback from VoiceListener with a raw STT transcript.
 
@@ -1287,6 +1406,7 @@ async def handle_voice_command(guild, user_id, transcript):
     if not session:
         return
     sink = session.message_sink
+    history = list(session.history)  # snapshot for this turn
 
     if VOICE_LLM_COMBINE_CALLS:
         try:
@@ -1295,14 +1415,14 @@ async def handle_voice_command(guild, user_id, transcript):
             sounds = []
         saved = db_list()
         status, actions = await asyncio.to_thread(
-            parse_voice_combined, transcript, sounds, saved
+            parse_voice_combined, transcript, sounds, saved, history
         )
         if status == "no_wake":
             log.info("[voice] no wake word in: %r", transcript)
             return
         if status == "error":
             log.warning("[voice] combined LLM call errored on: %r", transcript)
-            await sink.send("\U0001f3a4 Voice command processing failed.")
+            await _voice_feedback(session, sink, "Voice command processing failed.")
             return
         if not actions:
             # Wake heard but LLM didn't pick anything actionable.  Ack so
@@ -1324,11 +1444,31 @@ async def handle_voice_command(guild, user_id, transcript):
             sounds = []
         saved = db_list()
         actions = await asyncio.to_thread(
-            parse_voice_intent, command, sounds, saved
+            parse_voice_intent, command, sounds, saved, history
         )
 
     saved_map = {s["name"]: s for s in saved}
     sound_map = {s.name: s for s in sounds}
+    member = guild.get_member(user_id)
+    user_name = member.display_name if member else f"user {user_id}"
+
+    def _record(bot_response: str) -> None:
+        """Append this turn to the session buffer + persist."""
+        if VOICE_HISTORY_TURNS <= 0:
+            return
+        turn = {
+            "user_display_name": user_name,
+            "transcript": transcript,
+            "bot_response": bot_response,
+        }
+        session.history.append(turn)
+        # Keep the in-memory list bounded to match the DB prune.
+        while len(session.history) > VOICE_HISTORY_TURNS:
+            session.history.pop(0)
+        try:
+            voice_history_append(guild.id, user_name, transcript, bot_response)
+        except Exception:
+            log.exception("[voice-history] persist failed")
 
     for intent in actions:
         action = intent.get("action")
@@ -1341,6 +1481,7 @@ async def handle_voice_command(guild, user_id, transcript):
             if row:
                 fmt = detect_audio_format(row["audio"])
                 await session.play_sound(row["audio"], fmt)
+                _record(f"(played sound: {name})")
                 return
 
             # Try live soundboard
@@ -1350,22 +1491,24 @@ async def handle_voice_command(guild, user_id, transcript):
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
                     await session.play_sound(audio, fmt)
+                    _record(f"(played sound: {name})")
                 except Exception:
                     log.exception("Failed to read live sound %s for voice playback", name)
+                    _record(f"(failed to play: {name})")
                 return
 
             customized = await customize_response_async(
                 f'Couldn\'t find a sound called "{name}".',
                 context="voice command: sound lookup miss",
             )
-            if not await _speak(session, customized):
-                await sink.send(f"\U0001f3a4 {customized}")
+            await _voice_feedback(session, sink, customized)
+            _record(customized)
 
         elif action == "unknown":
             msg = intent.get("message", "I didn't understand that voice command.")
             customized = await customize_response_async(msg, context="voice command failure")
-            if not await _speak(session, customized):
-                await sink.send(f"\U0001f3a4 {customized}")
+            await _voice_feedback(session, sink, customized)
+            _record(customized)
 
 
 # The discord.Client is built lazily via build_client() so the tray app can
@@ -1467,6 +1610,7 @@ async def on_ready():
                 session = VoiceSession(
                     listener=listener,
                     message_sink=_spec_to_sink(sink_spec, guild, vc_channel),
+                    history=voice_history_load(gid),
                 )
                 voice_listeners[gid] = session
                 import threading
@@ -2196,6 +2340,7 @@ async def on_message(message: discord.Message):
                 session = VoiceSession(
                     listener=listener,
                     message_sink=VoiceChatSink(vc_channel),
+                    history=voice_history_load(guild.id),
                 )
                 voice_listeners[guild.id] = session
 
