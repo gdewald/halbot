@@ -16,9 +16,23 @@ from tinytag import TinyTag
 
 # Voice module — optional, only needed when voice features are used
 try:
-    from voice import VoiceListener, HalbotVoiceRecvClient, VOICE_RECV_AVAILABLE, load_whisper, unload_whisper
+    from voice import (
+        VoiceListener,
+        VoiceSession,
+        TextChannelSink,
+        VoiceChatSink,
+        LogOnlySink,
+        HalbotVoiceRecvClient,
+        VOICE_RECV_AVAILABLE,
+        load_whisper,
+        unload_whisper,
+    )
 except ImportError:
     VoiceListener = None
+    VoiceSession = None
+    TextChannelSink = None
+    VoiceChatSink = None
+    LogOnlySink = None
     HalbotVoiceRecvClient = None
     VOICE_RECV_AVAILABLE = False
     load_whisper = None
@@ -775,9 +789,9 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     if guild:
         vc_names = [vc.name for vc in guild.voice_channels]
         voice_channels_str = "\n".join(f"- {n}" for n in vc_names) if vc_names else "(none)"
-        listener = voice_listeners.get(guild.id)
-        if listener and listener.vc.is_connected():
-            voice_status_str = f'Connected to "{listener.vc.channel.name}". Listening for wake word "Halbot".'
+        session = voice_listeners.get(guild.id)
+        if session and session.vc.is_connected():
+            voice_status_str = f'Connected to "{session.vc.channel.name}". Listening for wake word "Halbot".'
         else:
             voice_status_str = "Not connected to any voice channel."
     else:
@@ -864,7 +878,9 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
 # Voice state
 # ---------------------------------------------------------------------------
 # Active voice listeners per guild (guild_id → VoiceListener)
-voice_listeners: dict[int, VoiceListener] = {} if VoiceListener else {}
+# Active voice sessions, one per guild.  Value is a VoiceSession, not a raw
+# VoiceListener — the session owns the sink, history, and listener together.
+voice_listeners: dict[int, "VoiceSession"] = {} if VoiceSession else {}
 
 # Remembered voice sessions for reconnect after restart.
 # Maps guild_id → (voice_channel_id, text_channel_id).
@@ -1257,16 +1273,20 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]
         return [{"action": "unknown", "message": "Couldn't process that voice command."}]
 
 
-async def handle_voice_command(guild, text_channel, user_id, transcript):
+async def handle_voice_command(guild, user_id, transcript):
     """Callback from VoiceListener with a raw STT transcript.
 
     Owns wake-word detection: depending on VOICE_LLM_COMBINE_CALLS this is
     either a single combined call (wake + intent together) or two sequential
     calls (wake classifier first, intent parser only on wake).
+
+    Feedback is routed through the session's :class:`MessageSink` — the
+    listener no longer knows which text channel triggered the join.
     """
-    listener = voice_listeners.get(guild.id)
-    if not listener:
+    session = voice_listeners.get(guild.id)
+    if not session:
         return
+    sink = session.message_sink
 
     if VOICE_LLM_COMBINE_CALLS:
         try:
@@ -1282,7 +1302,7 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
             return
         if status == "error":
             log.warning("[voice] combined LLM call errored on: %r", transcript)
-            await text_channel.send("\U0001f3a4 Voice command processing failed.")
+            await sink.send("\U0001f3a4 Voice command processing failed.")
             return
         if not actions:
             # Wake heard but LLM didn't pick anything actionable.  Ack so
@@ -1320,7 +1340,7 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
             row = db_get(name) if name else None
             if row:
                 fmt = detect_audio_format(row["audio"])
-                await listener.play_sound(row["audio"], fmt)
+                await session.play_sound(row["audio"], fmt)
                 return
 
             # Try live soundboard
@@ -1329,7 +1349,7 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
                 try:
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
-                    await listener.play_sound(audio, fmt)
+                    await session.play_sound(audio, fmt)
                 except Exception:
                     log.exception("Failed to read live sound %s for voice playback", name)
                 return
@@ -1338,14 +1358,14 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
                 f'Couldn\'t find a sound called "{name}".',
                 context="voice command: sound lookup miss",
             )
-            if not await _speak(listener, customized):
-                await text_channel.send(f"\U0001f3a4 {customized}")
+            if not await _speak(session, customized):
+                await sink.send(f"\U0001f3a4 {customized}")
 
         elif action == "unknown":
             msg = intent.get("message", "I didn't understand that voice command.")
             customized = await customize_response_async(msg, context="voice command failure")
-            if not await _speak(listener, customized):
-                await text_channel.send(f"\U0001f3a4 {customized}")
+            if not await _speak(session, customized):
+                await sink.send(f"\U0001f3a4 {customized}")
 
 
 # The discord.Client is built lazily via build_client() so the tray app can
@@ -1361,10 +1381,23 @@ def snapshot_voice_state() -> None:
     Must be called *before* client.close() — by the time the client disconnects,
     on_voice_state_update has already cleared voice_listeners.
     """
-    for gid, listener in list(voice_listeners.items()):
-        if listener.vc.is_connected():
-            _voice_reconnect[gid] = (listener.vc.channel.id, listener.text_channel.id)
-            log.info("[voice] Snapshotted session for guild %s: vc=%s tc=%s", gid, listener.vc.channel.id, listener.text_channel.id)
+    for gid, session in list(voice_listeners.items()):
+        if not session.vc.is_connected():
+            continue
+        # Step 1 only produces TextChannelSink at join time, so we can recover
+        # the text-channel id from the sink for reconnect.  Step 4 of the
+        # plan generalizes this into a sink_spec that supports all sink kinds.
+        sink = session.message_sink
+        if isinstance(sink, TextChannelSink):
+            tc_id = getattr(sink.channel, "id", None)
+        else:
+            tc_id = None
+        if tc_id is None:
+            log.warning("[voice] Skipping snapshot for guild %s: sink has no text channel id", gid)
+            continue
+        _voice_reconnect[gid] = (session.vc.channel.id, tc_id)
+        log.info("[voice] Snapshotted session for guild %s: vc=%s tc=%s",
+                 gid, session.vc.channel.id, tc_id)
 
 
 def build_client() -> discord.Client:
@@ -1402,8 +1435,12 @@ async def on_ready():
             try:
                 log.info("[voice] Reconnecting to #%s in %s", vc_channel.name, guild.name)
                 vc = await vc_channel.connect(cls=HalbotVoiceRecvClient)
-                listener = VoiceListener(vc, tc_channel, handle_voice_command)
-                voice_listeners[gid] = listener
+                listener = VoiceListener(vc, handle_voice_command)
+                session = VoiceSession(
+                    listener=listener,
+                    message_sink=TextChannelSink(tc_channel),
+                )
+                voice_listeners[gid] = session
                 import threading
                 threading.Thread(target=load_whisper, daemon=True).start()
                 listener.start()
@@ -1456,11 +1493,14 @@ def _sanitize_for_speech(text: str) -> str:
     return text.strip()
 
 
-async def _speak(listener, text: str) -> bool:
-    """Synthesize *text* and play it in the listener's voice channel.
+async def _speak(session, text: str) -> bool:
+    """Synthesize *text* and play it in the session's voice channel.
 
-    Returns True if playback started successfully, False if the engine is
-    unavailable or synthesis failed (caller should fall back to text).
+    Accepts either a :class:`VoiceSession` or anything that exposes
+    ``play_sound(bytes, fmt)`` (duck-typed for the TTS fallback in
+    ``handle_voice_command``).  Returns True if playback started
+    successfully, False if the engine is unavailable or synthesis failed
+    (caller should fall back to text/sink).
     """
     if _get_tts_engine is None:
         return False
@@ -1476,7 +1516,7 @@ async def _speak(listener, text: str) -> bool:
         log.exception("[tts] Synthesis failed; falling back to text")
         return False
     try:
-        await listener.play_sound(audio, fmt)
+        await session.play_sound(audio, fmt)
     except Exception:
         log.exception("[tts] Playback failed; falling back to text")
         return False
@@ -1492,9 +1532,9 @@ async def _deliver(message: "discord.Message", full_text: str) -> None:
     if not full_text:
         return
     guild = message.guild
-    listener = voice_listeners.get(guild.id) if guild else None
-    if listener and listener.vc.is_connected():
-        if await _speak(listener, full_text):
+    session = voice_listeners.get(guild.id) if guild else None
+    if session and session.vc.is_connected():
+        if await _speak(session, full_text):
             return
 
     chunks = []
@@ -1529,29 +1569,26 @@ async def _voice_idle_disconnect(guild_id: int, delay: int) -> None:
         await asyncio.sleep(delay)
     except asyncio.CancelledError:
         return
-    listener = voice_listeners.get(guild_id)
-    if not listener:
+    session = voice_listeners.get(guild_id)
+    if not session:
         return
     # Final safety check in case everyone rejoined in the last instant and
     # on_voice_state_update hasn't landed yet.
-    if _channel_has_humans(listener.vc.channel):
+    if _channel_has_humans(session.vc.channel):
         return
     voice_listeners.pop(guild_id, None)
-    channel_name = listener.vc.channel.name if listener.vc.channel else "?"
-    text_channel = listener.text_channel
-    listener.stop()
+    channel_name = session.vc.channel.name if session.vc.channel else "?"
+    sink = session.message_sink
+    session.stop()
     try:
-        await listener.vc.disconnect()
+        await session.vc.disconnect()
     except Exception:
         pass
     _maybe_unload_whisper()
     log.info("[voice] Idle-disconnect from %s (guild %s) after %ds", channel_name, guild_id, delay)
-    try:
-        await text_channel.send(
-            f"\U0001f44b Left **{channel_name}** — empty for {delay // 60} min."
-        )
-    except Exception:
-        pass
+    await sink.send(
+        f"\U0001f44b Left **{channel_name}** — empty for {delay // 60} min."
+    )
 
 
 def cancel_voice_idle_timer(guild_id: int) -> None:
@@ -1581,9 +1618,9 @@ async def on_voice_state_update(member, before, after):
     if member == client.user and before.channel and not after.channel:
         guild_id = before.channel.guild.id
         cancel_voice_idle_timer(guild_id)
-        listener = voice_listeners.pop(guild_id, None)
-        if listener:
-            listener.stop()
+        session = voice_listeners.pop(guild_id, None)
+        if session:
+            session.stop()
             log.info("Voice listener removed (bot left %s)", before.channel.name)
             _maybe_unload_whisper()
         return
@@ -1594,10 +1631,10 @@ async def on_voice_state_update(member, before, after):
     guild = (after.channel or before.channel).guild if (after.channel or before.channel) else None
     if guild is None:
         return
-    listener = voice_listeners.get(guild.id)
-    if not listener:
+    session = voice_listeners.get(guild.id)
+    if not session:
         return
-    bot_channel = listener.vc.channel
+    bot_channel = session.vc.channel
     if bot_channel is None:
         return
     entered = after.channel == bot_channel and before.channel != bot_channel
@@ -2124,8 +2161,15 @@ async def on_message(message: discord.Message):
 
             try:
                 vc = await vc_channel.connect(cls=HalbotVoiceRecvClient)
-                listener = VoiceListener(vc, message.channel, handle_voice_command)
-                voice_listeners[guild.id] = listener
+                listener = VoiceListener(vc, handle_voice_command)
+                # Step 1 keeps the pre-refactor sink (the text channel the user
+                # mentioned the bot from).  Step 2 switches the default to
+                # VoiceChatSink(vc_channel).
+                session = VoiceSession(
+                    listener=listener,
+                    message_sink=TextChannelSink(message.channel),
+                )
+                voice_listeners[guild.id] = session
 
                 # Pre-load whisper + TTS models in background so the first
                 # command and the first spoken reply don't eat cold-start.
@@ -2146,11 +2190,11 @@ async def on_message(message: discord.Message):
 
         elif action == "voice_leave":
             cancel_voice_idle_timer(guild.id)
-            listener = voice_listeners.pop(guild.id, None)
-            if listener:
-                listener.stop()
+            session = voice_listeners.pop(guild.id, None)
+            if session:
+                session.stop()
                 try:
-                    await listener.vc.disconnect()
+                    await session.vc.disconnect()
                 except Exception:
                     pass
                 _maybe_unload_whisper()
@@ -2159,8 +2203,8 @@ async def on_message(message: discord.Message):
                 replies.append("I'm not in a voice channel.")
 
         elif action == "voice_play":
-            listener = voice_listeners.get(guild.id)
-            if not listener or not listener.vc.is_connected():
+            session = voice_listeners.get(guild.id)
+            if not session or not session.vc.is_connected():
                 replies.append("I need to be in a voice channel first. Ask me to join one!")
                 continue
 
@@ -2169,7 +2213,7 @@ async def on_message(message: discord.Message):
             row = db_get(name) if name else None
             if row:
                 fmt = detect_audio_format(row["audio"])
-                await listener.play_sound(row["audio"], fmt)
+                await session.play_sound(row["audio"], fmt)
                 # Silent success — playing the sound is the response.
                 llm_msg = (intent or {}).get("message")
                 if llm_msg:
@@ -2182,7 +2226,7 @@ async def on_message(message: discord.Message):
                 try:
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
-                    await listener.play_sound(audio, fmt)
+                    await session.play_sound(audio, fmt)
                     llm_msg = (intent or {}).get("message")
                     if llm_msg:
                         replies.append(llm_msg)
