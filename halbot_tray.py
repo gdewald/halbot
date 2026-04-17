@@ -61,8 +61,8 @@ _mutex_handle = None  # held for the lifetime of the process
 
 def acquire_single_instance() -> bool:
     """Acquire a process-wide Windows named mutex. Returns True if this is the
-    only running instance, False if another tray app is already up. The handle
-    is stashed in a module-level variable so the OS auto-releases it on exit.
+    only running instance, False if another tray app is already up. Call
+    release_single_instance() on shutdown to free it immediately.
     """
     global _mutex_handle
     ERROR_ALREADY_EXISTS = 183
@@ -82,6 +82,15 @@ def acquire_single_instance() -> bool:
         return False
     _mutex_handle = handle
     return True
+
+
+def release_single_instance() -> None:
+    """Explicitly release the single-instance mutex so a new launch succeeds
+    immediately, even if the process takes a moment to fully exit."""
+    global _mutex_handle
+    if _mutex_handle is not None:
+        ctypes.WinDLL("kernel32").CloseHandle(_mutex_handle)
+        _mutex_handle = None
 
 
 def _show_already_running_dialog() -> None:
@@ -137,6 +146,8 @@ class BotRunner:
         bot.build_client()
         try:
             loop.run_until_complete(bot.client.start(bot.DISCORD_TOKEN))
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            pass  # clean shutdown via _close_and_cancel()
         except Exception:
             log.exception("Bot worker crashed")
         finally:
@@ -147,32 +158,53 @@ class BotRunner:
             loop.close()
             self._on_state_change(False)
 
-    def stop(self, timeout: float = 20.0) -> None:
+    def stop(self, timeout: float = 10.0) -> None:
         with self._lock:
             thread = self._thread
             loop = self._loop
             client = bot.client
         if thread is None or not thread.is_alive():
+            with self._lock:
+                self._thread = None
+                self._loop = None
             return
-        # If the loop is already closed/not running (e.g. the worker crashed),
-        # just wait for the thread to wind down.
+
         if loop is not None and loop.is_running() and client is not None:
-            fut = asyncio.run_coroutine_threadsafe(client.close(), loop)
+            async def _close_and_cancel():
+                # Snapshot voice state here (on the event loop thread) so we
+                # beat on_voice_state_update which fires during client.close().
+                bot.snapshot_voice_state()
+                # Give discord.py up to 5s to close gracefully, then move on.
+                try:
+                    await asyncio.wait_for(client.close(), timeout=5.0)
+                except Exception:
+                    pass
+                # Cancel every remaining task so run_until_complete() returns.
+                tasks = [t for t in asyncio.all_tasks()
+                         if not t.done() and t is not asyncio.current_task()]
+                for t in tasks:
+                    t.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            fut = asyncio.run_coroutine_threadsafe(_close_and_cancel(), loop)
             try:
                 fut.result(timeout=timeout)
             except TimeoutError:
-                log.warning("Discord client.close() timed out after %ss — forcing loop stop", timeout)
-                fut.cancel()
+                log.warning("Shutdown coroutine timed out after %ss — forcing loop stop", timeout)
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except RuntimeError:
+                    pass
             except Exception:
-                log.exception("Error closing Discord client")
-        # Fallback: force the loop to stop so the worker thread can exit. This
-        # handles stubborn aiohttp SSL shutdowns on Windows that occasionally
-        # leave close() hanging.
-        if thread.is_alive() and loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=timeout)
+                log.exception("Error during bot shutdown")
+
+        thread.join(timeout=5.0)
         if thread.is_alive():
-            log.warning("Bot worker thread did not exit within %ss", timeout)
+            log.warning("Worker thread did not exit — abandoning (daemon, will die with process)")
+        with self._lock:
+            self._thread = None
+            self._loop = None
 
 
 # ---------------------------------------------------------------------------
@@ -199,11 +231,27 @@ class LogWindow:
 
     POLL_MS = 200
 
-    def __init__(self, root: tk.Tk, record_queue: queue.Queue):
+    def __init__(
+        self,
+        root: tk.Tk,
+        record_queue: queue.Queue,
+        runner=None,
+        on_start=None,
+        on_stop=None,
+        on_restart=None,
+        is_busy=None,
+    ):
         self._root = root
         self._queue = record_queue
+        self._runner = runner
+        self._on_start = on_start
+        self._on_stop = on_stop
+        self._on_restart = on_restart
+        self._is_busy = is_busy or (lambda: False)
         self._win: tk.Toplevel | None = None
         self._text: scrolledtext.ScrolledText | None = None
+        self._btn_startstop: tk.Button | None = None
+        self._btn_restart: tk.Button | None = None
         self._autoscroll = True
         self._formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
@@ -232,6 +280,28 @@ class LogWindow:
         tk.Button(toolbar, text="Open file", command=open_log_file).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="Open folder", command=open_log_folder).pack(side=tk.LEFT, padx=4)
 
+        # Log level picker
+        tk.Label(toolbar, text="Level:").pack(side=tk.LEFT, padx=(12, 2))
+        current = logging.getLevelName(logging.getLogger().level)
+        self._level_var = tk.StringVar(value=current)
+        level_menu = tk.OptionMenu(
+            toolbar, self._level_var,
+            "DEBUG", "INFO", "WARNING", "ERROR",
+            command=self._on_level_change,
+        )
+        level_menu.pack(side=tk.LEFT, padx=2)
+
+        # Bot controls (right side of toolbar)
+        if self._runner is not None:
+            self._btn_restart = tk.Button(
+                toolbar, text="Restart", width=8, command=self._on_restart_click,
+            )
+            self._btn_restart.pack(side=tk.RIGHT, padx=4, pady=4)
+            self._btn_startstop = tk.Button(
+                toolbar, text="Start", width=8, command=self._on_startstop_click,
+            )
+            self._btn_startstop.pack(side=tk.RIGHT, padx=4, pady=4)
+
         self._text = scrolledtext.ScrolledText(
             self._win, wrap=tk.NONE, font=("Consolas", 9), state=tk.DISABLED,
         )
@@ -239,6 +309,7 @@ class LogWindow:
 
         # Seed with the tail of the log file so the window isn't empty on open.
         self._seed_from_file()
+        self._refresh_buttons()
 
     def _seed_from_file(self) -> None:
         if not LOG_FILE.exists() or self._text is None:
@@ -269,7 +340,36 @@ class LogWindow:
                 pulled += 1
         except queue.Empty:
             pass
+        self._refresh_buttons()
         self._root.after(self.POLL_MS, self._drain)
+
+    def _on_startstop_click(self) -> None:
+        if self._runner is None:
+            return
+        if self._runner.is_running:
+            if self._on_stop:
+                self._on_stop()
+        else:
+            if self._on_start:
+                self._on_start()
+
+    def _on_restart_click(self) -> None:
+        if self._on_restart:
+            self._on_restart()
+
+    def _refresh_buttons(self) -> None:
+        if self._btn_startstop is None or self._runner is None:
+            return
+        busy = self._is_busy()
+        running = self._runner.is_running
+        self._btn_startstop.config(
+            text="Stop" if running else "Start",
+            state=tk.DISABLED if busy else tk.NORMAL,
+        )
+        if self._btn_restart is not None:
+            self._btn_restart.config(
+                state=tk.NORMAL if (running and not busy) else tk.DISABLED,
+            )
 
     def _append(self, text: str) -> None:
         if not text or self._text is None:
@@ -293,6 +393,11 @@ class LogWindow:
 
     def _on_autoscroll_toggle(self) -> None:
         self._autoscroll = bool(self._autoscroll_var.get())
+
+    def _on_level_change(self, level_name: str) -> None:
+        level = getattr(logging, level_name, logging.INFO)
+        logging.getLogger().setLevel(level)
+        log.info("Log level changed to %s", level_name)
 
     def _on_close(self) -> None:
         if self._win is not None:
@@ -375,9 +480,9 @@ def run_app() -> None:
     root = tk.Tk()
     root.withdraw()
 
-    log_window = LogWindow(root, record_queue)
     runner = BotRunner()
     icon_holder: dict = {}
+    busy_event = threading.Event()  # set while any start/stop/restart is in flight
 
     def refresh_icon(running: bool) -> None:
         icon = icon_holder.get("icon")
@@ -391,12 +496,38 @@ def run_app() -> None:
 
     runner._on_state_change = lambda running: root.after(0, refresh_icon, running)
 
-    def do_start(icon, item):
-        root.after(0, runner.start)
+    def _schedule(fn, name="halbot-op"):
+        """Run fn on a background thread, holding busy_event for its duration."""
+        def _wrapped():
+            busy_event.set()
+            try:
+                fn()
+            except Exception:
+                log.exception("Bot operation failed")
+            finally:
+                busy_event.clear()
+        threading.Thread(target=_wrapped, name=name, daemon=True).start()
 
-    def do_stop(icon, item):
-        # Stop can block up to 10s — run off the Tk thread.
-        threading.Thread(target=runner.stop, daemon=True).start()
+    def do_start(icon=None, item=None):
+        _schedule(runner.start, name="halbot-start")
+
+    def do_stop(icon=None, item=None):
+        _schedule(runner.stop, name="halbot-stop")
+
+    def do_restart(icon=None, item=None):
+        def _restart():
+            runner.stop()
+            runner.start()
+        _schedule(_restart, name="halbot-restart")
+
+    log_window = LogWindow(
+        root, record_queue,
+        runner=runner,
+        on_start=do_start,
+        on_stop=do_stop,
+        on_restart=do_restart,
+        is_busy=busy_event.is_set,
+    )
 
     def do_show_logs(icon, item):
         root.after(0, log_window.show)
@@ -407,6 +538,7 @@ def run_app() -> None:
     def do_quit(icon, item):
         def _teardown():
             runner.stop()
+            release_single_instance()
             try:
                 icon.stop()
             except Exception:
@@ -419,7 +551,14 @@ def run_app() -> None:
             lambda item: "Stop bot" if runner.is_running else "Start bot",
             lambda icon, item: do_stop(icon, item) if runner.is_running else do_start(icon, item),
             default=True,
+            enabled=lambda item: not busy_event.is_set(),
         ),
+        pystray.MenuItem(
+            "Restart bot", do_restart,
+            visible=lambda item: runner.is_running,
+            enabled=lambda item: not busy_event.is_set(),
+        ),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem("Open log window", do_show_logs),
         pystray.MenuItem("Open log file", do_open_log),
         pystray.Menu.SEPARATOR,
@@ -436,6 +575,7 @@ def run_app() -> None:
     try:
         root.mainloop()
     finally:
+        release_single_instance()
         try:
             icon.stop()
         except Exception:
