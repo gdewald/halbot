@@ -843,32 +843,34 @@ Reply with ONLY the JSON. No explanation.\
 """
 
 
-HUMORIZE_ERROR_PROMPT = """\
-You are Halbot — a snarky Discord soundboard bot with personality.
-Something has gone wrong.  Your job is to rephrase the dry technical
-error message below into a short, in-character reply for the user.
+RESPONSE_CUSTOMIZATION_PROMPT = """\
+You are Halbot.  Rewrite the plain text message below so it sounds like
+something you would say to the user in Discord, shaped by the active
+persona directives.
 
 Rules:
 - 1 to 2 sentences.  Never more.
-- Be funny, self-deprecating, sassy, or theatrical — whatever fits the
-  active persona directives.  Punch up, not down.
-- The user must still roughly understand what went wrong.  Don't invent
-  a reason that isn't in the raw error.
+- Preserve the original meaning — do not invent new facts or change the
+  user-facing outcome.  If the original says something went wrong, yours
+  must also convey that.
 - Plain text only — no markdown, no JSON, no code blocks, no emoji
-  (the caller adds one).
-- Do NOT quote the raw error verbatim; rewrite it.
+  (the caller adds any emoji).
+- Do NOT quote the original verbatim; rewrite it in your voice.
 {persona_directives_block}
 """
 
 
-def humorize_error(raw_error: str, *, context: str = "") -> str:
-    """Rephrase a dry error message in the bot's voice via LM Studio.
+def customize_response(raw_text: str, *, context: str = "") -> str:
+    """Rewrite a plain-text response via LM Studio so it matches the bot's
+    active persona directives.
 
-    Falls back to the raw error on any failure so a broken LLM never
-    prevents the user from seeing *something*.
+    Intended for strings the bot would otherwise send to the channel
+    verbatim (error messages, canned fallbacks, etc.) — anywhere we want
+    the LLM to flavor the reply.  Falls back to the raw text on any
+    failure so a broken LLM never prevents the user from seeing *something*.
     """
-    if not raw_error:
-        return raw_error
+    if not raw_text:
+        return raw_text
     personas = persona_list()
     if personas:
         pd_block = "\nACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(
@@ -876,8 +878,8 @@ def humorize_error(raw_error: str, *, context: str = "") -> str:
         )
     else:
         pd_block = ""
-    system = HUMORIZE_ERROR_PROMPT.format(persona_directives_block=pd_block)
-    user_msg = f"Raw error: {raw_error}"
+    system = RESPONSE_CUSTOMIZATION_PROMPT.format(persona_directives_block=pd_block)
+    user_msg = f"Original: {raw_text}"
     if context:
         user_msg += f"\nContext: {context}"
     body = {
@@ -912,19 +914,19 @@ def humorize_error(raw_error: str, *, context: str = "") -> str:
         if len(content) >= 2 and content[0] == content[-1] in ('"', "'"):
             content = content[1:-1].strip()
         if not content:
-            log.warning("[humorize] empty content; returning raw error")
-            return raw_error
-        log.info("[humorize] %r → %r", raw_error[:80], content[:120])
+            log.warning("[customize] empty content; returning raw text")
+            return raw_text
+        log.info("[customize] %r → %r", raw_text[:80], content[:120])
         return content
     except Exception as e:
-        log.warning("[humorize] failed (%s); returning raw error", e)
-        return raw_error
+        log.warning("[customize] failed (%s); returning raw text", e)
+        return raw_text
 
 
-async def humorize_error_async(raw_error: str, *, context: str = "") -> str:
-    """Async wrapper around humorize_error that runs the blocking HTTP
+async def customize_response_async(raw_text: str, *, context: str = "") -> str:
+    """Async wrapper around customize_response that runs the blocking HTTP
     call in a worker thread so it doesn't block the event loop."""
-    return await asyncio.to_thread(humorize_error, raw_error, context=context)
+    return await asyncio.to_thread(customize_response, raw_text, context=context)
 
 
 WAKE_WORD_PROMPT = """\
@@ -1119,16 +1121,16 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
                     log.exception("Failed to read live sound %s for voice playback", name)
                 return
 
-            funny = await humorize_error_async(
+            customized = await customize_response_async(
                 f'Couldn\'t find a sound called "{name}".',
                 context="voice command: sound lookup miss",
             )
-            await text_channel.send(f"\U0001f3a4 {funny}")
+            await text_channel.send(f"\U0001f3a4 {customized}")
 
         elif action == "unknown":
             msg = intent.get("message", "I didn't understand that voice command.")
-            funny = await humorize_error_async(msg, context="voice command failure")
-            await text_channel.send(f"\U0001f3a4 {funny}")
+            customized = await customize_response_async(msg, context="voice command failure")
+            await text_channel.send(f"\U0001f3a4 {customized}")
 
 
 # The discord.Client is built lazily via build_client() so the tray app can
@@ -1315,8 +1317,8 @@ async def on_message(message: discord.Message):
 
         if action == "error":
             raw = intent.get("message", "Something went wrong.")
-            funny = await humorize_error_async(raw, context="bot-wide LLM error")
-            replies.append(funny)
+            customized = await customize_response_async(raw, context="bot-wide LLM error")
+            replies.append(customized)
             break
 
         elif action == "list":
