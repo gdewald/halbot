@@ -2,6 +2,10 @@
 
 A Discord bot that manages your server's soundboard using natural language. Mention the bot and tell it what to do — it uses a local LLM (via LM Studio) to interpret your requests and take action.
 
+> DISCLAIMER: THIS IS A TOY PROJECT DON'T TRY TO USE IT OUTSIDE YOUR PERSONAL PRIVATE DISCORD SERVER WITH TRUSTED USERS
+> YOU CAN AND WILL BE PWND IF YOU TRY TO RUN THIS AGAINST A PUBLIC DISCORD SERVER OR A DISCORD SERVER WITH RANDOM PEOPLE
+> I TAKE 0% LIABILITY FOR YOU IGNORING THIS MESSAGE FOR ANYTHING WHATSOEVER.
+
 ## Features
 
 ### Soundboard Management
