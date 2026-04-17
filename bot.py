@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import re
 import sqlite3
 
 import discord
@@ -22,6 +23,17 @@ except ImportError:
     VOICE_RECV_AVAILABLE = False
     load_whisper = None
     unload_whisper = None
+
+# TTS module — optional.  When the bot is connected to a voice channel in a
+# guild and an engine is available, replies are spoken instead of posted as
+# text.  See tts.py for engine selection and adding new backends.
+try:
+    import tts as _tts_module  # noqa: F401 — imported to trigger optional-dep probe
+    from tts import get_engine as _get_tts_engine, unload_engine as _unload_tts_engine, preload_engine_async as _preload_tts_engine
+except ImportError:
+    _get_tts_engine = None
+    _unload_tts_engine = None
+    _preload_tts_engine = None
 
 load_dotenv()
 
@@ -1303,14 +1315,12 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
 
         if action == "voice_play":
             name = intent.get("name", "")
-            # Try saved library first (has raw bytes)
+            # Try saved library first (has raw bytes).  Successful playback
+            # is silent — the sound itself is the response.
             row = db_get(name) if name else None
             if row:
                 fmt = detect_audio_format(row["audio"])
                 await listener.play_sound(row["audio"], fmt)
-                member = guild.get_member(user_id)
-                who = member.display_name if member else f"user {user_id}"
-                await text_channel.send(f"\U0001f50a Playing **{name}** (requested by {who})")
                 return
 
             # Try live soundboard
@@ -1320,9 +1330,6 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
                     await listener.play_sound(audio, fmt)
-                    member = guild.get_member(user_id)
-                    who = member.display_name if member else f"user {user_id}"
-                    await text_channel.send(f"\U0001f50a Playing **{name}** (requested by {who})")
                 except Exception:
                     log.exception("Failed to read live sound %s for voice playback", name)
                 return
@@ -1331,12 +1338,14 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
                 f'Couldn\'t find a sound called "{name}".',
                 context="voice command: sound lookup miss",
             )
-            await text_channel.send(f"\U0001f3a4 {customized}")
+            if not await _speak(listener, customized):
+                await text_channel.send(f"\U0001f3a4 {customized}")
 
         elif action == "unknown":
             msg = intent.get("message", "I didn't understand that voice command.")
             customized = await customize_response_async(msg, context="voice command failure")
-            await text_channel.send(f"\U0001f3a4 {customized}")
+            if not await _speak(listener, customized):
+                await text_channel.send(f"\U0001f3a4 {customized}")
 
 
 # The discord.Client is built lazily via build_client() so the tray app can
@@ -1411,12 +1420,98 @@ async def on_guild_emojis_update(guild, before, after):
 
 
 def _maybe_unload_whisper() -> None:
-    """Free whisper VRAM once the last voice session ends.  Run off-thread
-    since GC + torch.cuda.empty_cache() can take a beat."""
-    if unload_whisper is None or voice_listeners:
+    """Free whisper + TTS VRAM once the last voice session ends.  Run
+    off-thread since GC + torch.cuda.empty_cache() can take a beat."""
+    if voice_listeners:
         return
     import threading
-    threading.Thread(target=unload_whisper, daemon=True).start()
+    if unload_whisper is not None:
+        threading.Thread(target=unload_whisper, daemon=True).start()
+    if _unload_tts_engine is not None:
+        threading.Thread(target=_unload_tts_engine, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Reply delivery — TTS when in voice, text otherwise
+# ---------------------------------------------------------------------------
+_MD_STRIP_RE = re.compile(r"[*_`~]+")
+_EMOJI_RE = re.compile(
+    # Custom-server emoji: <:name:id> / <a:name:id>
+    r"<a?:([A-Za-z0-9_]+):\d+>"
+)
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _sanitize_for_speech(text: str) -> str:
+    """Turn Discord-flavored markdown into something a TTS engine can read.
+
+    Markdown asterisks, underscores, backticks — removed (kokoro would
+    otherwise voice them).  Custom emojis ``<:name:123>`` become ``name``.
+    URLs are replaced with the word "link" to avoid minute-long
+    letter-by-letter reads of Discord CDN paths.
+    """
+    text = _EMOJI_RE.sub(r"\1", text)
+    text = _URL_RE.sub("link", text)
+    text = _MD_STRIP_RE.sub("", text)
+    return text.strip()
+
+
+async def _speak(listener, text: str) -> bool:
+    """Synthesize *text* and play it in the listener's voice channel.
+
+    Returns True if playback started successfully, False if the engine is
+    unavailable or synthesis failed (caller should fall back to text).
+    """
+    if _get_tts_engine is None:
+        return False
+    engine = _get_tts_engine()
+    if engine is None:
+        return False
+    clean = _sanitize_for_speech(text)
+    if not clean:
+        return False
+    try:
+        audio, fmt = await asyncio.to_thread(engine.synth, clean)
+    except Exception:
+        log.exception("[tts] Synthesis failed; falling back to text")
+        return False
+    try:
+        await listener.play_sound(audio, fmt)
+    except Exception:
+        log.exception("[tts] Playback failed; falling back to text")
+        return False
+    log.info("[tts] Spoke (%d chars): %r", len(clean), clean[:120])
+    return True
+
+
+async def _deliver(message: "discord.Message", full_text: str) -> None:
+    """Send *full_text* to the user via TTS if bot is in voice, else text.
+
+    Handles chunked text fallback (Discord's 2000-char cap) and threads.
+    """
+    if not full_text:
+        return
+    guild = message.guild
+    listener = voice_listeners.get(guild.id) if guild else None
+    if listener and listener.vc.is_connected():
+        if await _speak(listener, full_text):
+            return
+
+    chunks = []
+    remaining = full_text
+    while len(remaining) > 2000:
+        split_at = remaining.rfind("\n", 0, 2000)
+        if split_at == -1:
+            split_at = 2000
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            await message.reply(chunk)
+        else:
+            await message.channel.send(chunk)
 
 
 # Per-guild pending idle-disconnect tasks.  A task is scheduled when the
@@ -1515,10 +1610,24 @@ async def on_voice_state_update(member, before, after):
 
 async def on_message(message: discord.Message):
     log.info("Message received: %r from %s, mentions: %s", message.content, message.author, message.mentions)
-    # Ignore own messages and messages that don't mention the bot
+    # Ignore own messages
     if message.author == client.user:
         return
-    if client.user not in message.mentions:
+    # Respond when mentioned, OR when the user directly replies to one of the
+    # bot's messages (Discord's reply button) — no mention required in that case.
+    mentioned = client.user in message.mentions
+    is_reply_to_bot = False
+    ref = message.reference
+    if not mentioned and ref is not None:
+        ref_msg = ref.resolved if isinstance(ref.resolved, discord.Message) else None
+        if ref_msg is None and ref.message_id:
+            try:
+                ref_msg = await message.channel.fetch_message(ref.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                ref_msg = None
+        if ref_msg is not None and ref_msg.author == client.user:
+            is_reply_to_bot = True
+    if not mentioned and not is_reply_to_bot:
         return
 
     # Strip the @mention from the message text
@@ -2018,9 +2127,12 @@ async def on_message(message: discord.Message):
                 listener = VoiceListener(vc, message.channel, handle_voice_command)
                 voice_listeners[guild.id] = listener
 
-                # Pre-load whisper model in background so first command is fast
+                # Pre-load whisper + TTS models in background so the first
+                # command and the first spoken reply don't eat cold-start.
                 import threading
                 threading.Thread(target=load_whisper, daemon=True).start()
+                if _preload_tts_engine is not None:
+                    _preload_tts_engine()
 
                 listener.start()
                 if not _channel_has_humans(vc_channel):
@@ -2058,7 +2170,10 @@ async def on_message(message: discord.Message):
             if row:
                 fmt = detect_audio_format(row["audio"])
                 await listener.play_sound(row["audio"], fmt)
-                replies.append(_reply(f"\U0001f50a Playing **{name}** in voice.", intent))
+                # Silent success — playing the sound is the response.
+                llm_msg = (intent or {}).get("message")
+                if llm_msg:
+                    replies.append(llm_msg)
                 continue
 
             # Try live soundboard
@@ -2068,7 +2183,9 @@ async def on_message(message: discord.Message):
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
                     await listener.play_sound(audio, fmt)
-                    replies.append(_reply(f"\U0001f50a Playing **{name}** in voice.", intent))
+                    llm_msg = (intent or {}).get("message")
+                    if llm_msg:
+                        replies.append(llm_msg)
                 except Exception:
                     log.exception("Failed to read live sound %s for voice playback", name)
                     replies.append(f"Failed to play **{name}**.")
@@ -2080,24 +2197,7 @@ async def on_message(message: discord.Message):
             replies.append(intent.get("message", "I didn't understand that."))
 
     if replies:
-        full_text = "\n\n".join(replies)
-        # Discord max message length is 2000 chars; split into chunks
-        chunks = []
-        while len(full_text) > 2000:
-            # Find a newline to split on near the limit
-            split_at = full_text.rfind("\n", 0, 2000)
-            if split_at == -1:
-                split_at = 2000
-            chunks.append(full_text[:split_at])
-            full_text = full_text[split_at:].lstrip("\n")
-        if full_text:
-            chunks.append(full_text)
-
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                await message.reply(chunk)
-            else:
-                await message.channel.send(chunk)
+        await _deliver(message, "\n\n".join(replies))
 
 
 if __name__ == "__main__":
