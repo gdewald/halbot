@@ -1,7 +1,7 @@
 # Plan: Decouple Voice Sessions from Text Channels
 
 **Branch:** `dev/tts-and-reply-routing`
-**Status:** Approved — decisions locked 2026-04-17, implementation pending
+**Status:** Steps 1–3 landed 2026-04-17; Step 4 subsumed into Step 2 (sink_spec already in place)
 **Author:** proposed 2026-04-17
 
 ## Motivation
