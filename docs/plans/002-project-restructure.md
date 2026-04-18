@@ -96,14 +96,21 @@ halbot/                         # repo root
 
 ### Packaging
 
-- **PyInstaller `--onedir`, not `--onefile`.** Onefile extracts to temp on
-  every launch — slow startup, DLL-search headaches, awful for
+- **Dev = `uv run -m halbot.daemon` + `uv run -m tray.tray` in two
+  terminals.** No combined dev launcher.
+- **Prod = PyInstaller `--onedir`, not `--onefile`.** Onefile extracts to
+  temp on every launch — slow startup, DLL-search headaches, awful for
   faster-whisper + CUDA bundling.
-- **Two specs:** daemon, tray. `halbot-setup.exe` can be a third small spec
-  or folded into the tray build as a CLI subcommand.
+- **Two specs, two zips:** `halbot-daemon.zip`, `halbot-tray.zip`. Keeps
+  tray-only updates possible without touching daemon. `halbot-setup.exe`
+  is a third small spec (or folded into the daemon build as a CLI
+  subcommand).
 - **CUDA / faster-whisper bundling:** expect pain. Plan to pin a known
   torch + cuDNN combo and add explicit `--add-binary` for CUDA DLLs. Fall
   back to CPU whisper in packaged builds if bundling proves too fragile.
+- **Update delivery:** manual. Download zip, run `update-tray.bat` /
+  `update-daemon.bat`. No in-app update check, no GitHub Releases
+  automation. Project is not distributed.
 
 ### Independent lifecycle
 
@@ -133,26 +140,57 @@ Tray updates must not touch the running daemon. Consequences:
 - Update delivery is manual (download zip + run updater). No in-app auto
   update.
 
+### Service account + data paths
+
+- **Daemon runs as LocalSystem** under NSSM. No dedicated service user, no
+  password management.
+- **State relocates to `%ProgramData%\Halbot\`:** `sounds.db`, `logs/`,
+  persona data, any other runtime files. Today's repo-relative paths must
+  be migrated.
+- **Dev mode** still uses repo-relative paths for convenience (resolve via
+  `APP_DATA_DIR` env var or a `halbot/paths.py` helper that picks dev vs
+  prod based on whether running from a PyInstaller bundle).
+
+### Installer scope
+
+`halbot-setup.exe`, run elevated, one-shot:
+
+- Writes DPAPI secrets to `HKLM\SOFTWARE\Halbot` (`DISCORD_TOKEN`,
+  `LMSTUDIO_URL` — until Ollama migration, then adjust).
+- Runs `nssm install halbot ...` pointing at daemon exe.
+- Registers HKCU Run entry for tray exe.
+- Creates `%ProgramData%\Halbot\` with appropriate ACLs (LocalSystem write,
+  user read for log viewing).
+
+CLI flags only. No GUI wizard. Matching `halbot-setup --uninstall`
+reverses all four steps.
+
+### LLM backend: Ollama migration (TBD)
+
+- **Migrate off LM Studio to Ollama.** Rationale and details TBD; will be
+  its own plan doc. Flagged here because the restructure should not bake
+  in LM Studio assumptions (e.g. the `LMSTUDIO_URL` secret key, the
+  `LMSTUDIO_MODEL` constant in `bot.py`, the `ensure_model_loaded()`
+  JIT-reload dance) any deeper than today.
+- During restructure, rename the LM Studio-specific helpers so the
+  eventual swap is a contained change to `halbot/llm.py` plus a secret
+  rename in DPAPI storage.
+
+### Restructure phasing
+
+- **Big-bang refactor on `main`**, not feature branches. Solo project, no
+  collaborators to unblock. Push to remote only when the whole stack is
+  green.
+- Phase order (sketch only; may collapse as work proceeds):
+  1. Move flat modules into `halbot/` package; fix imports.
+  2. Add proto + `_gen/` + gRPC server.
+  3. Build `tray/` package; tray talks only to daemon over gRPC.
+  4. Secrets: `halbot/secrets.py` + `halbot-setup.exe`; drop `.env`.
+  5. NSSM integration + installer steps 2–4.
+  6. PyInstaller specs + two-zip build + update scripts.
+
 ## Open questions
 
-- Service account (LocalSystem vs dedicated user) and data-path relocation
-  (`%ProgramData%\Halbot` vs `%USERPROFILE%`). Leaning LocalSystem +
-  `%ProgramData%`.
-- Installer scope: secrets only, or also NSSM install + HKCU autostart +
-  ProgramData ACLs + first-run wizard.
-- Restructure phasing / migration order — sketch below, not locked.
-- Dev loop: two `uv run -m ...` terminals vs combined launcher.
-- Update delivery: GitHub Releases zip, or simpler (manual copy)?
+(None currently tracked — all prior questions resolved. Re-open as
+implementation surfaces new ones.)
 
-## Phases (sketch — to be fleshed out)
-
-1. Move flat modules into `halbot/` package; fix imports; verify
-   `uv run -m halbot.daemon` still runs the bot as today.
-2. Add proto + gen + gRPC server inside daemon. Tray still imports daemon
-   directly as a transition fallback.
-3. Build `tray/` package; tray talks only to daemon over gRPC. Drop
-   `halbot_tray.py`'s `BotRunner` subprocess path.
-4. Secrets: add `secrets.py`, build `halbot-setup.exe`, migrate reads off
-   `.env`.
-5. Decide NSSM vs subprocess; if NSSM, add install script + service ACL.
-6. PyInstaller specs + build pipeline.
