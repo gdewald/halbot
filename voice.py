@@ -443,35 +443,16 @@ class VoiceListener:
 
         log.info("[stt] user=%s (%.1fs): %r", user_id, elapsed, text)
 
-        # Hand the transcription to the LLM wake-word classifier.  It handles
-        # all phonetic mishearings ("Albot", "Owlbot", "Hal Bot", etc.) and
-        # extracts the command in one shot.  Imported lazily to avoid a hard
-        # import cycle between bot.py and voice.py at module load.
-        from bot import check_wake_word  # type: ignore[import-not-found]
-
-        try:
-            wake, command = await self._loop.run_in_executor(
-                None, check_wake_word, text
-            )
-        except Exception:
-            log.exception("[wake] Classifier call failed")
-            return
-
-        if not wake:
-            log.info("[stt] no wake word in: %r", text)
-            return
-
-        if not command:
-            log.info("[wake] Wake word detected but no command followed")
-            return
-
-        log.info("[wake] user=%s command: %r", user_id, command)
+        # Hand the full transcript to the command handler.  Wake-word
+        # detection lives in bot.handle_voice_command (either as a dedicated
+        # classifier call or folded into the combined wake+intent call,
+        # depending on VOICE_LLM_COMBINE_CALLS).
         try:
             await self.on_command(
-                self.vc.guild, self.text_channel, user_id, command
+                self.vc.guild, self.text_channel, user_id, text
             )
         except Exception:
-            log.exception("[wake] Voice command callback failed")
+            log.exception("[voice] Command callback failed")
 
     # -- playback ------------------------------------------------------------
 

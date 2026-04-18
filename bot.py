@@ -31,6 +31,35 @@ LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completi
 LMSTUDIO_MODEL = "google/gemma-4-e4b"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
+# When true, pass chat_template_kwargs={enable_thinking: false} on every
+# LLM request so "thinking" models (Qwen3 / Gemma thinking / DeepSeek-R1) skip
+# their chain-of-thought.  Thinking often emits hundreds of reasoning tokens
+# before the answer and dominates voice pipeline latency.
+LLM_DISABLE_THINKING = _env_bool("LLM_DISABLE_THINKING", True)
+
+# When true, voice wake-word detection and intent parsing are merged into a
+# single LLM call, saving one round-trip per utterance.  When false, the two
+# are issued sequentially (wake classifier first, then intent parser only if
+# the wake word was detected).
+VOICE_LLM_COMBINE_CALLS = _env_bool("VOICE_LLM_COMBINE_CALLS", True)
+
+
+def _apply_thinking_flag(body: dict) -> dict:
+    """Stamp chat_template_kwargs.enable_thinking=False on a request body
+    when LLM_DISABLE_THINKING is set.  No-op otherwise."""
+    if LLM_DISABLE_THINKING:
+        tmpl = body.setdefault("chat_template_kwargs", {})
+        tmpl["enable_thinking"] = False
+    return body
+
+
 def _lmstudio_base() -> str:
     """Strip the OpenAI path suffix to get the LM Studio server root."""
     for marker in ("/v1/", "/api/"):
@@ -348,6 +377,7 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
+    _apply_thinking_flag(body)
     try:
         resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
         resp.raise_for_status()
@@ -755,6 +785,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
+    _apply_thinking_flag(body)
 
     try:
         resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
@@ -892,6 +923,7 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
+    _apply_thinking_flag(body)
     try:
         resp = requests.post(LMSTUDIO_URL, json=body, timeout=15)
         if resp.status_code >= 400:
@@ -972,6 +1004,7 @@ def check_wake_word(transcript: str) -> tuple[bool, str]:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
+    _apply_thinking_flag(body)
     try:
         resp = requests.post(LMSTUDIO_URL, json=body, timeout=15)
         if resp.status_code >= 400:
@@ -993,6 +1026,116 @@ def check_wake_word(transcript: str) -> tuple[bool, str]:
     except Exception as e:
         log.warning("[wake-llm] classifier failed (%s); ignoring utterance", e)
         return False, ""
+
+
+VOICE_COMBINED_PROMPT = """\
+You are Halbot, a Discord soundboard bot that listens in a voice channel.
+A user spoke and an imperfect STT engine transcribed what they said.  In a
+SINGLE response, do two things:
+
+1. Decide whether the speaker addressed you (wake word "Halbot" — or any
+   close phonetic mishearing: Hal Bot, Albot, Owlbot, Palbot, Walbot,
+   Halbert, Hellboy, Hellbot, Howlbot, Holbot, Hal-Bot, Hal Bought,
+   How Bout, Al Bought, etc.).  If NOT addressed, return wake=false and
+   actions=[].
+2. If addressed, pick the best sound to play for the command that follows
+   the wake word.
+
+SAVED LIBRARY:
+{saved_details}
+
+LIVE SOUNDBOARD:
+{sound_details}
+
+{persona_directives_block}
+
+Reply with ONLY this JSON, no prose, no markdown:
+  {{"wake": <true|false>, "actions": [<action>, ...]}}
+
+Each action is one of:
+  {{"action": "voice_play", "name": "<exact sound name>"}}
+  {{"action": "unknown", "message": "<brief response>"}}
+
+If wake=false, actions MUST be [].
+Match creatively — "something scary" → pick a scary-sounding name,
+"play airhorn" → exact match.  Names must be EXACT from the lists above.
+"""
+
+
+def parse_voice_combined(
+    transcript: str, sounds, saved: list[dict]
+) -> tuple[bool, list[dict]]:
+    """Single-call wake detection + intent parsing.
+
+    Returns (wake_detected, actions).  actions is a list of dicts in the
+    same shape parse_voice_intent returns.  On failure returns (False, [])
+    so the utterance is silently ignored.
+    """
+    personas = persona_list()
+    if personas:
+        persona_lines = [f"- {p['directive']}" for p in personas]
+        pd_block = "ACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(persona_lines)
+    else:
+        pd_block = ""
+    system = VOICE_COMBINED_PROMPT.format(
+        sound_details=format_sound_details(sounds),
+        saved_details=format_saved_details(saved),
+        persona_directives_block=pd_block,
+    )
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": transcript},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 1024,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+    _apply_thinking_flag(body)
+
+    content = ""
+    try:
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        if resp.status_code >= 400:
+            log.warning("Voice combined LLM %s: %s", resp.status_code, resp.text[:300])
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=60)
+        resp.raise_for_status()
+        raw_json = resp.json()
+        choice = raw_json["choices"][0]
+        message = choice.get("message", {})
+        finish_reason = choice.get("finish_reason", "unknown")
+        usage = raw_json.get("usage", {})
+        content = (message.get("content") or "").strip()
+        reasoning = (message.get("reasoning_content") or "").strip()
+        if "<think>" in content and "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        if not content and reasoning:
+            content = reasoning.splitlines()[-1].strip()
+        log.info("[voice-combined] finish_reason=%s usage=%s content=%r",
+                 finish_reason, usage, content[:200])
+        if not content:
+            return False, []
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        parsed = json.loads(content)
+        wake = bool(parsed.get("wake", False))
+        actions = parsed.get("actions") or []
+        if not isinstance(actions, list):
+            actions = [actions] if isinstance(actions, dict) else []
+        return wake, actions
+    except json.JSONDecodeError:
+        log.warning("[voice-combined] non-JSON response: %r", content[:200])
+        return False, []
+    except Exception as e:
+        log.warning("[voice-combined] call failed (%s); ignoring utterance", e)
+        return False, []
 
 
 def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]:
@@ -1022,6 +1165,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
+    _apply_thinking_flag(body)
 
     content = ""
     try:
@@ -1077,20 +1221,48 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]
 
 
 async def handle_voice_command(guild, text_channel, user_id, transcript):
-    """Callback from VoiceListener when wake word + command detected."""
+    """Callback from VoiceListener with a raw STT transcript.
+
+    Owns wake-word detection: depending on VOICE_LLM_COMBINE_CALLS this is
+    either a single combined call (wake + intent together) or two sequential
+    calls (wake classifier first, intent parser only on wake).
+    """
     listener = voice_listeners.get(guild.id)
     if not listener:
         return
 
-    try:
-        sounds = list(await guild.fetch_soundboard_sounds())
-    except discord.HTTPException:
-        sounds = []
-    saved = db_list()
+    if VOICE_LLM_COMBINE_CALLS:
+        try:
+            sounds = list(await guild.fetch_soundboard_sounds())
+        except discord.HTTPException:
+            sounds = []
+        saved = db_list()
+        wake, actions = await asyncio.to_thread(
+            parse_voice_combined, transcript, sounds, saved
+        )
+        if not wake:
+            log.info("[voice] no wake word in: %r", transcript)
+            return
+    else:
+        wake, command = await asyncio.to_thread(check_wake_word, transcript)
+        if not wake:
+            log.info("[voice] no wake word in: %r", transcript)
+            return
+        if not command:
+            log.info("[voice] wake word alone, no command")
+            return
+        log.info("[voice] user=%s command: %r", user_id, command)
+        try:
+            sounds = list(await guild.fetch_soundboard_sounds())
+        except discord.HTTPException:
+            sounds = []
+        saved = db_list()
+        actions = await asyncio.to_thread(
+            parse_voice_intent, command, sounds, saved
+        )
+
     saved_map = {s["name"]: s for s in saved}
     sound_map = {s.name: s for s in sounds}
-
-    actions = parse_voice_intent(transcript, sounds, saved)
 
     for intent in actions:
         action = intent.get("action")
