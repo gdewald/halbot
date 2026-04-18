@@ -152,12 +152,13 @@ later. Target flow:
 - **Bootstrap:** `halbot-daemon setup` can still set secrets from an elevated
   shell (`halbot-setup set-secret DISCORD_TOKEN ...`) for first-run /
   headless rotation. Useful before the tray is installed.
-- **No dev mode.** One code path: read from HKLM. Local iteration via
-  `uv run -m halbot.daemon` assumes a prior one-time `halbot-setup`
-  install has populated the registry. No `.env` fallback, no HKCU
-  shadow tree, no `HALBOT_DEV=1` branch. Keeps the daemon coherent.
-  Iteration flow: edit → `uv run` (reads same registry as service) →
-  when ready, `pyinstaller` → replace onedir → restart service.
+- **No dev mode. `uv run` iteration is explicitly unsupported.** One
+  code path: read from HKLM, run as the installed service. Iteration
+  flow is **edit → pyinstaller → replace onedir → restart service**.
+  No `.env` fallback, no HKCU shadow tree, no `HALBOT_DEV` branch, no
+  env-var overrides, no alternate config sources. Any code that would
+  exist only to enable a `uv run` loop is cut. Keeps the daemon
+  coherent and trivially small.
 - **Caveats:** LocalMachine scope means any process on the host running as
   any user can decrypt — acceptable given threat model. Keys are tied to
   the machine; reinstall on a new box requires re-entering secrets. No
@@ -259,11 +260,18 @@ halbot/                         # repo root
 
 ### Packaging
 
-- **Dev = `uv run -m halbot.daemon` + `uv run -m tray.tray` in two
-  terminals.** No combined dev launcher.
-- **Prod = PyInstaller `--onedir`, not `--onefile`.** Onefile extracts to
-  temp on every launch — slow startup, DLL-search headaches, awful for
+- **No dev-run flow. Only path is PyInstaller build → install → run
+  service.** See "No dev mode" under Secrets for rationale.
+- **PyInstaller `--onedir`, not `--onefile`.** Onefile extracts to temp
+  on every launch — slow startup, DLL-search headaches, awful for
   faster-whisper + CUDA bundling.
+- **Two build venvs via uv extras** keep onedir outputs lean:
+  - `uv sync --only-group daemon` → daemon build venv (discord.py,
+    whisper, grpcio, pywin32, etc.)
+  - `uv sync --only-group tray` → tray build venv (tkinter, pystray,
+    grpcio, pillow)
+  PyInstaller bundles what's importable. Separate venvs = neither exe
+  drags the other's deps.
 - **Two specs, two zips:** `halbot-daemon.zip`, `halbot-tray.zip`. Keeps
   tray-only updates possible without touching daemon. Installer is
   **folded into the daemon exe as a CLI subcommand**
