@@ -23,17 +23,113 @@ Status: draft, decisions landing iteratively.
 - **Log streaming stays file-tail**, not a gRPC server-streaming RPC. Keeps
   viewer logic trivial and unchanged from today.
 
+### Daemon lifecycle — SCM, not gRPC
+
+- **Start / Stop / Restart of the daemon itself go through the Windows
+  Service Control Manager** (pywin32 `win32serviceutil.StartService`
+  etc.), not through gRPC. You can't gRPC into a stopped daemon, so Start
+  must use SCM anyway; putting Stop/Restart there too keeps the model
+  coherent.
+- Tray needs `SERVICE_START / STOP / QUERY_STATUS` granted to the
+  installing user — set via `sc sdset` by `halbot-setup.exe` at install.
+- Bury SCM controls under a "Service" submenu in the tray. 95% of daily
+  operations should go through module-level RPCs below, not service
+  restarts.
+
 ### Management RPCs (v1)
 
-```
-rpc Start(Empty)    returns StatusReply;
-rpc Stop(Empty)     returns StatusReply;
-rpc Restart(Empty)  returns StatusReply;
-rpc GetStatus(Empty) returns StatusReply;   // running, pid, uptime
-rpc Health(Empty)   returns HealthReply;    // LM Studio reachable, Discord connected, voice active
+Two concepts the tray needs, kept distinct:
+
+- **Service state** (stopped / starting / running / stopping) — answered
+  by SCM query, available even when daemon is dead.
+- **Health** — answered by gRPC, meaningful only when daemon is up.
+
+Tray poll loop: SCM query first → if running, call `Health()` → else
+show "stopped".
+
+```proto
+// Health / introspection
+rpc Health(Empty) returns HealthReply;
+
+// Config (hot-apply where possible, persisted to config.json)
+rpc GetConfig(Empty) returns Config;
+rpc UpdateConfig(ConfigPatch) returns Config;   // returns new state
+rpc ReloadConfig(Empty) returns Config;         // re-read config.json (hand-edits)
+
+// Module lifecycle — reduce need for full daemon restart
+rpc RestartDiscord(Empty) returns StatusReply;  // disconnect + reconnect
+rpc LeaveVoice(Empty) returns StatusReply;      // drop voice session, keep Discord
+rpc LoadWhisper(Empty) returns StatusReply;     // pre-warm
+rpc UnloadWhisper(Empty) returns StatusReply;   // free VRAM; lazy reload next use
+rpc LoadTTS(Empty) returns StatusReply;
+rpc UnloadTTS(Empty) returns StatusReply;
+
+message HealthReply {
+  DiscordState discord = 1;      // CONNECTED | RECONNECTING | DISCONNECTED | RATE_LIMITED | TOKEN_INVALID
+  bool llm_reachable = 2;
+  VoiceState voice = 3;          // IDLE | IN_CHANNEL { guild, channel }
+  bool whisper_loaded = 4;
+  bool tts_loaded = 5;
+  int64 uptime_seconds = 6;
+  string daemon_version = 7;
+}
 ```
 
-Expand as needs emerge (persona mgmt, sound CRUD, etc.).
+Expand as real needs emerge (persona mgmt, sound CRUD). Do not pre-add
+RPCs for subsystems without state worth managing.
+
+**Safety rules:**
+
+- **Overlapping ops refused.** Concurrent `RestartDiscord` returns
+  `FAILED_PRECONDITION`. Per-module lock in the daemon.
+- **`UnloadWhisper` while voice active → refuse** with clear error. User
+  leaves voice first. No magical auto-leave.
+- **Rate-limit `RestartDiscord`** (e.g. 1 per 10s) to avoid gateway abuse.
+- **Idempotent where sensible.** `UnloadWhisper` on already-unloaded is
+  a no-op success.
+
+### Configuration
+
+- **`config.json` in `%ProgramData%\Halbot\`.** Default values checked
+  into the repo as `config.default.json`; daemon merges defaults +
+  overrides on load. Written on every `UpdateConfig`.
+- **Hot-applicable fields** (no daemon restart): `log_level`,
+  `llm_model`, `max_tokens_text`, `max_tokens_voice`, `wake_word`,
+  `voice_idle_timeout_seconds`. Possibly `energy_threshold` (hot, but
+  only picked up on next voice session — document).
+- **Restart-required fields** (flag `requires_restart: true` in `Config`
+  response so tray can show a banner): gRPC port, data paths, anything
+  that affects service-install shape.
+- **Validation** is daemon-side. Bad values return
+  `INVALID_ARGUMENT` over gRPC — tray does not trust itself.
+- **Secrets stay out of config.** Config is non-sensitive, plaintext
+  JSON, readable on disk. Anything sensitive uses DPAPI (see Secrets).
+
+### Secret update UX — TBD / future
+
+Scope locked but implementation deferred. Write up target flow here so
+future-us doesn't re-derive it.
+
+- **Goal:** user changes Discord token from the tray GUI, no separate
+  elevated CLI invocation per rotation.
+- **One-time elevation at install.** `halbot-setup.exe` (elevated) grants
+  the installing user `KEY_WRITE` on `HKLM\SOFTWARE\Halbot\Secrets` via
+  custom ACL (`RegSetKeySecurity`). After that, the tray can write DPAPI
+  blobs to that subkey without UAC.
+- **Flow:** tray "Settings → Discord token" → masked input dialog → OK
+  → tray DPAPI-encrypts and writes HKLM → tray calls SCM restart →
+  daemon comes up reading the new token → tray shows reconnecting /
+  connected transition via `Health()`.
+- **Daemon restart on credential change is acceptable** — matches the
+  SCM lifecycle model, avoids atomic-client-swap complexity in
+  discord.py, rare operation.
+- **Security trade-off to note:** relaxed HKLM ACL means any process
+  running as the installing user can read/write secrets. DPAPI
+  LocalMachine scope is buying encryption at rest (disk images, backups),
+  not user-process isolation. Matches the loopback-no-auth trust model
+  for gRPC. Documented so future-us doesn't misinterpret.
+- **Until this lands:** secrets can only be set/rotated via
+  `halbot-setup.exe set-secret ...` from an elevated shell.
 
 ### Secrets
 
