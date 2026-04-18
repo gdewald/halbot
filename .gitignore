@@ -3,3 +3,5 @@ sounds.db
 __pycache__/
 logs/
 .venv/
+*.original.md
+docs/plans/drafts/

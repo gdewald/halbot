@@ -1,49 +1,47 @@
 # Project Restructure — Design
 
-Status: design locked. Scope and outcome. Implementation plan lives in
+Status: design locked. Scope and outcome. Implementation plan at
 [003-project-restructure-impl.md](003-project-restructure-impl.md).
 
 ## Goals
 
-- Decouple tray GUI from bot runtime. Tray never imports bot code.
+- Decouple tray GUI from bot runtime. Tray never import bot code.
 - Single declarative contract for tray ↔ bot management via gRPC.
 - Productionize build: packaged tray exe + packaged daemon exe.
-- Replace `.env` with secret storage appropriate for a Windows service.
+- Replace `.env` with secret storage fit for Windows service.
 
 ## Decisions
 
 ### Architecture
 
 - **IPC: gRPC over localhost.** Insecure channel, bound `127.0.0.1` only. No
-  auth — toy app, single host, no security concerns on loopback.
-- **Rationale:** `.proto` is a single readable source of truth for the
-  management surface. Prevents schema drift that ad-hoc JSON would allow.
+  auth — toy app, single host, no loopback security concern.
+- **Rationale:** `.proto` = single readable source of truth for management
+  surface. Blocks schema drift ad-hoc JSON allow.
 - **Generated code committed to repo at `halbot/_gen/`** (importable as
   `from halbot._gen import mgmt_pb2`). No protoc on end-user machines.
-  Regen via `scripts/gen_proto.ps1` whenever `.proto` changes.
-- **Log streaming stays file-tail**, not a gRPC server-streaming RPC. Keeps
-  viewer logic trivial and unchanged from today.
+  Regen via `scripts/gen_proto.ps1` when `.proto` changes.
+- **Log streaming stay file-tail**, not gRPC server-streaming RPC. Keep
+  viewer trivial, unchanged from today.
 
 ### Daemon lifecycle — SCM, not gRPC
 
-- **Start / Stop / Restart of the daemon itself go through the Windows
-  Service Control Manager** (pywin32 `win32serviceutil.StartService`
-  etc.), not through gRPC. You can't gRPC into a stopped daemon, so Start
-  must use SCM anyway; putting Stop/Restart there too keeps the model
-  coherent.
-- Tray needs `SERVICE_START / STOP / QUERY_STATUS` granted to the
-  installing user — set via `sc sdset` by `halbot-daemon setup` at install.
-- Bury SCM controls under a "Service" submenu in the tray. 95% of daily
-  operations should go through module-level RPCs below, not service
-  restarts.
+- **Start / Stop / Restart of daemon go through Windows Service Control
+  Manager** (pywin32 `win32serviceutil.StartService` etc.), not gRPC.
+  Can't gRPC into stopped daemon, so Start must use SCM anyway; putting
+  Stop/Restart there too keep model coherent.
+- Tray need `SERVICE_START / STOP / QUERY_STATUS` granted to installing
+  user — set via `sc sdset` by `halbot-daemon setup` at install.
+- Bury SCM controls under "Service" submenu in tray. 95% daily ops go
+  through module-level RPCs below, not service restarts.
 
 ### Management RPCs (v1)
 
-Two concepts the tray needs, kept distinct:
+Two concepts tray need, kept distinct:
 
-- **Service state** (stopped / starting / running / stopping) — answered
-  by SCM query, available even when daemon is dead.
-- **Health** — answered by gRPC, meaningful only when daemon is up.
+- **Service state** (stopped / starting / running / stopping) — SCM query
+  answer, works even when daemon dead.
+- **Health** — gRPC answer, meaningful only when daemon up.
 
 Tray poll loop: SCM query first → if running, call `Health()` → else
 show "stopped".
@@ -78,92 +76,88 @@ message HealthReply {
 }
 ```
 
-Expand as real needs emerge (persona mgmt, sound CRUD). Do not pre-add
-RPCs for subsystems without state worth managing.
+Expand as real needs emerge (persona mgmt, sound CRUD). Don't pre-add
+RPCs for subsystems with no state worth managing.
 
 **Safety rules:**
 
 - **Overlapping ops refused.** Concurrent `RestartDiscord` returns
-  `FAILED_PRECONDITION`. Per-module lock in the daemon.
+  `FAILED_PRECONDITION`. Per-module lock in daemon.
 - **`UnloadWhisper` while voice active → refuse** with clear error. User
-  leaves voice first. No magical auto-leave.
+  leave voice first. No magic auto-leave.
 - **Rate-limit `RestartDiscord`** (e.g. 1 per 10s) to avoid gateway abuse.
-- **Idempotent where sensible.** `UnloadWhisper` on already-unloaded is
-  a no-op success.
+- **Idempotent where sensible.** `UnloadWhisper` on already-unloaded =
+  no-op success.
 
 ### Secret update UX — TBD / future
 
-Scope locked but implementation deferred. Initial implementation uses
-`halbot-daemon setup set-secret ...` from an elevated shell. Tray UI comes
-later. Target flow:
+Scope locked, implementation deferred. Initial impl use
+`halbot-daemon setup set-secret ...` from elevated shell. Tray UI later.
+Target flow:
 
 - **Tray "Settings → Discord token"** → masked input dialog → OK →
-  tray sends gRPC `SetSecret(DISCORD_TOKEN, <value>)`.
-- **Daemon handles the write itself** — runs as LocalSystem, encrypts via
-  DPAPI, persists to `HKLM\SOFTWARE\Halbot\Secrets`, then triggers
-  in-process Discord reconnect. No SCM restart required.
-- **Write before reconnect.** If reconnect fails, secret is still
-  persisted — `Health().discord = TOKEN_INVALID` surfaces the failure;
-  user retries with a corrected token.
-- **Write-only semantics.** `GetConfig()` never returns secret values.
-  Tray shows a "set / not set" indicator derived from whether the key
-  exists, nothing more. Combined with `Health()`, that's enough feedback
-  for rotation workflows.
+  tray send gRPC `SetSecret(DISCORD_TOKEN, <value>)`.
+- **Daemon handle write itself** — run as LocalSystem, encrypt via
+  DPAPI, persist to `HKLM\SOFTWARE\Halbot\Secrets`, trigger in-process
+  Discord reconnect. No SCM restart needed.
+- **Write before reconnect.** If reconnect fail, secret still persisted
+  — `Health().discord = TOKEN_INVALID` surface failure; user retry with
+  corrected token.
+- **Write-only semantics.** `GetConfig()` never return secret values.
+  Tray show "set / not set" indicator from whether key exists, nothing
+  more. Combined with `Health()`, enough feedback for rotation.
 
 ### Subsystem fault isolation — crash vs degrade
 
-- **Daemon process crashes only on fatal top-level failures**
-  (initialization errors it cannot recover from, unhandled exceptions
-  outside subsystem boundaries). NSSM's `AppExit Default Restart`
-  handles these.
-- **Subsystem failures degrade, not crash.** Discord login failure, LLM
-  backend unreachable, voice gateway error, whisper load failure — each
-  is caught at the subsystem boundary, recorded in `Health()`, and
-  leaves the rest of the daemon running.
-- **Health enum covers degraded states:** `DiscordState` includes
+- **Daemon process crash only on fatal top-level failures**
+  (init errors unrecoverable, unhandled exceptions outside subsystem
+  boundaries). NSSM `AppExit Default Restart` handle these.
+- **Subsystem failures degrade, not crash.** Discord login fail, LLM
+  backend unreachable, voice gateway error, whisper load fail — each
+  caught at subsystem boundary, recorded in `Health()`, rest of daemon
+  keep running.
+- **Health enum cover degraded states:** `DiscordState` include
   `TOKEN_INVALID`, `RATE_LIMITED`, `DISCONNECTED`. Similar enums for
-  voice / LLM as they grow.
-- **Every subsystem gets room for future control RPCs** (retry,
-  reconfigure, reload). Starting set is in the RPC list above; add
-  more as subsystems gain runtime-controllable state.
+  voice / LLM as grow.
+- **Every subsystem get room for future control RPCs** (retry,
+  reconfigure, reload). Starting set in RPC list above; add more as
+  subsystems gain runtime-controllable state.
 - **NSSM throttle** (`AppThrottle` default 1500ms, plus
-  `AppRestartDelay ~30000`) is a belt-and-suspenders guard against a
-  crash-loop leaking through, not the primary defense.
+  `AppRestartDelay ~30000`) = belt-and-suspenders guard vs crash-loop
+  leak, not primary defense.
 
 ### Secrets
 
 - **Storage: DPAPI-encrypted blobs in `HKLM\SOFTWARE\Halbot\Secrets`.**
-  `LocalMachine` scope so secrets survive service-account changes and do
-  not require a user login context.
+  `LocalMachine` scope so secrets survive service-account changes and
+  don't need user login context.
 - **Library:** pywin32 `win32crypt.CryptProtectData` /
   `CryptUnprotectData` with `CRYPTPROTECT_LOCAL_MACHINE`.
-- **Keys stored:** `DISCORD_TOKEN`. That is the only true secret. Former
-  candidates `LMSTUDIO_URL` / `OLLAMA_URL` are **not secrets** — they move
-  to plaintext registry config (see Configuration).
-- **Writes go through the daemon, not the tray.** Daemon runs as
-  LocalSystem and can always write HKLM. Tray calls gRPC `SetSecret`
-  (write-only); daemon encrypts and persists, then triggers the relevant
-  subsystem reload (e.g. Discord reconnect) in-process. Avoids
-  SCM-restart-on-token-change and avoids granting the tray HKLM write
-  rights for secret storage.
-- **Write-ordering:** daemon writes DPAPI **before** attempting reconnect.
-  If reconnect fails with the new token, the value is still persisted and
-  a subsequent daemon restart uses it. Reconnect failure becomes
-  `Health().discord = TOKEN_INVALID`, not a crash.
-- **Bootstrap:** `halbot-daemon setup` can still set secrets from an elevated
+- **Keys stored:** `DISCORD_TOKEN`. Only true secret. Former candidates
+  `LMSTUDIO_URL` / `OLLAMA_URL` **not secrets** — move to plaintext
+  registry config (see Configuration).
+- **Writes go through daemon, not tray.** Daemon run as LocalSystem, can
+  always write HKLM. Tray call gRPC `SetSecret` (write-only); daemon
+  encrypt and persist, then trigger relevant subsystem reload (e.g.
+  Discord reconnect) in-process. Avoid SCM-restart-on-token-change and
+  avoid granting tray HKLM write rights for secret storage.
+- **Write-ordering:** daemon write DPAPI **before** attempting reconnect.
+  If reconnect fail with new token, value still persisted and next daemon
+  restart use it. Reconnect fail become
+  `Health().discord = TOKEN_INVALID`, not crash.
+- **Bootstrap:** `halbot-daemon setup` can still set secrets from elevated
   shell (`halbot-setup set-secret DISCORD_TOKEN ...`) for first-run /
-  headless rotation. Useful before the tray is installed.
-- **No dev mode. `uv run` iteration is explicitly unsupported.** One
-  code path: read from HKLM, run as the installed service. Iteration
-  flow is **edit → pyinstaller → replace onedir → restart service**.
-  No `.env` fallback, no HKCU shadow tree, no `HALBOT_DEV` branch, no
-  env-var overrides, no alternate config sources. Any code that would
-  exist only to enable a `uv run` loop is cut. Keeps the daemon
-  coherent and trivially small.
-- **Caveats:** LocalMachine scope means any process on the host running as
-  any user can decrypt — acceptable given threat model. Keys are tied to
-  the machine; reinstall on a new box requires re-entering secrets. No
-  backup/restore story for the DPAPI blob itself.
+  headless rotation. Useful before tray installed.
+- **No dev mode. `uv run` iteration explicitly unsupported.** One code
+  path: read from HKLM, run as installed service. Iteration flow =
+  **edit → pyinstaller → replace onedir → restart service**. No `.env`
+  fallback, no HKCU shadow tree, no `HALBOT_DEV` branch, no env-var
+  overrides, no alt config sources. Any code existing only to enable
+  `uv run` loop = cut. Keep daemon coherent and trivially small.
+- **Caveats:** LocalMachine scope mean any process on host running as
+  any user can decrypt — fine given threat model. Keys tied to machine;
+  reinstall on new box require re-entering secrets. No backup/restore
+  story for DPAPI blob itself.
 
 ### Configuration
 
@@ -172,24 +166,24 @@ later. Target flow:
 - `HKLM\SOFTWARE\Halbot\Secrets\` — DPAPI-encrypted values. Write-only
   via gRPC `SetSecret`. Never displayed.
 - `HKLM\SOFTWARE\Halbot\Config\` — plaintext values. Readable via
-  `regedit` for debugging.
-- **No `config.json`** on disk. One storage backend; registry is the
-  Windows-native answer.
+  `regedit` for debug.
+- **No `config.json`** on disk. One storage backend; registry = Windows-
+  native answer.
 - **Defaults live in code** (`halbot/config.py` constant dict). Not
-  checked-in JSON. Registry stores only user overrides.
-- **ACL treatment:** `halbot-daemon setup` at install grants the installing
+  checked-in JSON. Registry store only user overrides.
+- **ACL treatment:** `halbot-daemon setup` at install grant installing
   user `KEY_WRITE` on both `Config` and `Secrets` subkeys. Daemon (as
   LocalSystem) always has write. Tray can write `Config` for
-  `PersistConfig`, but writes `Secrets` only indirectly via daemon
-  (gRPC `SetSecret`).
+  `PersistConfig`, but write `Secrets` only indirectly via daemon (gRPC
+  `SetSecret`).
 
-**Runtime config vs startup config:** the gRPC config surface exposes
-**only** fields that have a runtime effect when changed. Fields that
-would need a daemon restart (gRPC port, data paths) are startup-only
-and not present in the config RPCs — change via `halbot-daemon setup` +
-SCM restart. Hides footguns: "change it, nothing happens till restart."
+**Runtime config vs startup config:** gRPC config surface expose **only**
+fields with runtime effect when changed. Fields needing daemon restart
+(gRPC port, data paths) = startup-only, not in config RPCs — change via
+`halbot-daemon setup` + SCM restart. Hide footgun: "change it, nothing
+happen till restart."
 
-**RPC shape** — persist/reset as separate verbs, not a flag on Update:
+**RPC shape** — persist/reset as separate verbs, not flag on Update:
 
 ```proto
 rpc GetConfig(Empty) returns ConfigState;             // per-field source included
@@ -199,13 +193,13 @@ rpc ResetConfig(FieldList) returns ConfigState;       // reload from registry (o
 rpc SetSecret(SecretUpdate) returns StatusReply;      // write-only; daemon persists + reloads subsystem
 ```
 
-**`GetConfig()` returns per-field source** (`DEFAULT | REGISTRY |
-RUNTIME_OVERRIDE`). Tray shows a "modified, not persisted" indicator so
-the user can tell which live values will survive restart.
+**`GetConfig()` return per-field source** (`DEFAULT | REGISTRY |
+RUNTIME_OVERRIDE`). Tray show "modified, not persisted" indicator so
+user can tell which live values survive restart.
 
-**Workflow this enables:** change `log_level` to DEBUG, reproduce bug,
-decide DEBUG is worth keeping → `PersistConfig(["log_level"])`. Or roll
-back without restarting → `ResetConfig(["log_level"])`.
+**Workflow this enable:** change `log_level` to DEBUG, reproduce bug,
+decide DEBUG worth keeping → `PersistConfig(["log_level"])`. Or roll
+back without restart → `ResetConfig(["log_level"])`.
 
 **Initial scope (locked small):**
 
@@ -218,15 +212,14 @@ back without restarting → `ResetConfig(["log_level"])`.
 | `voice.wake_word`, `voice.idle_timeout_seconds`, `voice.energy_threshold` | registry plaintext | future | some hot, some next-session only |
 | gRPC port, data paths | registry plaintext | no (startup only) | not present in config RPCs |
 
-Design approach for expansion is documented here and in
-`halbot/config.py` module docstring once it exists: only add a field to
-`UpdateConfig` if changing it actually has a runtime effect on the
-daemon. Otherwise leave it startup-only.
+Expansion approach documented here and in `halbot/config.py` module
+docstring once exists: only add field to `UpdateConfig` if changing it
+has runtime effect on daemon. Else leave startup-only.
 
 ### Folder layout
 
-Repo root is `halbot/`. Inside it, two sibling Python packages (`halbot/`
-for the daemon, `tray/` for the GUI) plus proto + build assets.
+Repo root = `halbot/`. Inside, two sibling Python packages (`halbot/` =
+daemon, `tray/` = GUI) plus proto + build assets.
 
 ```
 halbot/                         # repo root
@@ -261,114 +254,110 @@ halbot/                         # repo root
 
 ### Packaging
 
-- **No dev-run flow. Only path is PyInstaller build → install → run
+- **No dev-run flow. Only path = PyInstaller build → install → run
   service.** See "No dev mode" under Secrets for rationale.
-- **PyInstaller `--onedir`, not `--onefile`.** Onefile extracts to temp
-  on every launch — slow startup, DLL-search headaches, awful for
+- **PyInstaller `--onedir`, not `--onefile`.** Onefile extract to temp
+  every launch — slow startup, DLL-search headaches, awful for
   faster-whisper + CUDA bundling.
-- **Two build venvs via uv extras** keep onedir outputs lean:
+- **Two build venvs via uv extras** keep onedir output lean:
   - `uv sync --only-group daemon` → daemon build venv (discord.py,
     whisper, grpcio, pywin32, etc.)
   - `uv sync --only-group tray` → tray build venv (tkinter, pystray,
     grpcio, pillow)
-  PyInstaller bundles what's importable. Separate venvs = neither exe
-  drags the other's deps.
-- **Two specs, two zips:** `halbot-daemon.zip`, `halbot-tray.zip`. Keeps
-  tray-only updates possible without touching daemon. Installer is
-  **folded into the daemon exe as a CLI subcommand**
-  (`halbot-daemon setup --install` / `--uninstall` / `set-secret`), not a
-  third binary. One fewer PyInstaller spec, one fewer artifact to keep
-  in sync.
-- **CUDA / faster-whisper bundling:** expect pain. Plan to pin a known
-  torch + cuDNN combo and add explicit `--add-binary` for CUDA DLLs. Fall
-  back to CPU whisper in packaged builds if bundling proves too fragile.
+  PyInstaller bundle what importable. Separate venvs = neither exe drag
+  other's deps.
+- **Two specs, two zips:** `halbot-daemon.zip`, `halbot-tray.zip`. Keep
+  tray-only updates possible without touching daemon. Installer
+  **folded into daemon exe as CLI subcommand**
+  (`halbot-daemon setup --install` / `--uninstall` / `set-secret`), not
+  third binary. One fewer PyInstaller spec, one fewer artifact to sync.
+- **CUDA / faster-whisper bundling:** expect pain. Plan pin known
+  torch + cuDNN combo, add explicit `--add-binary` for CUDA DLLs. Fall
+  back to CPU whisper in packaged builds if bundling too fragile.
 - **Update delivery:** manual. Download zip, run `update-tray.bat` /
   `update-daemon.bat`. No in-app update check, no GitHub Releases
-  automation. Project is not distributed.
+  automation. Project not distributed.
 
 ### Independent lifecycle
 
-Tray updates must not touch the running daemon. Consequences:
+Tray updates must not touch running daemon. Consequences:
 
-- **Daemon lifecycle managed by NSSM**, not by the tray. Subprocess-parent
-  model is rejected — closing or updating the tray would kill the bot.
+- **Daemon lifecycle managed by NSSM**, not tray. Subprocess-parent model
+  rejected — closing or updating tray would kill bot.
 - **Separate install directories**, one PyInstaller onedir per component:
   `%ProgramFiles%\Halbot\daemon\` and `%ProgramFiles%\Halbot\tray\`. No
-  shared DLLs. Updating one component never touches the other's files.
-- **Separate autostart:** NSSM auto-starts daemon at boot (before login,
+  shared DLLs. Updating one never touch other's files.
+- **Separate autostart:** NSSM auto-start daemon at boot (before login,
   LocalSystem). Tray via HKCU Run at user login.
-- **Fixed gRPC port on loopback** (e.g. `127.0.0.1:50737`). No dynamic port
-  discovery; simpler than a port-file dance.
-- **Tray reconnects on `UNAVAILABLE`.** Cheap retry loop makes daemon
-  restarts invisible to an already-open tray.
-- **Tray self-update:** Windows locks the running exe. Update flow is tray
-  → spawn `updater.exe` → tray exits → updater swaps the onedir → updater
-  launches new tray. Daemon updates stop the NSSM service, swap the
-  onedir, start the service — downtime acceptable for a toy app.
+- **Fixed gRPC port on loopback** (e.g. `127.0.0.1:50737`). No dynamic
+  port discovery; simpler than port-file dance.
+- **Tray reconnect on `UNAVAILABLE`.** Cheap retry loop make daemon
+  restarts invisible to already-open tray.
+- **Tray self-update:** Windows lock running exe. Update flow = tray →
+  spawn `updater.exe` → tray exits → updater swap onedir → updater
+  launch new tray. Daemon updates stop NSSM service, swap onedir, start
+  service — downtime fine for toy app.
 
 ### Proto compatibility — explicitly out of scope
 
-- Proto changes require rebuilding **both** daemon and tray and deploying
-  them together. No forward/backward compat. No version negotiation, no
-  reserved field numbers, no deprecation cycle. Keeps iteration fast.
-- Update delivery is manual (download zip + run updater). No in-app auto
+- Proto changes require rebuilding **both** daemon and tray, deploying
+  together. No forward/backward compat. No version negotiation, no
+  reserved field numbers, no deprecation cycle. Keep iteration fast.
+- Update delivery manual (download zip + run updater). No in-app auto
   update.
 
 ### Service account + data paths
 
-- **Daemon runs as LocalSystem** under NSSM. No dedicated service user, no
+- **Daemon run as LocalSystem** under NSSM. No dedicated service user, no
   password management.
-- **State relocates to `%ProgramData%\Halbot\`:** `sounds.db`, `logs/`,
-  persona data, any other runtime files. Today's repo-relative paths must
-  be migrated.
-- **Dev mode** still uses repo-relative paths for convenience (resolve via
-  `APP_DATA_DIR` env var or a `halbot/paths.py` helper that picks dev vs
-  prod based on whether running from a PyInstaller bundle).
+- **State relocate to `%ProgramData%\Halbot\`:** `sounds.db`, `logs/`,
+  persona data, other runtime files. Today's repo-relative paths must
+  migrate.
+- **Dev mode** still use repo-relative paths for convenience (resolve via
+  `APP_DATA_DIR` env var or `halbot/paths.py` helper picking dev vs
+  prod based on whether running from PyInstaller bundle).
 
 ### Installer scope
 
 `halbot-daemon setup`, run elevated, one-shot:
 
-- Writes initial DPAPI secret (`DISCORD_TOKEN`) to
+- Write initial DPAPI secret (`DISCORD_TOKEN`) to
   `HKLM\SOFTWARE\Halbot\Secrets`.
-- Grants installing user `KEY_WRITE` on
-  `HKLM\SOFTWARE\Halbot\Config` and `HKLM\SOFTWARE\Halbot\Secrets` via
-  `RegSetKeySecurity` (so tray and daemon can write without per-call
-  elevation; daemon already can as LocalSystem).
-- Runs `nssm install halbot ...` pointing at daemon exe.
-- Grants installing user `SERVICE_START / STOP / QUERY_STATUS` on the
-  halbot service via `sc sdset`.
-- Registers HKCU Run entry for tray exe.
-- Creates `%ProgramData%\Halbot\` with appropriate ACLs (LocalSystem
-  write, user read for log viewing).
+- Grant installing user `KEY_WRITE` on `HKLM\SOFTWARE\Halbot\Config` and
+  `HKLM\SOFTWARE\Halbot\Secrets` via `RegSetKeySecurity` (so tray and
+  daemon can write without per-call elevation; daemon already can as
+  LocalSystem).
+- Run `nssm install halbot ...` pointing at daemon exe.
+- Grant installing user `SERVICE_START / STOP / QUERY_STATUS` on halbot
+  service via `sc sdset`.
+- Register HKCU Run entry for tray exe.
+- Create `%ProgramData%\Halbot\` with proper ACLs (LocalSystem write,
+  user read for log viewing).
 
 CLI flags only. No GUI wizard. Matching `halbot-setup --uninstall`
-reverses all four steps.
+reverse all four steps.
 
 ### LLM backend: Ollama migration (TBD)
 
-- **Migrate off LM Studio to Ollama.** Rationale and details TBD; will be
-  its own plan doc. Flagged here because the restructure should not bake
-  in LM Studio assumptions (e.g. the `LMSTUDIO_MODEL` constant in
-  `bot.py`, the `ensure_model_loaded()` JIT-reload dance) any deeper
-  than today.
-- **LLM URL / model / backend are config, not secrets** — they live in
-  plaintext registry under `HKLM\SOFTWARE\Halbot\Config\llm\*`. Ollama
-  migration becomes a `UpdateConfig` + `PersistConfig` call (plus code
-  to handle the new backend), no DPAPI rotation.
-- During restructure, rename LM-Studio-specific helpers so the eventual
-  swap is a contained change to `halbot/llm.py`.
+- **Migrate off LM Studio to Ollama.** Rationale and details TBD; own
+  plan doc. Flagged here so restructure don't bake in LM Studio
+  assumptions (e.g. `LMSTUDIO_MODEL` constant in `bot.py`,
+  `ensure_model_loaded()` JIT-reload dance) any deeper than today.
+- **LLM URL / model / backend = config, not secrets** — live in plaintext
+  registry under `HKLM\SOFTWARE\Halbot\Config\llm\*`. Ollama migration
+  become `UpdateConfig` + `PersistConfig` call (plus code for new
+  backend), no DPAPI rotation.
+- During restructure, rename LM-Studio-specific helpers so eventual swap
+  = contained change to `halbot/llm.py`.
 
 ### Delivery approach
 
 - **Big-bang refactor on `main`**, not feature branches. Solo project, no
-  collaborators to unblock. Push to remote only when the whole stack is
-  green.
+  collaborators to unblock. Push to remote only when whole stack green.
 - Concrete phase breakdown and ordering: see
   [003-project-restructure-impl.md](003-project-restructure-impl.md).
 
 ## Open questions
 
-(None currently tracked — all prior questions resolved. Re-open as
-implementation surfaces new ones.)
-
+(None tracked — all prior questions resolved. Re-open as implementation
+surface new ones.)
