@@ -31,7 +31,7 @@ Status: draft, decisions landing iteratively.
   must use SCM anyway; putting Stop/Restart there too keeps the model
   coherent.
 - Tray needs `SERVICE_START / STOP / QUERY_STATUS` granted to the
-  installing user — set via `sc sdset` by `halbot-setup.exe` at install.
+  installing user — set via `sc sdset` by `halbot-daemon setup` at install.
 - Bury SCM controls under a "Service" submenu in the tray. 95% of daily
   operations should go through module-level RPCs below, not service
   restarts.
@@ -93,7 +93,7 @@ RPCs for subsystems without state worth managing.
 ### Secret update UX — TBD / future
 
 Scope locked but implementation deferred. Initial implementation uses
-`halbot-setup.exe set-secret ...` from an elevated shell. Tray UI comes
+`halbot-daemon setup set-secret ...` from an elevated shell. Tray UI comes
 later. Target flow:
 
 - **Tray "Settings → Discord token"** → masked input dialog → OK →
@@ -149,12 +149,15 @@ later. Target flow:
   If reconnect fails with the new token, the value is still persisted and
   a subsequent daemon restart uses it. Reconnect failure becomes
   `Health().discord = TOKEN_INVALID`, not a crash.
-- **Bootstrap:** `halbot-setup.exe` can still set secrets from an elevated
+- **Bootstrap:** `halbot-daemon setup` can still set secrets from an elevated
   shell (`halbot-setup set-secret DISCORD_TOKEN ...`) for first-run /
   headless rotation. Useful before the tray is installed.
-- **Dev fallback:** read order is env var → DPAPI registry → hard error.
-  Keeps `uv run -m halbot.daemon` frictionless for local dev without
-  HKLM write rights. `.env` is no longer a supported production path.
+- **No dev mode.** One code path: read from HKLM. Local iteration via
+  `uv run -m halbot.daemon` assumes a prior one-time `halbot-setup`
+  install has populated the registry. No `.env` fallback, no HKCU
+  shadow tree, no `HALBOT_DEV=1` branch. Keeps the daemon coherent.
+  Iteration flow: edit → `uv run` (reads same registry as service) →
+  when ready, `pyinstaller` → replace onedir → restart service.
 - **Caveats:** LocalMachine scope means any process on the host running as
   any user can decrypt — acceptable given threat model. Keys are tied to
   the machine; reinstall on a new box requires re-entering secrets. No
@@ -172,7 +175,7 @@ later. Target flow:
   Windows-native answer.
 - **Defaults live in code** (`halbot/config.py` constant dict). Not
   checked-in JSON. Registry stores only user overrides.
-- **ACL treatment:** `halbot-setup.exe` at install grants the installing
+- **ACL treatment:** `halbot-daemon setup` at install grants the installing
   user `KEY_WRITE` on both `Config` and `Secrets` subkeys. Daemon (as
   LocalSystem) always has write. Tray can write `Config` for
   `PersistConfig`, but writes `Secrets` only indirectly via daemon
@@ -181,7 +184,7 @@ later. Target flow:
 **Runtime config vs startup config:** the gRPC config surface exposes
 **only** fields that have a runtime effect when changed. Fields that
 would need a daemon restart (gRPC port, data paths) are startup-only
-and not present in the config RPCs — change via `halbot-setup.exe` +
+and not present in the config RPCs — change via `halbot-daemon setup` +
 SCM restart. Hides footguns: "change it, nothing happens till restart."
 
 **RPC shape** — persist/reset as separate verbs, not a flag on Update:
@@ -247,8 +250,6 @@ halbot/                         # repo root
 │   ├── __init__.py
 │   ├── mgmt_client.py          # gRPC client
 │   └── tray.py                 # entrypoint: tray icon + log window
-├── setup/
-│   └── halbot_setup.py         # elevated one-shot: writes HKLM secrets
 ├── scripts/
 │   └── gen_proto.ps1           # protoc codegen wrapper
 ├── build_daemon.spec           # PyInstaller spec (onedir)
@@ -264,9 +265,11 @@ halbot/                         # repo root
   temp on every launch — slow startup, DLL-search headaches, awful for
   faster-whisper + CUDA bundling.
 - **Two specs, two zips:** `halbot-daemon.zip`, `halbot-tray.zip`. Keeps
-  tray-only updates possible without touching daemon. `halbot-setup.exe`
-  is a third small spec (or folded into the daemon build as a CLI
-  subcommand).
+  tray-only updates possible without touching daemon. Installer is
+  **folded into the daemon exe as a CLI subcommand**
+  (`halbot-daemon setup --install` / `--uninstall` / `set-secret`), not a
+  third binary. One fewer PyInstaller spec, one fewer artifact to keep
+  in sync.
 - **CUDA / faster-whisper bundling:** expect pain. Plan to pin a known
   torch + cuDNN combo and add explicit `--add-binary` for CUDA DLLs. Fall
   back to CPU whisper in packaged builds if bundling proves too fragile.
@@ -315,7 +318,7 @@ Tray updates must not touch the running daemon. Consequences:
 
 ### Installer scope
 
-`halbot-setup.exe`, run elevated, one-shot:
+`halbot-daemon setup`, run elevated, one-shot:
 
 - Writes initial DPAPI secret (`DISCORD_TOKEN`) to
   `HKLM\SOFTWARE\Halbot\Secrets`.
@@ -356,7 +359,7 @@ reverses all four steps.
   1. Move flat modules into `halbot/` package; fix imports.
   2. Add proto + `_gen/` + gRPC server.
   3. Build `tray/` package; tray talks only to daemon over gRPC.
-  4. Secrets: `halbot/secrets.py` + `halbot-setup.exe`; drop `.env`.
+  4. Secrets: `halbot/secrets.py` + daemon `setup` subcommand; drop `.env`.
   5. NSSM integration + installer steps 2–4.
   6. PyInstaller specs + two-zip build + update scripts.
 
