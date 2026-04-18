@@ -23,6 +23,10 @@ tray = [
     "pystray>=0.19",
     "pillow>=10",
 ]
+tts = [
+    "kokoro>=0.9",
+    "soundfile>=0.12",
+]
 
 [dependency-groups]
 dev = []
