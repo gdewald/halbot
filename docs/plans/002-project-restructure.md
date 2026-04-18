@@ -23,6 +23,11 @@ Status: design locked. Scope and outcome. Implementation plan at
   Regen via `scripts/gen_proto.ps1` when `.proto` changes.
 - **Log streaming stay file-tail**, not gRPC server-streaming RPC. Keep
   viewer trivial, unchanged from today.
+- **Log level = single global setting** on daemon root logger — no
+  per-source (per-module / per-subsystem) filtering at write time.
+  Per-source verbosity handled in log viewer UI (match on logger name
+  in tray), not by routing separate levels into handler. Keeps daemon
+  simple, avoids config explosion.
 
 ### Daemon lifecycle — SCM, not gRPC
 
@@ -288,7 +293,10 @@ Tray updates must not touch running daemon. Consequences:
   `%ProgramFiles%\Halbot\daemon\` and `%ProgramFiles%\Halbot\tray\`. No
   shared DLLs. Updating one never touch other's files.
 - **Separate autostart:** NSSM auto-start daemon at boot (before login,
-  LocalSystem). Tray via HKCU Run at user login.
+  LocalSystem). Tray autostart **manual** initially (user drags shortcut
+  into `shell:startup`) — elevated installer cannot cleanly write
+  invoking user's HKCU. Automated per-user tray registration = later
+  enhancement.
 - **Fixed gRPC port on loopback** (e.g. `127.0.0.1:50737`). No dynamic
   port discovery; simpler than port-file dance.
 - **Tray reconnect on `UNAVAILABLE`.** Cheap retry loop make daemon
@@ -330,7 +338,7 @@ Tray updates must not touch running daemon. Consequences:
 - Run `nssm install halbot ...` pointing at daemon exe.
 - Grant installing user `SERVICE_START / STOP / QUERY_STATUS` on halbot
   service via `sc sdset`.
-- Register HKCU Run entry for tray exe.
+- (Tray autostart not handled — see Independent lifecycle.)
 - Create `%ProgramData%\Halbot\` with proper ACLs (LocalSystem write,
   user read for log viewing).
 
