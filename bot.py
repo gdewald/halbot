@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 
 import discord
 import requests
@@ -303,9 +304,8 @@ async def on_message(message: discord.Message):
         if audio_atts:
             text = (text + "\n" if text else "") + " ".join(audio_atts)
         if msg.author == client.user:
-            channel_history.append({"role": "assistant", "content": f"[BOT REPLY — this is what I said to the user, NOT a JSON action]: {text}"})
-        else:
-            channel_history.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
+            continue
+        channel_history.append({"role": "user", "content": f"{msg.author.display_name}: {text}"})
     channel_history.reverse()
 
     saved = db_list()
@@ -324,7 +324,8 @@ async def on_message(message: discord.Message):
         voice_channels_str = "(unknown)"
         voice_status_str = "Not connected to any voice channel."
 
-    actions = parse_intent(
+    actions = await asyncio.to_thread(
+        parse_intent,
         user_text, sounds, saved, channel_history,
         attachment_info or None,
         guild=guild,
@@ -810,7 +811,8 @@ if __name__ == "__main__":
                         help="List all persona/behavior directives and exit")
     args = parser.parse_args()
 
-    configure_logging()
+    _default_log = Path(__file__).resolve().parent / "logs" / "halbot.log"
+    configure_logging(_default_log)
 
     if not DISCORD_TOKEN and not (args.clear_personas or args.list_personas):
         print("Error: DISCORD_TOKEN not set. Copy .env.example to .env and fill it in.")

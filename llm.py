@@ -7,14 +7,18 @@ from pathlib import Path
 
 import requests
 
-from db import _env_bool, emoji_db_list, persona_list
+from db import emoji_db_list, persona_list
 
 log = logging.getLogger("halbot")
 
 LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions")
 LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "google/gemma-4-e2b")
 
-LLM_DISABLE_THINKING = _env_bool("LLM_DISABLE_THINKING", True)
+# Reasoning models can take >30s for a single response. Keep both read
+# timeouts generous so a slow generation doesn't surface as "I didn't
+# understand that".
+LLM_TIMEOUT = 120
+LLM_RETRY_TIMEOUT = 180
 
 CHANNEL_HISTORY_LIMIT = 50
 
@@ -88,13 +92,17 @@ You are Halbot, a Discord soundboard bot that listens in a voice channel.
 A user spoke and an imperfect STT engine transcribed what they said.  In a
 SINGLE response, do two things:
 
-1. Decide whether the speaker addressed you (wake word "Halbot" — or any
-   close phonetic mishearing: Hal Bot, Albot, Owlbot, Palbot, Walbot,
-   Halbert, Hellboy, Hellbot, Howlbot, Holbot, Hal-Bot, Hal Bought,
-   How Bout, Al Bought, etc.).  If NOT addressed, return wake=false and
-   actions=[].
-2. If addressed, pick the best sound to play for the command that follows
-   the wake word.
+1. Decide whether the speaker addressed you. wake=true if the utterance
+   contains the wake word "Halbot" OR any close phonetic mishearing:
+   Hal Bot, Albot, Owlbot, Palbot, Walbot, Halbert, Hellboy, Hellbot,
+   Howlbot, Holbot, Hal-Bot, Hal Bought, How Bout, Al Bought, etc.
+   This decision is PURELY about whether the wake word was spoken — do
+   NOT consider whether the command is actionable. If the wake word is
+   present, wake=true even if you cannot pick a sound.
+2. If wake=true, pick the best sound to play for the command that
+   follows the wake word. If no sound fits or there is no command after
+   the wake word, return actions=[] (still with wake=true).
+3. If wake=false, actions MUST be [].
 
 SAVED LIBRARY:
 <<SAVED_DETAILS>>
@@ -111,18 +119,9 @@ Each action is one of:
   {"action": "voice_play", "name": "<exact sound name>"}
   {"action": "unknown", "message": "<brief response>"}
 
-If wake=false, actions MUST be [].
 Match creatively — "something scary" → pick a scary-sounding name,
 "play airhorn" → exact match.  Names must be EXACT from the lists above.
 """
-
-
-def _apply_thinking_flag(body: dict) -> dict:
-    """Stamp chat_template_kwargs.enable_thinking=False when LLM_DISABLE_THINKING is set."""
-    if LLM_DISABLE_THINKING:
-        tmpl = body.setdefault("chat_template_kwargs", {})
-        tmpl["enable_thinking"] = False
-    return body
 
 
 def _lmstudio_base() -> str:
@@ -189,9 +188,8 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    # Intentionally skip _apply_thinking_flag — vision backend may reject unknown kwargs.
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -302,16 +300,15 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    _apply_thinking_flag(body)
 
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("LM Studio %s response: %s", resp.status_code, resp.text[:500])
             if resp.status_code in (400, 404, 409, 503):
                 if ensure_model_loaded(LMSTUDIO_MODEL):
                     log.info("Retrying chat completion after model load")
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=60)
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
                     if resp.status_code >= 400:
                         log.warning("LM Studio retry %s response: %s",
                                     resp.status_code, resp.text[:500])
@@ -337,6 +334,9 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
+            if content.lstrip().startswith("[BOT REPLY"):
+                log.warning("LM Studio mimicked BOT REPLY prefix, dropping: %s", content[:200])
+                return [{"action": "error", "message": "LLM returned a mimicked prior reply instead of a JSON action. Try again."}]
             log.warning("LM Studio returned non-JSON, treating as unknown: %s", content[:200])
             return [{"action": "unknown", "message": content}]
         log.info("Parsed actions: %s", json.dumps(parsed, indent=2))
@@ -350,7 +350,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         return [{"action": "error", "message": "I'm having trouble thinking right now — is LM Studio running?"}]
     except (requests.RequestException, KeyError, IndexError) as e:
         log.error("Failed to parse intent: %s", e)
-        return [{"action": "unknown"}]
+        return [{"action": "error", "message": f"LM Studio call failed ({type(e).__name__}: {e}). Check LM Studio server."}]
 
 
 def customize_response(raw_text: str, *, context: str = "") -> str:
@@ -381,13 +381,12 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    _apply_thinking_flag(body)
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=15)
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             if resp.status_code in (400, 404, 409, 503):
                 if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
         message = resp.json()["choices"][0].get("message", {})
         content = (message.get("content") or "").strip()
@@ -433,13 +432,12 @@ def check_wake_word(transcript: str) -> tuple[bool, str]:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    _apply_thinking_flag(body)
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=15)
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             if resp.status_code in (400, 404, 409, 503):
                 if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
         content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
         if content.startswith("```"):
@@ -500,16 +498,15 @@ def parse_voice_combined(
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    _apply_thinking_flag(body)
 
     content = ""
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("Voice combined LLM %s: %s", resp.status_code, resp.text[:300])
             if resp.status_code in (400, 404, 409, 503):
                 if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=60)
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
         raw_json = resp.json()
         choice = raw_json["choices"][0]
@@ -579,16 +576,15 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    _apply_thinking_flag(body)
 
     content = ""
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("Voice LLM %s: %s", resp.status_code, resp.text[:300])
             if resp.status_code in (400, 404, 409, 503):
                 if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=60)
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
         raw_json = resp.json()
         choice = raw_json["choices"][0]

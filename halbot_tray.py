@@ -1,7 +1,10 @@
 """Halbot Windows tray app.
 
-Runs the Discord bot in a worker thread and puts a tray icon in the
+Spawns the Discord bot as a child process and puts a tray icon in the
 notification area with Start/Stop controls and a live-tailing log viewer.
+The child is a plain `python bot.py` subprocess, so Stop/Restart never has
+to untangle discord.py's event loop, voice websockets, or whisper state —
+we just `terminate()` the process and spawn a fresh one.
 
 Usage
 -----
@@ -16,15 +19,13 @@ Autostart management (stdlib winreg, HKCU Run key):
 from __future__ import annotations
 
 import argparse
-import asyncio
 import ctypes
 import logging
-import logging.handlers
 import os
-import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
@@ -106,21 +107,35 @@ def _show_already_running_dialog() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bot lifecycle
+# Bot lifecycle (subprocess model)
 # ---------------------------------------------------------------------------
+def _child_python_exe() -> str:
+    """Path to the Python interpreter used to run the bot child process.
+
+    Prefer pythonw.exe so the child has no console window. Falls back to the
+    current interpreter if pythonw is missing (non-Windows, embedded builds).
+    """
+    exe = Path(sys.executable)
+    candidate = exe.with_name("pythonw.exe")
+    return str(candidate if candidate.exists() else exe)
+
+
 class BotRunner:
-    """Drive bot.client on a private asyncio loop in a background thread."""
+    """Spawn bot.py as a child process. Start = Popen, Stop = terminate."""
+
+    STOP_GRACE_SECONDS = 8.0   # time after terminate() before kill()
+    KILL_WAIT_SECONDS = 5.0    # time after kill() before giving up
 
     def __init__(self, on_state_change=None):
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen | None = None
+        self._watcher: threading.Thread | None = None
         self._on_state_change = on_state_change or (lambda running: None)
         self._lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
-        t = self._thread
-        return t is not None and t.is_alive()
+        p = self._proc
+        return p is not None and p.poll() is None
 
     def start(self) -> None:
         with self._lock:
@@ -129,82 +144,81 @@ class BotRunner:
             if not bot.DISCORD_TOKEN:
                 log.error("DISCORD_TOKEN not set — cannot start bot")
                 return
-            self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(
-                target=self._run, name="halbot-worker", daemon=True
+
+            creationflags = 0
+            if os.name == "nt":
+                # CREATE_NO_WINDOW so the child never flashes a console window
+                # even if python.exe (not pythonw.exe) is picked.
+                creationflags |= 0x08000000  # CREATE_NO_WINDOW
+
+            try:
+                proc = subprocess.Popen(
+                    [_child_python_exe(), str(APP_DIR / "bot.py")],
+                    cwd=str(APP_DIR),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                    close_fds=True,
+                )
+            except Exception:
+                log.exception("Failed to spawn bot subprocess")
+                return
+
+            self._proc = proc
+            log.info("Bot subprocess started (pid=%s)", proc.pid)
+            self._watcher = threading.Thread(
+                target=self._watch, args=(proc,), name="halbot-watcher", daemon=True,
             )
-            self._thread.start()
+            self._watcher.start()
         self._on_state_change(True)
 
-    def _run(self) -> None:
-        assert self._loop is not None
-        loop = self._loop
-        asyncio.set_event_loop(loop)
-        # IMPORTANT: build the discord.Client on this thread, AFTER set_event_loop.
-        # aiohttp's connector binds to the running-loop context, so creating the
-        # client on the main thread produces "Connector is closed." at login time.
-        bot.build_client()
-        try:
-            loop.run_until_complete(bot.client.start(bot.DISCORD_TOKEN))
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            pass  # clean shutdown via _close_and_cancel()
-        except Exception:
-            log.exception("Bot worker crashed")
-        finally:
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            except Exception:
-                pass
-            loop.close()
-            self._on_state_change(False)
-
-    def stop(self, timeout: float = 10.0) -> None:
+    def _watch(self, proc: subprocess.Popen) -> None:
+        rc = proc.wait()
+        log.info("Bot subprocess (pid=%s) exited with code %s", proc.pid, rc)
         with self._lock:
-            thread = self._thread
-            loop = self._loop
-            client = bot.client
-        if thread is None or not thread.is_alive():
+            if self._proc is proc:
+                self._proc = None
+        self._on_state_change(False)
+
+    def stop(self) -> None:
+        with self._lock:
+            proc = self._proc
+        if proc is None or proc.poll() is not None:
             with self._lock:
-                self._thread = None
-                self._loop = None
+                self._proc = None
             return
 
-        if loop is not None and loop.is_running() and client is not None:
-            async def _close_and_cancel():
-                # Snapshot voice state here (on the event loop thread) so we
-                # beat on_voice_state_update which fires during client.close().
-                bot.snapshot_voice_state()
-                # Give discord.py up to 5s to close gracefully, then move on.
-                try:
-                    await asyncio.wait_for(client.close(), timeout=5.0)
-                except Exception:
-                    pass
-                # Cancel every remaining task so run_until_complete() returns.
-                tasks = [t for t in asyncio.all_tasks()
-                         if not t.done() and t is not asyncio.current_task()]
-                for t in tasks:
-                    t.cancel()
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+        log.info("Stopping bot subprocess (pid=%s)", proc.pid)
+        try:
+            proc.terminate()
+        except Exception:
+            log.exception("terminate() failed")
 
-            fut = asyncio.run_coroutine_threadsafe(_close_and_cancel(), loop)
+        deadline = time.monotonic() + self.STOP_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        if proc.poll() is None:
+            log.warning("Bot didn't exit after terminate — killing (pid=%s)", proc.pid)
             try:
-                fut.result(timeout=timeout)
-            except TimeoutError:
-                log.warning("Shutdown coroutine timed out after %ss — forcing loop stop", timeout)
-                try:
-                    loop.call_soon_threadsafe(loop.stop)
-                except RuntimeError:
-                    pass
+                proc.kill()
             except Exception:
-                log.exception("Error during bot shutdown")
+                log.exception("kill() failed")
+            try:
+                proc.wait(timeout=self.KILL_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                log.error("Bot subprocess (pid=%s) survived kill — abandoning", proc.pid)
 
-        thread.join(timeout=5.0)
-        if thread.is_alive():
-            log.warning("Worker thread did not exit — abandoning (daemon, will die with process)")
+        watcher = self._watcher
+        if watcher is not None and watcher.is_alive():
+            watcher.join(timeout=1.0)
+
         with self._lock:
-            self._thread = None
-            self._loop = None
+            if self._proc is proc:
+                self._proc = None
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +241,14 @@ def _make_icon(running: bool) -> Image.Image:
 # Log viewer window
 # ---------------------------------------------------------------------------
 class LogWindow:
-    """Live-tailing log viewer. A Toplevel that shows records pulled from a queue."""
+    """Live-tailing log viewer. Tails logs/halbot.log from disk."""
 
-    POLL_MS = 200
+    POLL_MS = 250
+    READ_CHUNK = 65536  # per-tick byte cap to stay responsive
 
     def __init__(
         self,
         root: tk.Tk,
-        record_queue: queue.Queue,
         runner=None,
         on_start=None,
         on_stop=None,
@@ -242,7 +256,6 @@ class LogWindow:
         is_busy=None,
     ):
         self._root = root
-        self._queue = record_queue
         self._runner = runner
         self._on_start = on_start
         self._on_stop = on_stop
@@ -253,7 +266,8 @@ class LogWindow:
         self._btn_startstop: tk.Button | None = None
         self._btn_restart: tk.Button | None = None
         self._autoscroll = True
-        self._formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        self._file_pos = 0  # last-read offset in LOG_FILE
+        self._file_inode_key = None  # (size, mtime) snapshot for rotation detection
 
     def show(self) -> None:
         if self._win is not None and self._win.winfo_exists():
@@ -313,6 +327,7 @@ class LogWindow:
 
     def _seed_from_file(self) -> None:
         if not LOG_FILE.exists() or self._text is None:
+            self._file_pos = 0
             return
         try:
             # Read the last ~64KB of the file — enough to give context without
@@ -326,20 +341,37 @@ class LogWindow:
             if start > 0:
                 chunk = chunk.split("\n", 1)[-1]  # drop partial first line
             self._append(chunk)
+            self._file_pos = end
+            self._file_inode_key = self._stat_key()
         except Exception:
             log.exception("Could not seed log viewer from file")
+            self._file_pos = 0
+
+    def _stat_key(self):
+        try:
+            st = LOG_FILE.stat()
+            return (st.st_size, st.st_mtime_ns)
+        except FileNotFoundError:
+            return None
 
     def _drain(self) -> None:
         if self._win is None or not self._win.winfo_exists():
             return
-        pulled = 0
         try:
-            while pulled < 500:  # cap per-tick to stay responsive
-                record = self._queue.get_nowait()
-                self._append(self._formatter.format(record) + "\n")
-                pulled += 1
-        except queue.Empty:
-            pass
+            if LOG_FILE.exists():
+                size = LOG_FILE.stat().st_size
+                # Detect rotation/truncate: file shrank below last-known offset.
+                if size < self._file_pos:
+                    self._file_pos = 0
+                if size > self._file_pos:
+                    with LOG_FILE.open("rb") as fh:
+                        fh.seek(self._file_pos)
+                        chunk = fh.read(self.READ_CHUNK)
+                        self._file_pos = fh.tell()
+                    if chunk:
+                        self._append(chunk.decode("utf-8", errors="replace"))
+        except Exception:
+            log.exception("Log tail read failed")
         self._refresh_buttons()
         self._root.after(self.POLL_MS, self._drain)
 
@@ -468,13 +500,11 @@ def run_app() -> None:
         _show_already_running_dialog()
         return
 
-    # Logging: stdout + rotating file. Add a QueueHandler for the GUI.
+    # Tray's own logs share the bot's rotating file. The child bot process
+    # reconfigures logging on its own startup; both writers appending to the
+    # same RotatingFileHandler-managed file is fine for typical volumes, and
+    # the log viewer tails the file so it sees both streams.
     bot.configure_logging(LOG_FILE)
-    record_queue: queue.Queue = queue.Queue(maxsize=10000)
-    qh = logging.handlers.QueueHandler(record_queue)
-    logging.getLogger().addHandler(qh)
-
-    bot.db_init()
 
     # Tk runs on the main thread; create root up front and keep it hidden.
     root = tk.Tk()
@@ -521,7 +551,7 @@ def run_app() -> None:
         _schedule(_restart, name="halbot-restart")
 
     log_window = LogWindow(
-        root, record_queue,
+        root,
         runner=runner,
         on_start=do_start,
         on_stop=do_stop,
