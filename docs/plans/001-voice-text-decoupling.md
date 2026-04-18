@@ -6,32 +6,29 @@
 
 ## Motivation
 
-Voice is currently treated as a child of the text channel the bot was @-mentioned
-in to join. That coupling shows up in several places:
+Voice currently child of text channel bot @-mentioned in to join. Coupling shows several places:
 
-- [`VoiceListener.__init__(vc, text_channel, on_command)`](../../voice.py) pins a voice
-  session to whichever text channel triggered the join.
+- [`VoiceListener.__init__(vc, text_channel, on_command)`](../../voice.py) pins voice
+  session to text channel that triggered join.
 - [`handle_voice_command`](../../bot.py) writes all voice-session feedback (unknown
-  command, miss, processing failure) to that stored text channel — regardless of
-  whether the conversation has moved on.
-- [`_voice_reconnect`](../../bot.py) snapshots `(voice_ch_id, text_ch_id)` as a
+  command, miss, processing failure) to stored text channel — regardless of
+  whether conversation moved on.
+- [`_voice_reconnect`](../../bot.py) snapshots `(voice_ch_id, text_ch_id)` as
   pair for restart recovery.
-- The idle-disconnect "👋 Left X" message posts to that text channel.
-- **Memory asymmetry:** `parse_intent` is fed 50 messages of channel history;
+- Idle-disconnect "👋 Left X" message posts to that text channel.
+- **Memory asymmetry:** `parse_intent` fed 50 messages of channel history;
   `parse_voice_intent` / `parse_voice_combined` get zero. Voice has amnesia; text
-  can be confused by unrelated voice activity logged in chat.
+  can confuse from unrelated voice activity logged in chat.
 
-The goal of this refactor is to treat a voice session as a first-class object
-with its own feedback surface and its own conversational memory — not a leaf
-hanging off a text channel.
+Goal: treat voice session as first-class object with own feedback surface and own conversational memory — not leaf hanging off text channel.
 
 ## Scope
 
 ### In scope
-- Remove `text_channel` as a constructor arg on `VoiceListener`.
-- Introduce a `MessageSink` abstraction for voice-session feedback.
-- Default voice-session feedback to the voice channel's built-in chat pane.
-- Give the voice LLM its own short rolling conversational memory.
+- Remove `text_channel` constructor arg on `VoiceListener`.
+- Introduce `MessageSink` abstraction for voice-session feedback.
+- Default voice-session feedback to voice channel's built-in chat pane.
+- Give voice LLM own short rolling conversational memory.
 - Preserve reconnect-on-restart behavior.
 
 ### Out of scope (possible follow-ups)
@@ -46,34 +43,34 @@ hanging off a text channel.
 
 | Option | Description | Pros | Cons |
 |---|---|---|---|
-| **A1. Voice channel chat** ✅ recommended | `VoiceChannel` is `Messageable` — post into its built-in chat | Native Discord idiom; scoped to voice participants; zero config | Some servers disable VC chat; bot needs `send_messages` there |
-| A2. Configurable `halbot_channel` per guild | Admin sets one channel via a command | Predictable | Needs DB + command; easy to forget to set |
+| **A1. Voice channel chat** ✅ recommended | `VoiceChannel` is `Messageable` — post into built-in chat | Native Discord idiom; scoped to voice participants; zero config | Some servers disable VC chat; bot needs `send_messages` there |
+| A2. Configurable `halbot_channel` per guild | Admin sets one channel via command | Predictable | Needs DB + command; easy forget to set |
 | A3. Auto-thread on voice channel chat | Thread per session, archive on leave | Keeps repeated noise out of main chat | More moving parts; needs `create_public_threads` |
-| A4. TTS + logs only | Errors spoken, details in `halbot.log` | Cleanest for the TTS-first future | Users can't scroll to see what they said wrong |
+| A4. TTS + logs only | Errors spoken, details in `halbot.log` | Cleanest for TTS-first future | Users can't scroll to see what said wrong |
 
-### B. What conversational context should the voice LLM see?
+### B. What conversational context should voice LLM see?
 
 | Option | Voice LLM sees | Good when | Bad when |
 |---|---|---|---|
-| B1. No history (status quo) | Just the transcript | Simple, fast, cheap | Can't handle "play it again" / "the other one" |
-| **B2. Voice-only rolling buffer** ✅ recommended | Last N voice transcripts + bot responses from this session | Continuous voice conversation; zero cross-contamination | Bot has no idea what's happening in text chat |
-| B3. Text channel history | Last 50 messages from joined-from text channel | Voice reacts to text ("the sound Dave posted") | This is exactly the coupling we're removing |
-| B4. Cross-channel guild summary | A background-maintained summary, fed to both text and voice LLMs | "Halbot knows what's going on" — richest UX | Needs summarizer loop + decay policy |
-| **B5. Separate memories** ✅ recommended (pairs with B2) | Voice sees voice; text sees text; no crossover | Clean separation; matches the refactor thesis | Can't bridge modalities explicitly |
+| B1. No history (status quo) | Just transcript | Simple, fast, cheap | Can't handle "play it again" / "the other one" |
+| **B2. Voice-only rolling buffer** ✅ recommended | Last N voice transcripts + bot responses from session | Continuous voice conversation; zero cross-contamination | Bot no idea what's happening in text chat |
+| B3. Text channel history | Last 50 messages from joined-from text channel | Voice reacts to text ("sound Dave posted") | Exactly coupling we removing |
+| B4. Cross-channel guild summary | Background-maintained summary, fed to both text and voice LLMs | "Halbot knows what's going on" — richest UX | Needs summarizer loop + decay policy |
+| **B5. Separate memories** ✅ recommended (pairs with B2) | Voice sees voice; text sees text; no crossover | Clean separation; matches refactor thesis | Can't bridge modalities explicitly |
 
 ### Recommendation
-**A1 + B2/B5.** Voice feedback goes into the voice channel's own chat pane
-(with a graceful fallback — see open question 1). Voice gets a rolling
-in-memory buffer of its own session; text keeps per-channel history. No
+**A1 + B2/B5.** Voice feedback goes into voice channel's own chat pane
+(graceful fallback — see open question 1). Voice gets rolling
+in-memory buffer of own session; text keeps per-channel history. No
 cross-modality leakage.
 
-B4 (guild-level summary) is an interesting follow-up once this lands and we
+B4 (guild-level summary) interesting follow-up once this lands and we
 see whether voice + text feel too siloed in practice.
 
 ## Structural changes
 
-Replace the current ad-hoc `VoiceListener(vc, text_channel, on_command)` model
-with a `VoiceSession` object that owns everything voice-scoped:
+Replace current ad-hoc `VoiceListener(vc, text_channel, on_command)` model
+with `VoiceSession` object owning everything voice-scoped:
 
 ```python
 @dataclass
@@ -101,46 +98,46 @@ class LogOnlySink:         # no user-facing output
     ...
 ```
 
-### `VoiceListener` loses its `text_channel` parameter
+### `VoiceListener` loses `text_channel` parameter
 
-It becomes a pure STT/VAD service. Every call site that reaches into
+Becomes pure STT/VAD service. Every call site reaching into
 `listener.text_channel` today moves to `session.message_sink.send(...)`.
 
 ### `voice_listeners` becomes `dict[int, VoiceSession]`
 
-All the current single-file code paths (`voice_join`, `voice_leave`,
+All current single-file code paths (`voice_join`, `voice_leave`,
 `handle_voice_command`, `_voice_idle_disconnect`, `on_voice_state_update`,
 `_voice_reconnect`) switch to operating on `VoiceSession` objects.
 
 ### Reconnect snapshot carries sink config
 
-`_voice_reconnect[gid] = (voice_ch_id, sink_spec)` where `sink_spec` is
-enough to rebuild the sink (e.g. `("voice_chat",)` or
+`_voice_reconnect[gid] = (voice_ch_id, sink_spec)` where `sink_spec`
+enough to rebuild sink (e.g. `("voice_chat",)` or
 `("text", text_channel_id)`).
 
-### Voice LLM sees its own history
+### Voice LLM sees own history
 
-`parse_voice_intent` and `parse_voice_combined` gain an optional
+`parse_voice_intent` and `parse_voice_combined` gain optional
 `history: list[dict]` parameter populated from `session.history`. Shape
 matches `parse_intent`'s `channel_history` (role/content dicts), so no
 prompt-engineering drift.
 
-## Rollout plan — each step is a separate commit
+## Rollout plan — each step separate commit
 
 ### Step 1. Introduce `MessageSink` + refactor `VoiceListener`
 - Add `MessageSink` protocol + `VoiceChatSink`, `TextChannelSink`, `LogOnlySink`.
 - Remove `text_channel` param from `VoiceListener.__init__`; plumb sink through
-  a new `VoiceSession` dataclass.
-- No behavior change yet — at this step the sink is always `TextChannelSink`
+  new `VoiceSession` dataclass.
+- No behavior change yet — this step sink always `TextChannelSink`
   built from `message.channel`.
 - Verification: bot feels identical to today.
 
 ### Step 2. Default to voice-channel chat (option A1)
 - Switch `voice_join` to construct `VoiceChatSink(vc.channel)`.
 - Implement fallback path per open question 1.
-- Update idle-disconnect and "bot was disconnected" telemetry to use the sink.
-- Verification: join from `#bot-commands`, voice feedback appears in the voice
-  channel's chat, not in `#bot-commands`.
+- Update idle-disconnect and "bot was disconnected" telemetry to use sink.
+- Verification: join from `#bot-commands`, voice feedback appears in voice
+  channel's chat, not `#bot-commands`.
 
 ### Step 3. Voice rolling history (options B2 + B5)
 - Add `VoiceSession.history: deque[VoiceTurn]` with env-configurable
@@ -148,104 +145,103 @@ prompt-engineering drift.
 - Append `(user_display_name, transcript, bot_response)` after each voice
   command resolves.
 - Pass `history` into `parse_voice_intent` / `parse_voice_combined`; fold into
-  the messages list as user/assistant turns.
-- Clear on voice-leave unless persistence is chosen (open question 2).
+  messages list as user/assistant turns.
+- Clear on voice-leave unless persistence chosen (open question 2).
 - Verification: say "play cheering", then "play it again" — second command
-  should resolve to the same sound.
+  should resolve to same sound.
 
 ### Step 4. Update reconnect snapshot
-- Snapshot `sink_spec` alongside the voice channel id.
-- Rebuild the sink on reconnect.
-- Verification: restart the bot while in voice, feedback continues to go to the
+- Snapshot `sink_spec` alongside voice channel id.
+- Rebuild sink on reconnect.
+- Verification: restart bot while in voice, feedback continues to go to
   right place after reconnect.
 
 ## Decisions (locked 2026-04-17)
 
-Each decision records the chosen option, the alternatives that were weighed,
-and the tradeoff that drove the pick. Future changes to these should be made
-by amending this section, not rewriting it.
+Each decision records chosen option, alternatives weighed,
+and tradeoff that drove pick. Future changes should amend this section, not rewrite.
 
 ### 1. Voice channel chat fallback — **1a: silent, log-only**
-When the bot can't post into the voice channel's chat (feature disabled by
-the server, missing `send_messages` permission, channel-type quirk), it does
-not post anywhere. The failed message is written to `halbot.log` at WARNING
-level and the user sees nothing in Discord.
+When bot can't post into voice channel's chat (feature disabled by
+server, missing `send_messages` permission, channel-type quirk), posts
+nowhere. Failed message written to `halbot.log` at WARNING
+level; user sees nothing in Discord.
 
 | Option | Chosen | Rationale |
 |---|---|---|
 | **a) Silent — log-only** | ✅ | Keeps voice truly decoupled; no risk of surprise posts leaking into unrelated channels; aligns with decision 4 (spoken-only feedback) |
-| b) Fall back to the joined-from text channel | — | Reintroduces the coupling this refactor removes |
-| c) Fall back to the system channel, then log-only | — | System channel is for Discord infra events; spamming it with voice feedback is noisy for admins |
+| b) Fall back to joined-from text channel | — | Reintroduces coupling this refactor removes |
+| c) Fall back to system channel, then log-only | — | System channel for Discord infra events; spamming with voice feedback noisy for admins |
 
-**Implementation note:** emit a WARNING log line on first fallback per session
-so a confused admin has a breadcrumb to find, but do not repeat it for
-subsequent messages in the same session.
+**Implementation note:** emit WARNING log line on first fallback per session
+so confused admin has breadcrumb to find, but do not repeat for
+subsequent messages in same session.
 
 ### 2. Voice history retention — **2c: persist to SQLite**
 Rolling buffer survives bot restarts and leaves/rejoins. Stored per guild
 (not per channel — see open tradeoff below) so moving between voice channels
-in the same guild keeps continuity.
+in same guild keeps continuity.
 
 | Option | Chosen | Rationale |
 |---|---|---|
-| a) Clear on leave | — | Loses continuity across the frequent bot-restart / re-join loop |
+| a) Clear on leave | — | Loses continuity across frequent bot-restart / re-join loop |
 | b) Keep in memory per guild | — | Same continuity as (c) but lost on every tray-app restart |
 | **c) Persist to SQLite** | ✅ | Matches how `saved_sounds` / `personas` already work; survives restarts and deploys |
 
 **New table:** `voice_history(guild_id, ts, user_display_name, transcript,
-bot_response)`. Retrieval is a bounded `SELECT … WHERE guild_id = ? ORDER BY
-ts DESC LIMIT N` (see decision 3). Old rows beyond the retention cap get
+bot_response)`. Retrieval bounded `SELECT … WHERE guild_id = ? ORDER BY
+ts DESC LIMIT N` (see decision 3). Old rows beyond retention cap get
 pruned on each insert.
 
-**Open tradeoff recorded here, not re-opened:** storage is per guild, not per
+**Open tradeoff recorded here, not re-opened:** storage per guild, not per
 voice channel. Rationale — users think "what was I just asking Halbot for,"
 not "what was I asking in #general-voice specifically." Revisit if cross-VC
 confusion shows up in practice.
 
 ### 3. Voice buffer sizing — **3a: turn count (default 10)**
-Buffer keeps the last N voice turns per guild, where a "turn" is one
+Buffer keeps last N voice turns per guild, where "turn" is one
 `(user_transcript, bot_response)` pair. Default N = 10, configurable via
 `VOICE_HISTORY_TURNS` env var.
 
 | Option | Chosen | Rationale |
 |---|---|---|
 | **a) Turn count** | ✅ | Predictable prompt size; matches how text's 50-message history works |
-| b) Token count | — | More precise but requires a tokenizer (nothing in the bot tokenizes locally); premature optimization |
-| c) Wall-clock age | — | Would drop context during normal pauses; a 30-min gap doesn't mean the previous command is stale |
+| b) Token count | — | More precise but requires tokenizer (nothing in bot tokenizes locally); premature optimization |
+| c) Wall-clock age | — | Would drop context during normal pauses; 30-min gap doesn't mean previous command stale |
 
-**Implementation note:** turn count is easy to reason about and matches the
-prompt-shape that's already proven on the text side. If a single turn ever
-balloons (unusual), the existing `max_tokens=256` ceiling on voice calls
-protects latency; any truncation fallout becomes a prompt-engineering fix,
-not an architecture change.
+**Implementation note:** turn count easy to reason about and matches
+prompt-shape already proven on text side. If single turn ever
+balloons (unusual), existing `max_tokens=256` ceiling on voice calls
+protects latency; any truncation fallout becomes prompt-engineering fix,
+not architecture change.
 
 ### 4. TTS + text feedback overlap — **4b: spoken only; logged server-side**
-When TTS is enabled and the bot is in voice, voice-session feedback
-(miss / unknown / failure) is spoken via TTS and written to `halbot.log`.
-Nothing is posted to the voice channel's chat. If TTS synthesis fails, we
-fall back to posting to the voice channel chat (per decision 1, then silent).
+When TTS enabled and bot in voice, voice-session feedback
+(miss / unknown / failure) spoken via TTS and written to `halbot.log`.
+Nothing posted to voice channel's chat. If TTS synthesis fails,
+fall back to posting to voice channel chat (per decision 1, then silent).
 
 | Option | Chosen | Rationale |
 |---|---|---|
-| a) Speak AND post to voice channel chat | — | Redundant; clutters the chat while TTS is the primary channel |
+| a) Speak AND post to voice channel chat | — | Redundant; clutters chat while TTS is primary channel |
 | **b) Spoken only; logged server-side** | ✅ | Cleanest voice-first experience; logs preserve debuggability |
-| c) Speak the flavor, post a terse status | — | Two surfaces to maintain; users don't consistently read both |
+| c) Speak flavor, post terse status | — | Two surfaces to maintain; users don't consistently read both |
 
-**Implementation note:** `MessageSink.send()` is still the single entry
-point. `VoiceChatSink` checks a `speak_only: bool` flag — when true, it
-routes to TTS via the voice listener and logs the message; when false (no
-TTS engine, or TTS disabled), it falls through to posting in voice channel
+**Implementation note:** `MessageSink.send()` still single entry
+point. `VoiceChatSink` checks `speak_only: bool` flag — when true,
+routes to TTS via voice listener and logs message; when false (no
+TTS engine, or TTS disabled), falls through to posting in voice channel
 chat.
 
 ### 5. Guild-level summary memory (B4) — **follow-up, out of scope**
-Not included in this refactor. Revisit after B2/B5 ships and we see whether
+Not included this refactor. Revisit after B2/B5 ships and we see whether
 voice and text feel too siloed in practice.
 
 | Option | Chosen | Rationale |
 |---|---|---|
-| Include in this refactor | — | Adds a summarizer loop, decay policy, and prompt work — doubles the scope |
-| **Follow-up** | ✅ | Additive; doesn't block the decoupling work; better informed after we see B2/B5 in use |
+| Include in this refactor | — | Adds summarizer loop, decay policy, and prompt work — doubles scope |
+| **Follow-up** | ✅ | Additive; doesn't block decoupling work; better informed after we see B2/B5 in use |
 
 **Trigger for revisit:** if users regularly ask voice-side about something
-they discussed in text (or vice versa) and the bot fails to bridge the
-context, open a dedicated plan for B4.
+discussed in text (or vice versa) and bot fails to bridge
+context, open dedicated plan for B4.
