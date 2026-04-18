@@ -1375,6 +1375,45 @@ async def handle_voice_command(guild, user_id, transcript):
 client: "discord.Client | None" = None
 
 
+# Reconnect uses a tiny discriminated-union ``sink_spec`` so a future new
+# sink type only has to add one branch here.  Shape:
+#   ("voice_chat",)                  -> VoiceChatSink(vc_channel)
+#   ("text_channel", channel_id)     -> TextChannelSink(channel)
+#   ("log_only",)                    -> LogOnlySink()
+SinkSpec = tuple
+
+
+def _sink_to_spec(sink) -> SinkSpec:
+    if isinstance(sink, VoiceChatSink):
+        return ("voice_chat",)
+    if isinstance(sink, TextChannelSink):
+        return ("text_channel", getattr(sink.channel, "id", None))
+    if isinstance(sink, LogOnlySink):
+        return ("log_only",)
+    log.warning("[voice] Unknown sink type %s — falling back to log_only spec",
+                type(sink).__name__)
+    return ("log_only",)
+
+
+def _spec_to_sink(spec: SinkSpec, guild, vc_channel):
+    """Rebuild a sink from a stored spec.  Falls back to LogOnlySink on lookup
+    failure so a stale snapshot never blocks voice reconnect."""
+    kind = spec[0] if spec else None
+    if kind == "voice_chat":
+        return VoiceChatSink(vc_channel)
+    if kind == "text_channel":
+        tc_id = spec[1] if len(spec) > 1 else None
+        channel = guild.get_channel(tc_id) if tc_id else None
+        if channel is None:
+            log.warning("[voice] Reconnect sink: text channel %s gone; using log-only", tc_id)
+            return LogOnlySink()
+        return TextChannelSink(channel)
+    if kind == "log_only":
+        return LogOnlySink()
+    log.warning("[voice] Reconnect sink: unknown spec %r; using log-only", spec)
+    return LogOnlySink()
+
+
 def snapshot_voice_state() -> None:
     """Capture active voice sessions into _voice_reconnect before shutdown.
 
@@ -1384,20 +1423,10 @@ def snapshot_voice_state() -> None:
     for gid, session in list(voice_listeners.items()):
         if not session.vc.is_connected():
             continue
-        # Step 1 only produces TextChannelSink at join time, so we can recover
-        # the text-channel id from the sink for reconnect.  Step 4 of the
-        # plan generalizes this into a sink_spec that supports all sink kinds.
-        sink = session.message_sink
-        if isinstance(sink, TextChannelSink):
-            tc_id = getattr(sink.channel, "id", None)
-        else:
-            tc_id = None
-        if tc_id is None:
-            log.warning("[voice] Skipping snapshot for guild %s: sink has no text channel id", gid)
-            continue
-        _voice_reconnect[gid] = (session.vc.channel.id, tc_id)
-        log.info("[voice] Snapshotted session for guild %s: vc=%s tc=%s",
-                 gid, session.vc.channel.id, tc_id)
+        sink_spec = _sink_to_spec(session.message_sink)
+        _voice_reconnect[gid] = (session.vc.channel.id, sink_spec)
+        log.info("[voice] Snapshotted session for guild %s: vc=%s sink=%s",
+                 gid, session.vc.channel.id, sink_spec)
 
 
 def build_client() -> discord.Client:
@@ -1423,14 +1452,13 @@ async def on_ready():
 
     # Reconnect to voice channels that were active before a restart.
     if _voice_reconnect and VOICE_RECV_AVAILABLE:
-        for gid, (vc_id, tc_id) in list(_voice_reconnect.items()):
+        for gid, (vc_id, sink_spec) in list(_voice_reconnect.items()):
             guild = client.get_guild(gid)
             if not guild:
                 continue
             vc_channel = guild.get_channel(vc_id)
-            tc_channel = guild.get_channel(tc_id)
-            if not vc_channel or not tc_channel:
-                log.warning("[voice] Reconnect skipped for guild %s — channel not found", gid)
+            if not vc_channel:
+                log.warning("[voice] Reconnect skipped for guild %s — voice channel %s gone", gid, vc_id)
                 continue
             try:
                 log.info("[voice] Reconnecting to #%s in %s", vc_channel.name, guild.name)
@@ -1438,7 +1466,7 @@ async def on_ready():
                 listener = VoiceListener(vc, handle_voice_command)
                 session = VoiceSession(
                     listener=listener,
-                    message_sink=TextChannelSink(tc_channel),
+                    message_sink=_spec_to_sink(sink_spec, guild, vc_channel),
                 )
                 voice_listeners[gid] = session
                 import threading
@@ -2162,12 +2190,12 @@ async def on_message(message: discord.Message):
             try:
                 vc = await vc_channel.connect(cls=HalbotVoiceRecvClient)
                 listener = VoiceListener(vc, handle_voice_command)
-                # Step 1 keeps the pre-refactor sink (the text channel the user
-                # mentioned the bot from).  Step 2 switches the default to
-                # VoiceChatSink(vc_channel).
+                # Default sink: the voice channel's own chat pane.  On permission
+                # or feature failures VoiceChatSink degrades to log-only
+                # (decision 1a of docs/plans/voice-text-decoupling.md).
                 session = VoiceSession(
                     listener=listener,
-                    message_sink=TextChannelSink(message.channel),
+                    message_sink=VoiceChatSink(vc_channel),
                 )
                 voice_listeners[guild.id] = session
 
