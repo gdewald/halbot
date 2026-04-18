@@ -22,6 +22,17 @@ Discord soundboard management bot powered by a local LLM (LM Studio). Users ment
 
 SQLite database: `sounds.db`. Infrastructure: `infra/`.
 
+**Toy project — single-user private server.** The README disclaimer is load-bearing: do not harden for public/multi-tenant use. Do not add rate limiting, abuse protection, auth, or input sanitization beyond what the current code has. Small blast radius justifies simple code.
+
+**Runtime requirements:** Python 3.12+. `ffmpeg` on PATH (pydub uses it for audio effects). LM Studio running locally with JIT loading enabled.
+
+## Domain limits
+
+- **Soundboard uploads:** max 512 KB, max 5.2 seconds, formats MP3 / OGG / WAV. Enforced in `audio.py`.
+- **Personas:** max 200 characters per directive, max 10 active directives. Enforced in `db.py` / `llm.py`.
+- **Channel context:** last 50 messages passed to the LLM. Bot's own replies excluded.
+- **Emoji sync:** on startup, all server custom emojis sync to `emojis` table. LM Studio vision model auto-generates descriptions. Re-syncs on emoji add/change events.
+
 ## Architecture
 
 - **LLM integration**: All user intent parsing goes through `parse_intent()` in `llm.py`, which calls LM Studio's OpenAI-compatible API. The LLM returns structured JSON actions, not free text. When the model returns prose instead of JSON, it's treated as a fallback `unknown` action.
