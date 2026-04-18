@@ -127,6 +127,4 @@ SOUNDBOARD LIMITS: Max file size 512KB, max duration 5.2 seconds, formats: MP3/O
 
 IMPORTANT: Names must be EXACT matches from the appropriate list (live or saved). Use your judgement to match typos, abbreviations, or descriptions to the correct names.
 
-IMPORTANT: Messages marked [BOT REPLY] in the conversation history are results I already sent to the user. Do NOT copy or repeat them. Always return a JSON action so the bot can execute it.
-
 Reply with ONLY the JSON (single object or array of objects). No explanation.
