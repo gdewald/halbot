@@ -105,13 +105,44 @@ halbot/                         # repo root
   torch + cuDNN combo and add explicit `--add-binary` for CUDA DLLs. Fall
   back to CPU whisper in packaged builds if bundling proves too fragile.
 
+### Independent lifecycle
+
+Tray updates must not touch the running daemon. Consequences:
+
+- **Daemon lifecycle managed by NSSM**, not by the tray. Subprocess-parent
+  model is rejected — closing or updating the tray would kill the bot.
+- **Separate install directories**, one PyInstaller onedir per component:
+  `%ProgramFiles%\Halbot\daemon\` and `%ProgramFiles%\Halbot\tray\`. No
+  shared DLLs. Updating one component never touches the other's files.
+- **Separate autostart:** NSSM auto-starts daemon at boot (before login,
+  LocalSystem). Tray via HKCU Run at user login.
+- **Fixed gRPC port on loopback** (e.g. `127.0.0.1:50737`). No dynamic port
+  discovery; simpler than a port-file dance.
+- **Tray reconnects on `UNAVAILABLE`.** Cheap retry loop makes daemon
+  restarts invisible to an already-open tray.
+- **Tray self-update:** Windows locks the running exe. Update flow is tray
+  → spawn `updater.exe` → tray exits → updater swaps the onedir → updater
+  launches new tray. Daemon updates stop the NSSM service, swap the
+  onedir, start the service — downtime acceptable for a toy app.
+
+### Proto compatibility — explicitly out of scope
+
+- Proto changes require rebuilding **both** daemon and tray and deploying
+  them together. No forward/backward compat. No version negotiation, no
+  reserved field numbers, no deprecation cycle. Keeps iteration fast.
+- Update delivery is manual (download zip + run updater). No in-app auto
+  update.
+
 ## Open questions
 
-- NSSM vs staying on subprocess model.
 - Service account (LocalSystem vs dedicated user) and data-path relocation
-  (`%ProgramData%\Halbot` vs `%USERPROFILE%`).
-- Installer story (who runs `nssm install`, shipped MSI, manual doc).
-- Restructure phasing / migration order.
+  (`%ProgramData%\Halbot` vs `%USERPROFILE%`). Leaning LocalSystem +
+  `%ProgramData%`.
+- Installer scope: secrets only, or also NSSM install + HKCU autostart +
+  ProgramData ACLs + first-run wizard.
+- Restructure phasing / migration order — sketch below, not locked.
+- Dev loop: two `uv run -m ...` terminals vs combined launcher.
+- Update delivery: GitHub Releases zip, or simpler (manual copy)?
 
 ## Phases (sketch — to be fleshed out)
 
