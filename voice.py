@@ -5,6 +5,10 @@ energy-based VAD on per-user audio streams, transcribes speech segments
 with faster-whisper, and fires a callback when the wake word "Halbot"
 is detected followed by a command.
 
+Also hosts the voice-session plumbing (:class:`VoiceSession` and the
+:class:`MessageSink` family) that keeps voice decoupled from whatever text
+channel triggered the join — see ``docs/plans/voice-text-decoupling.md``.
+
 Requires: discord-ext-voice-recv, faster-whisper, numpy
 """
 from __future__ import annotations
@@ -16,6 +20,8 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import discord
@@ -328,6 +334,108 @@ class _UserAudioState:
 
 
 # ---------------------------------------------------------------------------
+# MessageSink — polymorphic destination for voice-session feedback
+# ---------------------------------------------------------------------------
+# The bot used to post voice-session telemetry (miss, unknown, idle-disconnect
+# notice) to whichever text channel triggered the voice_join.  That coupling
+# is gone: a voice session owns a MessageSink, and the sink decides where to
+# post.  Default: post into the voice channel's own built-in chat pane.
+#
+# See docs/plans/voice-text-decoupling.md for the design + locked decisions.
+
+
+@runtime_checkable
+class MessageSink(Protocol):
+    """Where voice-session feedback messages go."""
+
+    async def send(self, text: str) -> None:
+        ...
+
+
+class TextChannelSink:
+    """Post into a specific ``discord.TextChannel`` (or any Messageable)."""
+
+    def __init__(self, channel: discord.abc.Messageable):
+        self.channel = channel
+
+    async def send(self, text: str) -> None:
+        try:
+            await self.channel.send(text)
+        except Exception:
+            log.exception("[voice] TextChannelSink.send failed")
+
+
+class VoiceChatSink:
+    """Post into the voice channel's own chat pane.
+
+    ``VoiceChannel`` became a Messageable with Discord's voice-channel chat
+    feature.  If posting fails (feature disabled, missing permission), degrades
+    to :class:`LogOnlySink` per decision 1a — one WARNING log per session,
+    silent thereafter.
+    """
+
+    def __init__(self, vc_channel: discord.VoiceChannel):
+        self.vc_channel = vc_channel
+        self._fallback_warned = False
+
+    async def send(self, text: str) -> None:
+        try:
+            await self.vc_channel.send(text)
+        except (discord.Forbidden, discord.HTTPException, AttributeError) as e:
+            if not self._fallback_warned:
+                log.warning(
+                    "[voice] VoiceChatSink fallback for #%s: %s — further "
+                    "messages this session will be log-only",
+                    getattr(self.vc_channel, "name", "?"),
+                    e,
+                )
+                self._fallback_warned = True
+            log.info("[voice] (log-only) %s", text)
+
+
+class LogOnlySink:
+    """Drop messages to the log and nothing else.  Decision 1a fallback."""
+
+    async def send(self, text: str) -> None:
+        log.info("[voice] (log-only) %s", text)
+
+
+# ---------------------------------------------------------------------------
+# VoiceSession — aggregates everything a voice session owns
+# ---------------------------------------------------------------------------
+@dataclass
+class VoiceSession:
+    """Aggregate for one guild's active voice presence.
+
+    Holds the STT/VAD listener, the feedback sink, and (future) rolling
+    history.  Delegates the common "things callers used to call on the raw
+    listener" (``.vc``, ``.stop()``, ``.play_sound()``) so the refactor is
+    drop-in for current call sites.
+    """
+
+    listener: "VoiceListener"
+    message_sink: MessageSink
+    # History + idle task land in later steps of the plan; kept as stubs so
+    # the dataclass shape is stable.
+    history: list = field(default_factory=list)
+
+    # -- listener delegation ------------------------------------------------
+    @property
+    def vc(self):
+        return self.listener.vc
+
+    @property
+    def guild(self):
+        return self.listener.vc.guild
+
+    def stop(self) -> None:
+        self.listener.stop()
+
+    async def play_sound(self, audio_bytes: bytes, fmt: str = "mp3") -> None:
+        await self.listener.play_sound(audio_bytes, fmt)
+
+
+# ---------------------------------------------------------------------------
 # Voice listener
 # ---------------------------------------------------------------------------
 class VoiceListener:
@@ -336,18 +444,18 @@ class VoiceListener:
     def __init__(
         self,
         vc: discord.VoiceClient,
-        text_channel: discord.TextChannel,
         on_command,
     ):
         """
         Parameters
         ----------
         vc : VoiceRecvClient (connected)
-        text_channel : where to post text feedback
-        on_command : async callback(guild, text_channel, user_id, transcript)
+        on_command : async callback(guild, user_id, transcript).  The callback
+            is responsible for looking up the :class:`VoiceSession` (and
+            therefore the sink) via the guild — the listener itself has no
+            opinion on where feedback goes.
         """
         self.vc = vc
-        self.text_channel = text_channel
         self.on_command = on_command
         self._users: dict[int, _UserAudioState] = defaultdict(_UserAudioState)
         self._loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
@@ -475,9 +583,7 @@ class VoiceListener:
         # classifier call or folded into the combined wake+intent call,
         # depending on VOICE_LLM_COMBINE_CALLS).
         try:
-            await self.on_command(
-                self.vc.guild, self.text_channel, user_id, text
-            )
+            await self.on_command(self.vc.guild, user_id, text)
         except Exception:
             log.exception("[voice] Command callback failed")
 
