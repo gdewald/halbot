@@ -51,10 +51,12 @@ show "stopped".
 // Health / introspection
 rpc Health(Empty) returns HealthReply;
 
-// Config (hot-apply where possible, persisted to config.json)
-rpc GetConfig(Empty) returns Config;
-rpc UpdateConfig(ConfigPatch) returns Config;   // returns new state
-rpc ReloadConfig(Empty) returns Config;         // re-read config.json (hand-edits)
+// Config — see Configuration section for full shape.
+rpc GetConfig(Empty) returns ConfigState;
+rpc UpdateConfig(ConfigPatch) returns ConfigState;
+rpc PersistConfig(FieldList) returns ConfigState;
+rpc ResetConfig(FieldList) returns ConfigState;
+rpc SetSecret(SecretUpdate) returns StatusReply;
 
 // Module lifecycle — reduce need for full daemon restart
 rpc RestartDiscord(Empty) returns StatusReply;  // disconnect + reconnect
@@ -88,69 +90,133 @@ RPCs for subsystems without state worth managing.
 - **Idempotent where sensible.** `UnloadWhisper` on already-unloaded is
   a no-op success.
 
-### Configuration
-
-- **`config.json` in `%ProgramData%\Halbot\`.** Default values checked
-  into the repo as `config.default.json`; daemon merges defaults +
-  overrides on load. Written on every `UpdateConfig`.
-- **Hot-applicable fields** (no daemon restart): `log_level`,
-  `llm_model`, `max_tokens_text`, `max_tokens_voice`, `wake_word`,
-  `voice_idle_timeout_seconds`. Possibly `energy_threshold` (hot, but
-  only picked up on next voice session — document).
-- **Restart-required fields** (flag `requires_restart: true` in `Config`
-  response so tray can show a banner): gRPC port, data paths, anything
-  that affects service-install shape.
-- **Validation** is daemon-side. Bad values return
-  `INVALID_ARGUMENT` over gRPC — tray does not trust itself.
-- **Secrets stay out of config.** Config is non-sensitive, plaintext
-  JSON, readable on disk. Anything sensitive uses DPAPI (see Secrets).
-
 ### Secret update UX — TBD / future
 
-Scope locked but implementation deferred. Write up target flow here so
-future-us doesn't re-derive it.
+Scope locked but implementation deferred. Initial implementation uses
+`halbot-setup.exe set-secret ...` from an elevated shell. Tray UI comes
+later. Target flow:
 
-- **Goal:** user changes Discord token from the tray GUI, no separate
-  elevated CLI invocation per rotation.
-- **One-time elevation at install.** `halbot-setup.exe` (elevated) grants
-  the installing user `KEY_WRITE` on `HKLM\SOFTWARE\Halbot\Secrets` via
-  custom ACL (`RegSetKeySecurity`). After that, the tray can write DPAPI
-  blobs to that subkey without UAC.
-- **Flow:** tray "Settings → Discord token" → masked input dialog → OK
-  → tray DPAPI-encrypts and writes HKLM → tray calls SCM restart →
-  daemon comes up reading the new token → tray shows reconnecting /
-  connected transition via `Health()`.
-- **Daemon restart on credential change is acceptable** — matches the
-  SCM lifecycle model, avoids atomic-client-swap complexity in
-  discord.py, rare operation.
-- **Security trade-off to note:** relaxed HKLM ACL means any process
-  running as the installing user can read/write secrets. DPAPI
-  LocalMachine scope is buying encryption at rest (disk images, backups),
-  not user-process isolation. Matches the loopback-no-auth trust model
-  for gRPC. Documented so future-us doesn't misinterpret.
-- **Until this lands:** secrets can only be set/rotated via
-  `halbot-setup.exe set-secret ...` from an elevated shell.
+- **Tray "Settings → Discord token"** → masked input dialog → OK →
+  tray sends gRPC `SetSecret(DISCORD_TOKEN, <value>)`.
+- **Daemon handles the write itself** — runs as LocalSystem, encrypts via
+  DPAPI, persists to `HKLM\SOFTWARE\Halbot\Secrets`, then triggers
+  in-process Discord reconnect. No SCM restart required.
+- **Write before reconnect.** If reconnect fails, secret is still
+  persisted — `Health().discord = TOKEN_INVALID` surfaces the failure;
+  user retries with a corrected token.
+- **Write-only semantics.** `GetConfig()` never returns secret values.
+  Tray shows a "set / not set" indicator derived from whether the key
+  exists, nothing more. Combined with `Health()`, that's enough feedback
+  for rotation workflows.
+
+### Subsystem fault isolation — crash vs degrade
+
+- **Daemon process crashes only on fatal top-level failures**
+  (initialization errors it cannot recover from, unhandled exceptions
+  outside subsystem boundaries). NSSM's `AppExit Default Restart`
+  handles these.
+- **Subsystem failures degrade, not crash.** Discord login failure, LLM
+  backend unreachable, voice gateway error, whisper load failure — each
+  is caught at the subsystem boundary, recorded in `Health()`, and
+  leaves the rest of the daemon running.
+- **Health enum covers degraded states:** `DiscordState` includes
+  `TOKEN_INVALID`, `RATE_LIMITED`, `DISCONNECTED`. Similar enums for
+  voice / LLM as they grow.
+- **Every subsystem gets room for future control RPCs** (retry,
+  reconfigure, reload). Starting set is in the RPC list above; add
+  more as subsystems gain runtime-controllable state.
+- **NSSM throttle** (`AppThrottle` default 1500ms, plus
+  `AppRestartDelay ~30000`) is a belt-and-suspenders guard against a
+  crash-loop leaking through, not the primary defense.
 
 ### Secrets
 
-- **Storage: DPAPI-encrypted blobs in `HKLM\SOFTWARE\Halbot`.**
-  `LocalMachine` scope so secrets survive service-account changes and do not
-  require a user login context.
-- **Library: pywin32 `win32crypt.CryptProtectData` / `CryptUnprotectData`**
-  with `CRYPTPROTECT_LOCAL_MACHINE`.
-- **Keys stored:** `DISCORD_TOKEN`, `LMSTUDIO_URL`. `LOG_LEVEL` stays as
-  plain registry value (not secret).
-- **Bootstrap / rotation:** standalone `halbot-setup.exe` run elevated
-  (one-time at install, or on token rotation). Sets HKLM values. Tray itself
-  does not need elevation at runtime. Avoids exposing `SetSecret` over gRPC
-  and avoids elevating the tray.
+- **Storage: DPAPI-encrypted blobs in `HKLM\SOFTWARE\Halbot\Secrets`.**
+  `LocalMachine` scope so secrets survive service-account changes and do
+  not require a user login context.
+- **Library:** pywin32 `win32crypt.CryptProtectData` /
+  `CryptUnprotectData` with `CRYPTPROTECT_LOCAL_MACHINE`.
+- **Keys stored:** `DISCORD_TOKEN`. That is the only true secret. Former
+  candidates `LMSTUDIO_URL` / `OLLAMA_URL` are **not secrets** — they move
+  to plaintext registry config (see Configuration).
+- **Writes go through the daemon, not the tray.** Daemon runs as
+  LocalSystem and can always write HKLM. Tray calls gRPC `SetSecret`
+  (write-only); daemon encrypts and persists, then triggers the relevant
+  subsystem reload (e.g. Discord reconnect) in-process. Avoids
+  SCM-restart-on-token-change and avoids granting the tray HKLM write
+  rights for secret storage.
+- **Write-ordering:** daemon writes DPAPI **before** attempting reconnect.
+  If reconnect fails with the new token, the value is still persisted and
+  a subsequent daemon restart uses it. Reconnect failure becomes
+  `Health().discord = TOKEN_INVALID`, not a crash.
+- **Bootstrap:** `halbot-setup.exe` can still set secrets from an elevated
+  shell (`halbot-setup set-secret DISCORD_TOKEN ...`) for first-run /
+  headless rotation. Useful before the tray is installed.
 - **Dev fallback:** read order is env var → DPAPI registry → hard error.
-  Keeps `uv run bot.py` frictionless for local development without HKLM
-  write rights. `.env` is no longer a supported production path.
-- **Caveats noted:** LocalMachine scope means any process on the host can
-  decrypt — acceptable given threat model. Keys are tied to the machine;
-  reinstall on a new box requires re-entering secrets. No backup/restore
-  story for the DPAPI blob itself.
+  Keeps `uv run -m halbot.daemon` frictionless for local dev without
+  HKLM write rights. `.env` is no longer a supported production path.
+- **Caveats:** LocalMachine scope means any process on the host running as
+  any user can decrypt — acceptable given threat model. Keys are tied to
+  the machine; reinstall on a new box requires re-entering secrets. No
+  backup/restore story for the DPAPI blob itself.
+
+### Configuration
+
+**Storage model:** Windows registry under `HKLM\SOFTWARE\Halbot\`.
+
+- `HKLM\SOFTWARE\Halbot\Secrets\` — DPAPI-encrypted values. Write-only
+  via gRPC `SetSecret`. Never displayed.
+- `HKLM\SOFTWARE\Halbot\Config\` — plaintext values. Readable via
+  `regedit` for debugging.
+- **No `config.json`** on disk. One storage backend; registry is the
+  Windows-native answer.
+- **Defaults live in code** (`halbot/config.py` constant dict). Not
+  checked-in JSON. Registry stores only user overrides.
+- **ACL treatment:** `halbot-setup.exe` at install grants the installing
+  user `KEY_WRITE` on both `Config` and `Secrets` subkeys. Daemon (as
+  LocalSystem) always has write. Tray can write `Config` for
+  `PersistConfig`, but writes `Secrets` only indirectly via daemon
+  (gRPC `SetSecret`).
+
+**Runtime config vs startup config:** the gRPC config surface exposes
+**only** fields that have a runtime effect when changed. Fields that
+would need a daemon restart (gRPC port, data paths) are startup-only
+and not present in the config RPCs — change via `halbot-setup.exe` +
+SCM restart. Hides footguns: "change it, nothing happens till restart."
+
+**RPC shape** — persist/reset as separate verbs, not a flag on Update:
+
+```proto
+rpc GetConfig(Empty) returns ConfigState;             // per-field source included
+rpc UpdateConfig(ConfigPatch) returns ConfigState;    // runtime-only; lost on restart
+rpc PersistConfig(FieldList) returns ConfigState;     // flush listed fields to registry; empty = all
+rpc ResetConfig(FieldList) returns ConfigState;       // reload from registry (or code defaults)
+rpc SetSecret(SecretUpdate) returns StatusReply;      // write-only; daemon persists + reloads subsystem
+```
+
+**`GetConfig()` returns per-field source** (`DEFAULT | REGISTRY |
+RUNTIME_OVERRIDE`). Tray shows a "modified, not persisted" indicator so
+the user can tell which live values will survive restart.
+
+**Workflow this enables:** change `log_level` to DEBUG, reproduce bug,
+decide DEBUG is worth keeping → `PersistConfig(["log_level"])`. Or roll
+back without restarting → `ResetConfig(["log_level"])`.
+
+**Initial scope (locked small):**
+
+| Field | Storage | Runtime mutable | Notes |
+|---|---|---|---|
+| `DISCORD_TOKEN` | DPAPI | write-only via `SetSecret` | triggers Discord reconnect |
+| `log_level` | registry plaintext | yes (`UpdateConfig`) | only initially scoped runtime-mutable field |
+| `llm.backend`, `llm.url`, `llm.model` | registry plaintext | future | hot-reload LLM subsystem when added |
+| `llm.max_tokens_text`, `llm.max_tokens_voice` | registry plaintext | future | read on next request |
+| `voice.wake_word`, `voice.idle_timeout_seconds`, `voice.energy_threshold` | registry plaintext | future | some hot, some next-session only |
+| gRPC port, data paths | registry plaintext | no (startup only) | not present in config RPCs |
+
+Design approach for expansion is documented here and in
+`halbot/config.py` module docstring once it exists: only add a field to
+`UpdateConfig` if changing it actually has a runtime effect on the
+daemon. Otherwise leave it startup-only.
 
 ### Folder layout
 
@@ -251,12 +317,18 @@ Tray updates must not touch the running daemon. Consequences:
 
 `halbot-setup.exe`, run elevated, one-shot:
 
-- Writes DPAPI secrets to `HKLM\SOFTWARE\Halbot` (`DISCORD_TOKEN`,
-  `LMSTUDIO_URL` — until Ollama migration, then adjust).
+- Writes initial DPAPI secret (`DISCORD_TOKEN`) to
+  `HKLM\SOFTWARE\Halbot\Secrets`.
+- Grants installing user `KEY_WRITE` on
+  `HKLM\SOFTWARE\Halbot\Config` and `HKLM\SOFTWARE\Halbot\Secrets` via
+  `RegSetKeySecurity` (so tray and daemon can write without per-call
+  elevation; daemon already can as LocalSystem).
 - Runs `nssm install halbot ...` pointing at daemon exe.
+- Grants installing user `SERVICE_START / STOP / QUERY_STATUS` on the
+  halbot service via `sc sdset`.
 - Registers HKCU Run entry for tray exe.
-- Creates `%ProgramData%\Halbot\` with appropriate ACLs (LocalSystem write,
-  user read for log viewing).
+- Creates `%ProgramData%\Halbot\` with appropriate ACLs (LocalSystem
+  write, user read for log viewing).
 
 CLI flags only. No GUI wizard. Matching `halbot-setup --uninstall`
 reverses all four steps.
@@ -265,12 +337,15 @@ reverses all four steps.
 
 - **Migrate off LM Studio to Ollama.** Rationale and details TBD; will be
   its own plan doc. Flagged here because the restructure should not bake
-  in LM Studio assumptions (e.g. the `LMSTUDIO_URL` secret key, the
-  `LMSTUDIO_MODEL` constant in `bot.py`, the `ensure_model_loaded()`
-  JIT-reload dance) any deeper than today.
-- During restructure, rename the LM Studio-specific helpers so the
-  eventual swap is a contained change to `halbot/llm.py` plus a secret
-  rename in DPAPI storage.
+  in LM Studio assumptions (e.g. the `LMSTUDIO_MODEL` constant in
+  `bot.py`, the `ensure_model_loaded()` JIT-reload dance) any deeper
+  than today.
+- **LLM URL / model / backend are config, not secrets** — they live in
+  plaintext registry under `HKLM\SOFTWARE\Halbot\Config\llm\*`. Ollama
+  migration becomes a `UpdateConfig` + `PersistConfig` call (plus code
+  to handle the new backend), no DPAPI rotation.
+- During restructure, rename LM-Studio-specific helpers so the eventual
+  swap is a contained change to `halbot/llm.py`.
 
 ### Restructure phasing
 
