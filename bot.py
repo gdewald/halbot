@@ -55,7 +55,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions")
 # Model to target in LM Studio. Source-controlled so JIT re-loads after idle unload
 # use the same model every time.
-LMSTUDIO_MODEL = "google/gemma-4-e4b"
+LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL")
 
 
 def _env_bool(name: str, default: bool) -> bool:
