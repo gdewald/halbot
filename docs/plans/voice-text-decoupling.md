@@ -1,7 +1,7 @@
 # Plan: Decouple Voice Sessions from Text Channels
 
 **Branch:** `dev/tts-and-reply-routing`
-**Status:** Proposal — awaiting answers on open questions before implementation starts
+**Status:** Approved — decisions locked 2026-04-17, implementation pending
 **Author:** proposed 2026-04-17
 
 ## Motivation
@@ -159,35 +159,93 @@ prompt-engineering drift.
 - Verification: restart the bot while in voice, feedback continues to go to the
   right place after reconnect.
 
-## Open questions
+## Decisions (locked 2026-04-17)
 
-These block starting Step 2 — they're asked as direct prompts to the user
-after this document is committed:
+Each decision records the chosen option, the alternatives that were weighed,
+and the tradeoff that drove the pick. Future changes to these should be made
+by amending this section, not rewriting it.
 
-1. **Voice channel chat fallback.** If a server has voice-chat disabled or the
-   bot lacks `send_messages` in it, which fallback do you want?
-   - a) Silent — log-only, no user-facing feedback.
-   - b) Fall back to the text channel the bot was joined from.
-   - c) Fall back to the guild's system channel, then log-only.
+### 1. Voice channel chat fallback — **1a: silent, log-only**
+When the bot can't post into the voice channel's chat (feature disabled by
+the server, missing `send_messages` permission, channel-type quirk), it does
+not post anywhere. The failed message is written to `halbot.log` at WARNING
+level and the user sees nothing in Discord.
 
-2. **Voice history retention.** When the bot leaves voice, should the rolling
-   buffer be:
-   - a) Cleared — predictable stateless sessions.
-   - b) Kept in memory per guild — "remember what I asked you to play last session."
-   - c) Persisted to SQLite — survives bot restarts.
+| Option | Chosen | Rationale |
+|---|---|---|
+| **a) Silent — log-only** | ✅ | Keeps voice truly decoupled; no risk of surprise posts leaking into unrelated channels; aligns with decision 4 (spoken-only feedback) |
+| b) Fall back to the joined-from text channel | — | Reintroduces the coupling this refactor removes |
+| c) Fall back to the system channel, then log-only | — | System channel is for Discord infra events; spamming it with voice feedback is noisy for admins |
 
-3. **Voice buffer sizing.** How should the buffer be bounded?
-   - a) By turn count (e.g. last 10 voice turns).
-   - b) By token count (e.g. last 2000 tokens).
-   - c) By wall-clock age (e.g. last 30 minutes of session).
+**Implementation note:** emit a WARNING log line on first fallback per session
+so a confused admin has a breadcrumb to find, but do not repeat it for
+subsequent messages in the same session.
 
-4. **TTS + feedback dual output.** When TTS is enabled and the bot is in voice,
-   should errors/unknowns still post to the voice channel chat, or be spoken
-   only?
-   - a) Both — spoken AND posted to voice channel chat.
-   - b) Spoken only; logged server-side.
-   - c) Spoken for the LLM's flavor text; voice channel chat gets a terse status line.
+### 2. Voice history retention — **2c: persist to SQLite**
+Rolling buffer survives bot restarts and leaves/rejoins. Stored per guild
+(not per channel — see open tradeoff below) so moving between voice channels
+in the same guild keeps continuity.
 
-5. **Scope confirmation.** Is cross-channel guild-level summary memory (option
-   B4) worth doing in this refactor, or strictly a follow-up? My default
-   recommendation is follow-up.
+| Option | Chosen | Rationale |
+|---|---|---|
+| a) Clear on leave | — | Loses continuity across the frequent bot-restart / re-join loop |
+| b) Keep in memory per guild | — | Same continuity as (c) but lost on every tray-app restart |
+| **c) Persist to SQLite** | ✅ | Matches how `saved_sounds` / `personas` already work; survives restarts and deploys |
+
+**New table:** `voice_history(guild_id, ts, user_display_name, transcript,
+bot_response)`. Retrieval is a bounded `SELECT … WHERE guild_id = ? ORDER BY
+ts DESC LIMIT N` (see decision 3). Old rows beyond the retention cap get
+pruned on each insert.
+
+**Open tradeoff recorded here, not re-opened:** storage is per guild, not per
+voice channel. Rationale — users think "what was I just asking Halbot for,"
+not "what was I asking in #general-voice specifically." Revisit if cross-VC
+confusion shows up in practice.
+
+### 3. Voice buffer sizing — **3a: turn count (default 10)**
+Buffer keeps the last N voice turns per guild, where a "turn" is one
+`(user_transcript, bot_response)` pair. Default N = 10, configurable via
+`VOICE_HISTORY_TURNS` env var.
+
+| Option | Chosen | Rationale |
+|---|---|---|
+| **a) Turn count** | ✅ | Predictable prompt size; matches how text's 50-message history works |
+| b) Token count | — | More precise but requires a tokenizer (nothing in the bot tokenizes locally); premature optimization |
+| c) Wall-clock age | — | Would drop context during normal pauses; a 30-min gap doesn't mean the previous command is stale |
+
+**Implementation note:** turn count is easy to reason about and matches the
+prompt-shape that's already proven on the text side. If a single turn ever
+balloons (unusual), the existing `max_tokens=256` ceiling on voice calls
+protects latency; any truncation fallout becomes a prompt-engineering fix,
+not an architecture change.
+
+### 4. TTS + text feedback overlap — **4b: spoken only; logged server-side**
+When TTS is enabled and the bot is in voice, voice-session feedback
+(miss / unknown / failure) is spoken via TTS and written to `halbot.log`.
+Nothing is posted to the voice channel's chat. If TTS synthesis fails, we
+fall back to posting to the voice channel chat (per decision 1, then silent).
+
+| Option | Chosen | Rationale |
+|---|---|---|
+| a) Speak AND post to voice channel chat | — | Redundant; clutters the chat while TTS is the primary channel |
+| **b) Spoken only; logged server-side** | ✅ | Cleanest voice-first experience; logs preserve debuggability |
+| c) Speak the flavor, post a terse status | — | Two surfaces to maintain; users don't consistently read both |
+
+**Implementation note:** `MessageSink.send()` is still the single entry
+point. `VoiceChatSink` checks a `speak_only: bool` flag — when true, it
+routes to TTS via the voice listener and logs the message; when false (no
+TTS engine, or TTS disabled), it falls through to posting in voice channel
+chat.
+
+### 5. Guild-level summary memory (B4) — **follow-up, out of scope**
+Not included in this refactor. Revisit after B2/B5 ships and we see whether
+voice and text feel too siloed in practice.
+
+| Option | Chosen | Rationale |
+|---|---|---|
+| Include in this refactor | — | Adds a summarizer loop, decay policy, and prompt work — doubles the scope |
+| **Follow-up** | ✅ | Additive; doesn't block the decoupling work; better informed after we see B2/B5 in use |
+
+**Trigger for revisit:** if users regularly ask voice-side about something
+they discussed in text (or vice versa) and the bot fails to bridge the
+context, open a dedicated plan for B4.
