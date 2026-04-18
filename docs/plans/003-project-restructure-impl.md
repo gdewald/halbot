@@ -1,52 +1,50 @@
 # Project Restructure — Implementation Plan
 
-Status: draft. Tracks execution of the design in
-[002-project-restructure.md](002-project-restructure.md). Only phases
-explicitly reviewed live here. Unreviewed future phases sit in an
-untracked working draft.
+Status: draft. Track execution of design in
+[002-project-restructure.md](002-project-restructure.md). Only reviewed
+phases live here. Unreviewed future phases sit in untracked working
+draft.
 
 ## Approach
 
-- **Big-bang on `main` per phase.** Each phase lands on a branch, merges
-  when its validation passes on a clean VM, then pushed.
-- Phases are independently runnable at their endpoints.
+- **Big-bang on `main` per phase.** Each phase lands on branch, merges
+  when validation passes on clean VM, then pushed.
+- Phases independently runnable at endpoints.
 
 ## Phase 1 — Skeleton: daemon + tray + build/deploy
 
-Prove the build, install, service, gRPC, and tray-to-daemon round-trip
+Prove build, install, service, gRPC, tray-to-daemon round-trip
 end-to-end **before** any Discord/voice/LLM code moves. Fresh scaffolds,
-intentionally **no reuse of current `bot.py` / `halbot_tray.py`**
-implementation.
+**no reuse of current `bot.py` / `halbot_tray.py`**.
 
 Branch: `restructure/phase-1-skeleton`. Old flat modules at repo root
 (`bot.py`, `db.py`, `llm.py`, `audio.py`, `voice.py`, `voice_session.py`,
-`tts.py`, `halbot_tray.py`, `prompts/`) are **deleted early in this
-phase**. Branch holds only the new skeleton. No coexistence.
+`tts.py`, `halbot_tray.py`, `prompts/`) **deleted early this phase**.
+Branch holds only new skeleton. No coexistence.
 
-**Stable fallback via worktree.** To keep running the current bot while
-phase 1 is in flight, check out `main` in a sibling worktree:
+**Stable fallback via worktree.** Keep current bot running while
+phase 1 in flight — check out `main` in sibling worktree:
 
 ```
 git worktree add ../halbot-stable main
 cd ../halbot-stable && uv sync && uv run bot.py
 ```
 
-Stable and phase 1 do not collide: gitignored `.env` / `sounds.db` are
-per-worktree, gRPC port is unused by stable, NSSM service name is
-unused by stable, logs live in different dirs. Only real conflict is
-GPU VRAM and Discord identity — run one at a time.
+Stable and phase 1 no collide: gitignored `.env` / `sounds.db`
+per-worktree, gRPC port unused by stable, NSSM service name unused by
+stable, logs in different dirs. Only real conflict: GPU VRAM and
+Discord identity — run one at a time.
 
-Merge to `main` only when validation checklist below passes on a clean
-VM.
+Merge to `main` only when validation checklist passes on clean VM.
 
 ### Scope delivered
 
-- New `halbot/` daemon package with no Discord bot code.
-- New `tray/` package with no bot imports.
+- New `halbot/` daemon package, no Discord bot code.
+- New `tray/` package, no bot imports.
 - gRPC surface: `Health`, `GetConfig`, `UpdateConfig`, `PersistConfig`,
   `ResetConfig`. `ConfigState` holds one field: `log_level`.
 - Periodic log emitter in daemon (INFO tick + DEBUG tick) so log-level
-  toggle is observable in the tray log viewer.
+  toggle observable in tray log viewer.
 - Tray features: log viewer (file tail), Service Start/Stop/Restart via
   SCM, log-level dropdown (auto-persists — dropdown click calls
   `UpdateConfig` + `PersistConfig` back-to-back), explicit Reset action
@@ -56,14 +54,24 @@ VM.
   registry ACL + service ACL + ProgramData ACL + HKCU Run),
   `update-daemon.bat` / `update-tray.bat`.
 
+### Agent rules this phase
+
+- **Do not read or modify `README.md`.** Phase 1 skeleton intentionally
+  diverges from current user-facing setup docs; README still describes
+  the pre-restructure world (flat `bot.py`, `uv run`, `.env`). Agent
+  reading it would re-anchor to legacy model and produce mixed
+  guidance. README update happens in a later phase when full stack
+  migrated.
+- CLAUDE.md = authoritative agent context this phase.
+
 ### Explicitly out of scope this phase
 
-- Secrets / DPAPI / `DISCORD_TOKEN` — `log_level` is plaintext registry
+- Secrets / DPAPI / `DISCORD_TOKEN` — `log_level` plaintext registry
   only.
-- Discord client, voice, whisper, TTS, LLM — none of it runs in the new
-  daemon yet.
+- Discord client, voice, whisper, TTS, LLM — none runs in new daemon
+  yet.
 - Module-level RPCs (`RestartDiscord`, `LoadWhisper`, …). Proto reserves
-  space only if trivially additive; otherwise deferred.
+  space only if trivially additive; else deferred.
 - Discord-specific fields on `HealthReply` — this phase returns uptime +
   daemon_version only.
 
@@ -101,12 +109,11 @@ VM.
 - `halbot/config.py`: defaults dict (`{"log_level": "INFO"}`), registry
   I/O against `HKLM\SOFTWARE\Halbot\Config`, layered resolver (default
   → registry → runtime override), per-field source tracking.
-- `halbot/logging_setup.py`: root logger configured with rotating file
-  handler at `data_dir()/logs/halbot.log` (defaults: 10 MB × 5 files),
-  level pulled from `config.log_level`. Exposes `reconfigure(level)` for
-  live swap. Level applies globally to root logger — no per-source
-  filtering at daemon side this phase. Source filtering moves to log
-  viewer UI in a later phase.
+- `halbot/logging_setup.py`: root logger with rotating file handler at
+  `data_dir()/logs/halbot.log` (defaults: 10 MB × 5 files), level from
+  `config.log_level`. Exposes `reconfigure(level)` for live swap. Level
+  applies globally to root logger — no per-source filtering at daemon
+  this phase. Source filtering moves to log viewer UI later.
 - `UpdateConfig` handler: on `log_level` change, calls
   `logging_setup.reconfigure()`.
 
@@ -114,18 +121,18 @@ VM.
 
 - `halbot/mgmt_server.py`: **async gRPC server** (`grpc.aio`) bound
   `127.0.0.1:50737`. Implements `Health` + four config RPCs. Async
-  chosen now so discord.py (asyncio) integrates cleanly in later phases.
-- `halbot/daemon.py run`: initializes logging, runs asyncio event loop
-  hosting (a) ticker task emitting `logger.info("tick")` every 5s and
+  chosen now so discord.py (asyncio) integrates cleanly later.
+- `halbot/daemon.py run`: init logging, run asyncio event loop hosting
+  (a) ticker task emitting `logger.info("tick")` every 5s and
   `logger.debug("tick")` every 1s, (b) async gRPC server. Blocks until
   stop signal (NSSM `CTRL_BREAK`).
 - `Health().daemon_version` = build timestamp in system local timezone
-  (baked at PyInstaller build time via a generated
-  `halbot/_build_info.py`, produced by `build.ps1`). Source-run
-  fallback: current wall-clock at process start.
-- `ResetConfig(fields)`: drops the listed runtime overrides; field
-  values revert to registry (or code default if no registry entry).
-  Does **not** wipe registry. Empty `fields` = reset all.
+  (baked at PyInstaller build time via generated `halbot/_build_info.py`,
+  produced by `build.ps1`). Source-run fallback: current wall-clock at
+  process start.
+- `ResetConfig(fields)`: drops listed runtime overrides; field values
+  revert to registry (or code default if no registry entry). Does
+  **not** wipe registry. Empty `fields` = reset all.
 
 **5. Tray**
 
@@ -166,10 +173,10 @@ VM.
 - `sc sdset halbot ...` grants installing user
   `SERVICE_START / STOP / QUERY_STATUS`.
 - **No autostart for tray this phase.** Installer skips HKCU Run /
-  Startup shortcut — elevated installer cannot cleanly target the
-  invoking user's HKCU. Manual step documented in validation. Automated
-  per-user install deferred to a later phase.
-- `--uninstall` reverses all of the above.
+  Startup shortcut — elevated installer cannot cleanly target invoking
+  user's HKCU. Manual step documented in validation. Automated
+  per-user install deferred later.
+- `--uninstall` reverses all above.
 
 **8. Update scripts**
 
@@ -180,7 +187,7 @@ VM.
 
 ### Validation
 
-On a clean Windows VM / test account:
+On clean Windows VM / test account:
 
 1. `scripts/build.ps1` produces both zips.
 2. Extract to `%ProgramFiles%\Halbot\daemon\` and `...\tray\`.
@@ -194,12 +201,12 @@ On a clean Windows VM / test account:
 8. Reset. INFO default restored without daemon restart.
 9. Tray → Stop. Service stops, status updates.
 10. `setup --uninstall`. Registry, service, ProgramData all gone.
-11. Record full `build.ps1` wall time (cold and warm). Document in this
-    file as the baseline build-cycle cost for future reference.
+11. Record full `build.ps1` wall time (cold and warm). Document here as
+    baseline build-cycle cost for future reference.
 
 Merge branch to `main`.
 
 ## Future phases
 
-Not committed to this doc until reviewed. Working draft lives at
+Not committed to this doc until reviewed. Working draft at
 `docs/plans/drafts/phase-backlog.md` (gitignored).

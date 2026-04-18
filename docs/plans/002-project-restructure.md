@@ -24,10 +24,9 @@ Status: design locked. Scope and outcome. Implementation plan at
 - **Log streaming stay file-tail**, not gRPC server-streaming RPC. Keep
   viewer trivial, unchanged from today.
 - **Log level = single global setting** on daemon root logger — no
-  per-source (per-module / per-subsystem) filtering at write time.
-  Per-source verbosity handled in log viewer UI (match on logger name
-  in tray), not by routing separate levels into handler. Keeps daemon
-  simple, avoids config explosion.
+  per-source filtering at write time. Per-source verbosity handled in
+  log viewer UI (match logger name in tray), not by routing levels into
+  handler. Keeps daemon simple, avoids config explosion.
 
 ### Daemon lifecycle — SCM, not gRPC
 
@@ -115,7 +114,7 @@ Target flow:
 ### Subsystem fault isolation — crash vs degrade
 
 - **Daemon process crash only on fatal top-level failures**
-  (init errors unrecoverable, unhandled exceptions outside subsystem
+  (unrecoverable init errors, unhandled exceptions outside subsystem
   boundaries). NSSM `AppExit Default Restart` handle these.
 - **Subsystem failures degrade, not crash.** Discord login fail, LLM
   backend unreachable, voice gateway error, whisper load fail — each
@@ -150,7 +149,7 @@ Target flow:
   If reconnect fail with new token, value still persisted and next daemon
   restart use it. Reconnect fail become
   `Health().discord = TOKEN_INVALID`, not crash.
-- **Bootstrap:** `halbot-daemon setup` can still set secrets from elevated
+- **Bootstrap:** `halbot-daemon setup` can set secrets from elevated
   shell (`halbot-setup set-secret DISCORD_TOKEN ...`) for first-run /
   headless rotation. Useful before tray installed.
 - **No dev mode. `uv run` iteration explicitly unsupported.** One code
@@ -172,8 +171,8 @@ Target flow:
   via gRPC `SetSecret`. Never displayed.
 - `HKLM\SOFTWARE\Halbot\Config\` — plaintext values. Readable via
   `regedit` for debug.
-- **No `config.json`** on disk. One storage backend; registry = Windows-
-  native answer.
+- **No `config.json`** on disk. One storage backend; registry =
+  Windows-native answer.
 - **Defaults live in code** (`halbot/config.py` constant dict). Not
   checked-in JSON. Registry store only user overrides.
 - **ACL treatment:** `halbot-daemon setup` at install grant installing
