@@ -20,21 +20,28 @@
 
 Discord soundboard management bot powered by a local LLM (LM Studio). Users mention the bot in Discord, the bot sends context + user message to LM Studio, LM Studio returns JSON action(s), and the bot executes them.
 
-Single-file Python app: `bot.py`. SQLite database: `sounds.db`. Infrastructure: `infra/`.
+SQLite database: `sounds.db`. Infrastructure: `infra/`.
 
 ## Architecture
 
-- **LLM integration**: All user intent parsing goes through `parse_intent()` which calls LM Studio's OpenAI-compatible API. The LLM returns structured JSON actions, not free text. When the model returns prose instead of JSON, it's treated as a fallback `unknown` action.
-- **Action dispatch**: `on_message` handler contains a linear action dispatch loop. Each action type (list, remove, edit, save, restore, effect_apply, persona_set, etc.) has its own `elif` block.
-- **Database**: SQLite via raw `sqlite3` — no ORM. Three tables: `saved_sounds`, `emojis`, `personas`. Schema migrations are inline in `db_init()` using `PRAGMA table_info` checks.
-- **Audio effects**: pydub/ffmpeg. Effects chain from the original audio to avoid quality degradation. Child clips track their `parent_id` (always the root original) and `effects` JSON.
+- **LLM integration**: All user intent parsing goes through `parse_intent()` in `llm.py`, which calls LM Studio's OpenAI-compatible API. The LLM returns structured JSON actions, not free text. When the model returns prose instead of JSON, it's treated as a fallback `unknown` action.
+- **Action dispatch**: `on_message` handler in `bot.py` contains a linear action dispatch loop. Each action type (list, remove, edit, save, restore, effect_apply, persona_set, etc.) has its own `elif` block.
+- **Database**: SQLite via raw `sqlite3` in `db.py` — no ORM. Four tables: `saved_sounds`, `emojis`, `personas`, `voice_history`. Schema migrations are inline in `db_init()` using `PRAGMA table_info` checks.
+- **Audio effects**: pydub/ffmpeg in `audio.py`. Effects chain from the original audio to avoid quality degradation. Child clips track their `parent_id` (always the root original) and `effects` JSON.
 - **Persona system**: Stored directives injected into the LLM system prompt. The LLM controls what gets stored (it distills user requests into short directives) and flavors all responses via an optional `"message"` field on any action.
-- **Voice commands**: Wake-word triggered pipeline in `voice.py`. Bot joins a voice channel via `discord-ext-voice-recv`, receives per-user 48kHz stereo PCM, resamples to 16kHz mono, runs energy-based VAD to detect speech segments, transcribes with faster-whisper (large-v3-turbo on CUDA), checks for wake word "Halbot", and sends the command to a lightweight `parse_voice_intent()` LLM call that picks a sound to play. Playback via `FFmpegPCMAudio`.
+- **Voice commands**: Wake-word triggered pipeline in `voice.py` + `voice_session.py`. Bot joins a voice channel via `discord-ext-voice-recv`, receives per-user 48kHz stereo PCM, resamples to 16kHz mono, runs energy-based VAD to detect speech segments, transcribes with faster-whisper (large-v3-turbo on CUDA), checks for wake word "Halbot", and sends the command to a lightweight `parse_voice_intent()` LLM call in `llm.py` that picks a sound to play. Playback via `FFmpegPCMAudio`.
+- **Module dependency order** (no cycles): `db.py` → `audio.py` → `llm.py` → `voice_session.py` → `bot.py`
 
 ## Key Files
 
-- `bot.py` — entire bot: DB layer, audio processing, LLM integration, Discord handlers
-- `voice.py` — voice listener: wake-word STT pipeline, audio receiving, whisper transcription
+- `bot.py` — Discord client setup, event handlers, `on_message` action dispatch
+- `db.py` — all SQLite operations: sounds, personas, voice history, emojis
+- `llm.py` — LM Studio HTTP calls, intent parsing, all LLM prompts (except system prompt)
+- `audio.py` — audio validation, format detection, pydub effects chain
+- `voice_session.py` — voice channel lifecycle, TTS, wake-word callback, idle-disconnect timer
+- `voice.py` — low-level voice receiving, Whisper STT pipeline (optional extra)
+- `tts.py` — TTS engine selection and synthesis (optional extra)
+- `prompts/system_prompt.txt` — main soundboard-manager system prompt (loaded by llm.py at import)
 - `sounds.db` — SQLite database (auto-created on first run)
 - `pyproject.toml` — project metadata and dependencies (uv)
 - `infra/main.tf` — Terraform config for GCP VM

@@ -136,22 +136,36 @@ All secrets (LM Studio auth keys, VM user) are externalized as Terraform variabl
 Discord message
     |
     v
-on_message handler
-    |-- parse attachments & validate audio
+on_message handler (bot.py)
+    |-- parse attachments & validate audio  (audio.py)
     |-- fetch soundboard state
     |-- fetch channel history (last 50 messages)
-    |-- fetch saved library & emoji DB
+    |-- fetch saved library & emoji DB      (db.py)
     |
     v
-parse_intent() --> LM Studio (local LLM)
+parse_intent() --> LM Studio (local LLM)   (llm.py)
     |                returns JSON action(s)
     v
-action handlers
-    |-- list / remove / edit / clear      (live soundboard)
-    |-- upload / save / restore / ...     (local library)
-    |-- effect_ask / effect_apply         (audio effects)
-    |-- persona_set / update / remove     (behavior directives)
-    |-- emoji_list                        (custom emojis)
+action handlers (bot.py)
+    |-- list / remove / edit / clear        (live soundboard)
+    |-- upload / save / restore / ...       (local library, db.py)
+    |-- effect_ask / effect_apply           (audio.py)
+    |-- persona_set / update / remove       (db.py)
+    |-- emoji_list                          (db.py)
+    |-- voice_join / voice_leave / voice_play (voice_session.py)
     v
 Discord reply (auto-split at 2000 chars)
 ```
+
+### Source files
+
+| File | Responsibility |
+|------|----------------|
+| `bot.py` | Discord client setup, event handlers, `on_message` dispatch |
+| `db.py` | All SQLite operations: sounds, personas, voice history, emojis |
+| `llm.py` | LM Studio calls, intent parsing, all LLM prompts |
+| `audio.py` | Audio validation, format detection, pydub effects chain |
+| `voice_session.py` | Voice channel lifecycle, TTS, wake-word callback, idle timer |
+| `voice.py` | Low-level voice receiving, Whisper STT pipeline (optional) |
+| `tts.py` | TTS engine selection and synthesis (optional) |
+| `prompts/system_prompt.txt` | Main soundboard-manager system prompt (loaded by llm.py) |
