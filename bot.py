@@ -377,7 +377,8 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
     }
     if LMSTUDIO_MODEL:
         body["model"] = LMSTUDIO_MODEL
-    _apply_thinking_flag(body)
+    # Intentionally skip _apply_thinking_flag — this hits a vision backend
+    # which may reject unknown chat_template_kwargs.
     try:
         resp = requests.post(LMSTUDIO_URL, json=body, timeout=30)
         resp.raise_for_status()
@@ -1042,19 +1043,19 @@ SINGLE response, do two things:
    the wake word.
 
 SAVED LIBRARY:
-{saved_details}
+<<SAVED_DETAILS>>
 
 LIVE SOUNDBOARD:
-{sound_details}
+<<SOUND_DETAILS>>
 
-{persona_directives_block}
+<<PERSONA_DIRECTIVES>>
 
 Reply with ONLY this JSON, no prose, no markdown:
-  {{"wake": <true|false>, "actions": [<action>, ...]}}
+  {"wake": <true|false>, "actions": [<action>, ...]}
 
 Each action is one of:
-  {{"action": "voice_play", "name": "<exact sound name>"}}
-  {{"action": "unknown", "message": "<brief response>"}}
+  {"action": "voice_play", "name": "<exact sound name>"}
+  {"action": "unknown", "message": "<brief response>"}
 
 If wake=false, actions MUST be [].
 Match creatively — "something scary" → pick a scary-sounding name,
@@ -1064,12 +1065,15 @@ Match creatively — "something scary" → pick a scary-sounding name,
 
 def parse_voice_combined(
     transcript: str, sounds, saved: list[dict]
-) -> tuple[bool, list[dict]]:
+) -> tuple[str, list[dict]]:
     """Single-call wake detection + intent parsing.
 
-    Returns (wake_detected, actions).  actions is a list of dicts in the
-    same shape parse_voice_intent returns.  On failure returns (False, [])
-    so the utterance is silently ignored.
+    Returns (status, actions) where status is one of:
+      - "wake":    wake word detected; actions is the intent list (possibly empty)
+      - "no_wake": wake word absent; actions is []
+      - "error":   LLM/parse failure; actions is []
+    The caller uses status to tell "user didn't address us" apart from
+    "something went wrong" so real failures don't masquerade as silence.
     """
     personas = persona_list()
     if personas:
@@ -1077,10 +1081,11 @@ def parse_voice_combined(
         pd_block = "ACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(persona_lines)
     else:
         pd_block = ""
-    system = VOICE_COMBINED_PROMPT.format(
-        sound_details=format_sound_details(sounds),
-        saved_details=format_saved_details(saved),
-        persona_directives_block=pd_block,
+    system = (
+        VOICE_COMBINED_PROMPT
+        .replace("<<SAVED_DETAILS>>", format_saved_details(saved))
+        .replace("<<SOUND_DETAILS>>", format_sound_details(sounds))
+        .replace("<<PERSONA_DIRECTIVES>>", pd_block)
     )
     body = {
         "messages": [
@@ -1110,15 +1115,22 @@ def parse_voice_combined(
         usage = raw_json.get("usage", {})
         content = (message.get("content") or "").strip()
         reasoning = (message.get("reasoning_content") or "").strip()
-        if "<think>" in content and "</think>" in content:
+        # Some servers leak only the closing </think> even when thinking is
+        # disabled mid-stream; always partition on it if present.
+        if "</think>" in content:
             _, _, rest = content.partition("</think>")
             content = rest.strip()
         if not content and reasoning:
-            content = reasoning.splitlines()[-1].strip()
+            # Pull out the first {...} block from reasoning rather than just
+            # the final line, which on multi-line JSON is usually a bare "}".
+            start = reasoning.find("{")
+            end = reasoning.rfind("}")
+            if start != -1 and end > start:
+                content = reasoning[start:end + 1]
         log.info("[voice-combined] finish_reason=%s usage=%s content=%r",
                  finish_reason, usage, content[:200])
         if not content:
-            return False, []
+            return "error", []
         if content.startswith("```"):
             content = content.split("\n", 1)[1] if "\n" in content else content[3:]
             if content.endswith("```"):
@@ -1129,13 +1141,13 @@ def parse_voice_combined(
         actions = parsed.get("actions") or []
         if not isinstance(actions, list):
             actions = [actions] if isinstance(actions, dict) else []
-        return wake, actions
+        return ("wake" if wake else "no_wake"), actions
     except json.JSONDecodeError:
         log.warning("[voice-combined] non-JSON response: %r", content[:200])
-        return False, []
+        return "error", []
     except Exception as e:
-        log.warning("[voice-combined] call failed (%s); ignoring utterance", e)
-        return False, []
+        log.warning("[voice-combined] call failed (%s)", e)
+        return "error", []
 
 
 def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]:
@@ -1187,15 +1199,20 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict]) -> list[dict]
         # in `content`.  Others leak the whole thing into `content` wrapped
         # in <think>…</think>.  Handle both.
         reasoning = (message.get("reasoning_content") or "").strip()
-        if "<think>" in content and "</think>" in content:
+        if "</think>" in content:
             before, _, rest = content.partition("</think>")
             content = rest.strip()
             log.debug("[voice-llm] stripped <think> block (%d chars)", len(before))
         if not content and reasoning:
             # Fallback: some servers forget to populate `content` when
             # reasoning_content is set and the model hit a token ceiling.
-            log.warning("[voice-llm] content empty, falling back to reasoning_content tail")
-            content = reasoning.splitlines()[-1].strip() if reasoning else ""
+            # Extract the first {...} block rather than just the last line
+            # (which for multi-line JSON is typically a bare "}").
+            log.warning("[voice-llm] content empty, falling back to reasoning_content JSON")
+            start = reasoning.find("{")
+            end = reasoning.rfind("}")
+            if start != -1 and end > start:
+                content = reasoning[start:end + 1]
         log.info("[voice-llm] finish_reason=%s usage=%s content=%r",
                  finish_reason, usage, content[:200])
         if not content:
@@ -1237,12 +1254,21 @@ async def handle_voice_command(guild, text_channel, user_id, transcript):
         except discord.HTTPException:
             sounds = []
         saved = db_list()
-        wake, actions = await asyncio.to_thread(
+        status, actions = await asyncio.to_thread(
             parse_voice_combined, transcript, sounds, saved
         )
-        if not wake:
+        if status == "no_wake":
             log.info("[voice] no wake word in: %r", transcript)
             return
+        if status == "error":
+            log.warning("[voice] combined LLM call errored on: %r", transcript)
+            await text_channel.send("\U0001f3a4 Voice command processing failed.")
+            return
+        if not actions:
+            # Wake heard but LLM didn't pick anything actionable.  Ack so
+            # the user isn't left wondering whether we heard them.
+            actions = [{"action": "unknown",
+                        "message": "I heard you but couldn't pick a sound for that."}]
     else:
         wake, command = await asyncio.to_thread(check_wake_word, transcript)
         if not wake:
