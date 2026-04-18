@@ -1,6 +1,7 @@
-# Project Restructure Plan
+# Project Restructure — Design
 
-Status: draft, decisions landing iteratively.
+Status: design locked. Scope and outcome. Implementation plan lives in
+[003-project-restructure-impl.md](003-project-restructure-impl.md).
 
 ## Goals
 
@@ -358,18 +359,13 @@ reverses all four steps.
 - During restructure, rename LM-Studio-specific helpers so the eventual
   swap is a contained change to `halbot/llm.py`.
 
-### Restructure phasing
+### Delivery approach
 
 - **Big-bang refactor on `main`**, not feature branches. Solo project, no
   collaborators to unblock. Push to remote only when the whole stack is
   green.
-- Phase order (sketch only; may collapse as work proceeds):
-  1. Move flat modules into `halbot/` package; fix imports.
-  2. Add proto + `_gen/` + gRPC server.
-  3. Build `tray/` package; tray talks only to daemon over gRPC.
-  4. Secrets: `halbot/secrets.py` + daemon `setup` subcommand; drop `.env`.
-  5. NSSM integration + installer steps 2–4.
-  6. PyInstaller specs + two-zip build + update scripts.
+- Concrete phase breakdown and ordering: see
+  [003-project-restructure-impl.md](003-project-restructure-impl.md).
 
 ## Open questions
 
