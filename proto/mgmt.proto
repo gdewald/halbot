@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package halbot.mgmt;
+
+service Mgmt {
+  rpc Health (HealthRequest) returns (HealthReply);
+  rpc GetConfig (GetConfigRequest) returns (ConfigState);
+  rpc UpdateConfig (UpdateConfigRequest) returns (ConfigState);
+  rpc PersistConfig (PersistConfigRequest) returns (ConfigState);
+  rpc ResetConfig (ResetConfigRequest) returns (ConfigState);
+}
+
+enum ConfigSource {
+  CONFIG_SOURCE_UNSPECIFIED = 0;
+  CONFIG_SOURCE_DEFAULT = 1;
+  CONFIG_SOURCE_REGISTRY = 2;
+  CONFIG_SOURCE_RUNTIME_OVERRIDE = 3;
+}
+
+message HealthRequest {}
+
+message HealthReply {
+  double uptime_seconds = 1;
+  string daemon_version = 2;
+}
+
+message StringValue {
+  string value = 1;
+  ConfigSource source = 2;
+}
+
+message ConfigState {
+  StringValue log_level = 1;
+}
+
+message GetConfigRequest {}
+
+message UpdateConfigRequest {
+  // Only populated fields are updated. Sets runtime override.
+  ConfigState config = 1;
+}
+
+message PersistConfigRequest {
+  // Field names to persist to registry. Empty = persist all currently-overridden.
+  repeated string fields = 1;
+}
+
+message ResetConfigRequest {
+  // Field names whose runtime override is dropped. Empty = reset all.
+  repeated string fields = 1;
+}
