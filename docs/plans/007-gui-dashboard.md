@@ -184,3 +184,109 @@ uses `-webkit-app-region: drag` which Edge WebView2 respects.
 Bundle JetBrains Mono and DM Sans woff2 under
 `frontend/src/fonts/` and declare via `@font-face` in the entry
 CSS. Remove the Google Fonts `<link>`.
+
+## RPC surface additions
+
+None of the existing RPCs are removed. Three additions in
+`proto/mgmt.proto`, regenerated via `scripts\gen_proto.ps1`.
+
+### 1. Field type hint on `StringValue`
+
+Needed so the Config panel can pick the right widget without a
+hard-coded map. Currently every value is a bare string.
+
+```proto
+enum ConfigFieldType {
+  CONFIG_FIELD_TYPE_UNSPECIFIED = 0;
+  CONFIG_FIELD_TYPE_STRING = 1;
+  CONFIG_FIELD_TYPE_NUMBER = 2;
+  CONFIG_FIELD_TYPE_BOOL = 3;
+  CONFIG_FIELD_TYPE_SELECT = 4;
+  CONFIG_FIELD_TYPE_URL = 5;
+  CONFIG_FIELD_TYPE_RANGE = 6;
+}
+
+message StringValue {
+  string value = 1;
+  ConfigSource source = 2;
+  ConfigFieldType type = 3;
+  repeated string options = 4;   // for SELECT
+  string description = 5;        // one-line help text
+  string group = 6;              // "general" | "llm" | "voice" | "tts"
+  double min = 7;                // for NUMBER / RANGE
+  double max = 8;
+  double step = 9;
+}
+```
+
+Type + options + description + group move from frontend constants
+into `halbot/config.py` as a per-field schema dict alongside
+`DEFAULTS`. Single source of truth. Phase-1 only `log_level` gets
+populated (type=SELECT, options=[DEBUG,INFO,WARNING,ERROR],
+group=general). Later phases add their fields as they land.
+
+### 2. `StreamLogs` — bidirectional log tail
+
+Pushing raw log lines over the existing file tail works but forces
+the tray bundle to know where daemon's log file lives (not true
+when dashboard runs under a different user or future remote setup).
+Stream via gRPC instead:
+
+```proto
+rpc StreamLogs (StreamLogsRequest) returns (stream LogLine);
+
+message StreamLogsRequest {
+  int32 backlog = 1;       // lines to replay on connect; 0 = none
+  string min_level = 2;    // filter server-side; empty = all
+}
+
+message LogLine {
+  int64 ts_unix_nanos = 1;
+  string level = 2;        // DEBUG|INFO|WARNING|ERROR
+  string source = 3;       // logger name
+  string message = 4;
+}
+```
+
+Server impl: add a `logging.Handler` that pushes records into a
+per-subscriber `asyncio.Queue` plus a bounded ring buffer (1000
+lines) for backlog replay. Cheap. No file parsing on the client.
+
+Phase-1 fallback if stream proves flaky: keep the file-tail path in
+`js_api` and flip via a config flag. Do not block dashboard ship on
+the stream.
+
+### 3. `GetStats` — stub for later panels
+
+Define the message now so the Stats panel has a stable shape;
+return empty / zero values this phase. Keeps the frontend from
+needing a breaking change when real telemetry lands.
+
+```proto
+rpc GetStats (Empty) returns (StatsReply);
+
+message StatsReply {
+  SoundboardStats soundboard = 1;
+  VoicePlaybackStats voice_playback = 2;
+  WakeWordStats wake_word = 3;
+  LatencyStats stt = 4;
+  LatencyStats tts = 5;
+  LlmStats llm = 6;
+  bool mock = 99;  // true until real impl lands
+}
+```
+
+Sub-messages left as a TODO in the proto file, one-liner stubs,
+filled in per phase. `mock=true` drives the overlay in the Stats
+panel.
+
+### Event history source
+
+Not a new RPC for phase 1. When phase 2 lands the crash ring
+buffer, add:
+
+```proto
+rpc GetEventLog (Empty) returns (EventLogReply);
+```
+
+Deferred — not part of this plan's delivery scope.
