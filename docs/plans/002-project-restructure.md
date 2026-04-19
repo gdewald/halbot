@@ -359,8 +359,7 @@ reverse all four steps.
 
 ### Delivery approach
 
-- **Big-bang refactor on `main`**, not feature branches. Solo project, no
-  collaborators to unblock. Push to remote only when whole stack green.
+- **Refactor on feature branch - one branch per phase**, push to remote only when whole stack green.
 - Concrete phase breakdown and ordering: see
   [003-project-restructure-impl.md](003-project-restructure-impl.md).
 
