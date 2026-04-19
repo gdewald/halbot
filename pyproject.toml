@@ -17,7 +17,6 @@ daemon = [
     "pywin32>=306",
     "discord.py[voice]>=2.5,<3",
     "discord-ext-voice-recv>=0.4",
-    "python-dotenv>=1.0",
     "requests>=2.31",
     "tinytag>=2.0",
     "pydub>=0.25",
