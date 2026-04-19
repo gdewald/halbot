@@ -27,6 +27,9 @@ def init(level: str = "INFO") -> None:
         stream = logging.StreamHandler()
         stream.setFormatter(logging.Formatter(_FMT))
         root.addHandler(stream)
+        # Add log_ring handler for StreamLogs RPC
+        from . import log_ring
+        logging.getLogger().addHandler(log_ring.handler())
     reconfigure(level)
 
 

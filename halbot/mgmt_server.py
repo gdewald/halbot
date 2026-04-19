@@ -211,26 +211,36 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                 return mgmt_pb2.StatusReply(ok=False, message=f"load failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="tts loaded")
 
-    async def UnloadTTS(self, request, context):
-        if self._tts_lock.locked():
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            return mgmt_pb2.StatusReply(ok=False, message="tts op in progress")
-        async with self._tts_lock:
-            try:
-                from . import tts as tts_mod
-                tts_mod.unload_engine()
-            except Exception as e:
-                log.error(f"TTS unload failed due to exception: {type(e).__name__}: {str(e)}")
-                return mgmt_pb2.StatusReply(ok=False, message=f"unload failed: {type(e).__name__} - {str(e)[:60]}...")
-        return mgmt_pb2.StatusReply(ok=True, message="tts unloaded")
+    async def StreamLogs(self, request, context):
+        from . import log_ring
+        min_level = (request.min_level or "").upper()
+        level_rank = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+        floor = level_rank.get(min_level, 0)
+        q = log_ring.handler().subscribe(backlog=max(0, min(request.backlog, 1000)))
+        try:
+            while True:
+                rec = await q.get()
+                if floor and level_rank.get(rec.level, 0) < floor:
+                    continue
+                yield mgmt_pb2.LogLine(
+                    ts_unix_nanos=rec.ts_ns,
+                    level=rec.level,
+                    source=rec.source,
+                    message=rec.message,
+                )
+        finally:
+            log_ring.handler().unsubscribe(q)
+
+    async def GetStats(self, request, context):
+        return mgmt_pb2.StatsReply(mock=True)
 
 
 async def serve(started: float, version: str) -> grpc.aio.Server:
     server = grpc.aio.server()
     mgmt_pb2_grpc.add_MgmtServicer_to_server(
         MgmtService(started=started, version=version), server
-    )
-    server.add_insecure_port(BIND)
+from . import log_ring
+log_ring.handler().bind_loop(asyncio.get_running_loop())
     await server.start()
     log.info("mgmt gRPC listening on %s", BIND)
     return server
