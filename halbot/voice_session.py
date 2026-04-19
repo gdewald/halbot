@@ -11,10 +11,12 @@ from .llm import (
 
 log = logging.getLogger("halbot")
 
-VOICE_LLM_COMBINE_CALLS = _env_bool("VOICE_LLM_COMBINE_CALLS", True)
+from . import config as _config
+
+VOICE_LLM_COMBINE_CALLS = _env_bool("voice_llm_combine_calls", True)
 
 try:
-    VOICE_IDLE_TIMEOUT_SECONDS = int(__import__("os").getenv("VOICE_IDLE_TIMEOUT_SECONDS", "1800"))
+    VOICE_IDLE_TIMEOUT_SECONDS = int(_config.get("voice_idle_timeout_seconds"))
 except (ValueError, TypeError):
     VOICE_IDLE_TIMEOUT_SECONDS = 1800
 

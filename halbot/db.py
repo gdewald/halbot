@@ -8,17 +8,33 @@ METADATA_MAX_BYTES = 2048
 PERSONA_MAX_CHARS = 200
 PERSONA_MAX_TOTAL = 10
 
+from . import config as _config
+
+
+def _cfg_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(_config.get(name)))
+    except (ValueError, TypeError):
+        return default
+
+
+def _cfg_bool(name: str, default: bool) -> bool:
+    raw = _config.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
 try:
-    VOICE_HISTORY_TURNS = max(0, int(os.getenv("VOICE_HISTORY_TURNS", "10")))
-except (ValueError, TypeError):
+    VOICE_HISTORY_TURNS = _cfg_int("voice_history_turns", 10)
+except Exception:
     VOICE_HISTORY_TURNS = 10
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on", "y", "t")
+    # Back-compat shim for callers that still import _env_bool. Reads
+    # registry config, not env.
+    return _cfg_bool(name, default)
 
 
 def _db():

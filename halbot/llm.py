@@ -11,8 +11,10 @@ from .db import emoji_db_list, persona_list
 
 log = logging.getLogger("halbot")
 
-LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions")
-LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", "google/gemma-4-e2b")
+from . import config as _config
+
+LMSTUDIO_URL = _config.get("llm_url")
+LMSTUDIO_MODEL = _config.get("llm_model") or "google/gemma-4-e2b"
 
 # Reasoning models can take >30s for a single response. Keep both read
 # timeouts generous so a slow generation doesn't surface as "I didn't
