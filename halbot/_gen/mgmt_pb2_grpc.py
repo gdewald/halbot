@@ -94,6 +94,16 @@ class MgmtStub(object):
                 request_serializer=mgmt__pb2.Empty.SerializeToString,
                 response_deserializer=mgmt__pb2.StatusReply.FromString,
                 _registered_method=True)
+        self.StreamLogs = channel.unary_stream(
+                '/halbot.mgmt.Mgmt/StreamLogs',
+                request_serializer=mgmt__pb2.StreamLogsRequest.SerializeToString,
+                response_deserializer=mgmt__pb2.LogLine.FromString,
+                _registered_method=True)
+        self.GetStats = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/GetStats',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatsReply.FromString,
+                _registered_method=True)
 
 
 class MgmtServicer(object):
@@ -171,6 +181,18 @@ class MgmtServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StreamLogs(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetStats(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MgmtServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -233,6 +255,16 @@ def add_MgmtServicer_to_server(servicer, server):
                     servicer.UnloadTTS,
                     request_deserializer=mgmt__pb2.Empty.FromString,
                     response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'StreamLogs': grpc.unary_stream_rpc_method_handler(
+                    servicer.StreamLogs,
+                    request_deserializer=mgmt__pb2.StreamLogsRequest.FromString,
+                    response_serializer=mgmt__pb2.LogLine.SerializeToString,
+            ),
+            'GetStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStats,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatsReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -559,6 +591,60 @@ class Mgmt(object):
             '/halbot.mgmt.Mgmt/UnloadTTS',
             mgmt__pb2.Empty.SerializeToString,
             mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StreamLogs(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/StreamLogs',
+            mgmt__pb2.StreamLogsRequest.SerializeToString,
+            mgmt__pb2.LogLine.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/GetStats',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatsReply.FromString,
             options,
             channel_credentials,
             insecure,

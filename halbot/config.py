@@ -164,3 +164,84 @@ def reset(fields: Optional[Iterable[str]] = None) -> None:
                 changed.append((n, get(n)))
     for n, v in changed:
         _notify(n, v)
+
+
+# Field schema drives Config panel widgets over the wire.
+# Keys must mirror DEFAULTS exactly. Missing key = hidden in UI.
+SCHEMA: Dict[str, Dict[str, Any]] = {
+    "log_level": {
+        "type": "SELECT", "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
+        "description": "Minimum log level emitted",
+        "group": "general", "label": "LOG_LEVEL",
+    },
+    "llm_backend": {
+        "type": "SELECT", "options": ["lmstudio", "ollama"],
+        "description": "LLM backend driver",
+        "group": "llm", "label": "LLM_BACKEND",
+    },
+    "llm_url": {
+        "type": "URL",
+        "description": "LLM API endpoint",
+        "group": "llm", "label": "LLM_URL",
+    },
+    "llm_model": {
+        "type": "STRING",
+        "description": "Model name as shown by the backend",
+        "group": "llm", "label": "LLM_MODEL",
+    },
+    "llm_max_tokens_text": {
+        "type": "NUMBER", "min": 16.0, "max": 4096.0, "step": 16.0,
+        "description": "Max output tokens for text LLM calls",
+        "group": "llm", "label": "LLM_MAX_TOKENS_TEXT",
+    },
+    "llm_max_tokens_voice": {
+        "type": "NUMBER", "min": 16.0, "max": 2048.0, "step": 16.0,
+        "description": "Max output tokens for voice LLM calls",
+        "group": "llm", "label": "LLM_MAX_TOKENS_VOICE",
+    },
+    "voice_wake_word": {
+        "type": "STRING",
+        "description": "Wake word phrase",
+        "group": "voice", "label": "VOICE_WAKE_WORD",
+    },
+    "voice_idle_timeout_seconds": {
+        "type": "NUMBER", "min": 30.0, "max": 7200.0, "step": 30.0,
+        "description": "Seconds before bot leaves empty channel",
+        "group": "voice", "label": "VOICE_IDLE_TIMEOUT_SECONDS",
+    },
+    "voice_energy_threshold": {
+        "type": "RANGE", "min": 0.0, "max": 0.2, "step": 0.005,
+        "description": "Voice activity detection threshold",
+        "group": "voice", "label": "VOICE_ENERGY_THRESHOLD",
+    },
+    "voice_history_turns": {
+        "type": "NUMBER", "min": 0.0, "max": 50.0, "step": 1.0,
+        "description": "Conversation turns kept in voice LLM context",
+        "group": "voice", "label": "VOICE_HISTORY_TURNS",
+    },
+    "voice_llm_combine_calls": {
+        "type": "BOOL",
+        "description": "Batch voice LLM calls for lower latency",
+        "group": "voice", "label": "VOICE_LLM_COMBINE_CALLS",
+    },
+    "tts_engine": {
+        "type": "SELECT", "options": ["kokoro", "espeak", "piper"],
+        "description": "TTS backend",
+        "group": "tts", "label": "TTS_ENGINE",
+    },
+    "tts_voice": {
+        "type": "STRING",
+        "description": "TTS voice ID",
+        "group": "tts", "label": "TTS_VOICE",
+    },
+    "tts_lang": {
+        "type": "STRING",
+        "description": "TTS language code",
+        "group": "tts", "label": "TTS_LANG",
+    },
+    "tts_speed": {
+        "type": "RANGE", "min": 0.5, "max": 2.0, "step": 0.05,
+        "description": "TTS playback speed multiplier",
+        "group": "tts", "label": "TTS_SPEED",
+    },
+}

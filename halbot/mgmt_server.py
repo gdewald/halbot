@@ -21,15 +21,35 @@ _SOURCE_MAP = {
     config.Source.RUNTIME_OVERRIDE: mgmt_pb2.CONFIG_SOURCE_RUNTIME_OVERRIDE,
 }
 
+_TYPE_MAP = {
+    "STRING": mgmt_pb2.CONFIG_FIELD_TYPE_STRING,
+    "NUMBER": mgmt_pb2.CONFIG_FIELD_TYPE_NUMBER,
+    "BOOL":   mgmt_pb2.CONFIG_FIELD_TYPE_BOOL,
+    "SELECT": mgmt_pb2.CONFIG_FIELD_TYPE_SELECT,
+    "URL":    mgmt_pb2.CONFIG_FIELD_TYPE_URL,
+    "RANGE":  mgmt_pb2.CONFIG_FIELD_TYPE_RANGE,
+}
+
 _RESTART_DISCORD_MIN_INTERVAL = 10.0
 
 
 def _state_msg() -> mgmt_pb2.ConfigState:
     snap = config.snapshot()
-    fields = {
-        name: mgmt_pb2.StringValue(value=str(val), source=_SOURCE_MAP[src])
-        for name, (val, src) in snap.items()
-    }
+    fields = {}
+    for name, (val, src) in snap.items():
+        schema = config.SCHEMA.get(name, {})
+        fields[name] = mgmt_pb2.StringValue(
+            value=str(val),
+            source=_SOURCE_MAP[src],
+            type=_TYPE_MAP.get(schema.get("type", "STRING"), mgmt_pb2.CONFIG_FIELD_TYPE_STRING),
+            options=list(schema.get("options", [])),
+            description=schema.get("description", ""),
+            group=schema.get("group", "general"),
+            min=float(schema.get("min", 0.0)),
+            max=float(schema.get("max", 0.0)),
+            step=float(schema.get("step", 0.0)),
+            label=schema.get("label", name.upper()),
+        )
     return mgmt_pb2.ConfigState(fields=fields)
 
 
@@ -224,8 +244,33 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                 return mgmt_pb2.StatusReply(ok=False, message=f"unload failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="tts unloaded")
 
+    async def StreamLogs(self, request, context):
+        from . import log_ring
+        min_level = (request.min_level or "").upper()
+        level_rank = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+        floor = level_rank.get(min_level, 0)
+        q = log_ring.handler().subscribe(backlog=max(0, min(request.backlog, 1000)))
+        try:
+            while True:
+                rec = await q.get()
+                if floor and level_rank.get(rec.level, 0) < floor:
+                    continue
+                yield mgmt_pb2.LogLine(
+                    ts_unix_nanos=rec.ts_ns,
+                    level=rec.level,
+                    source=rec.source,
+                    message=rec.message,
+                )
+        finally:
+            log_ring.handler().unsubscribe(q)
+
+    async def GetStats(self, request, context):
+        return mgmt_pb2.StatsReply(mock=True)
+
 
 async def serve(started: float, version: str) -> grpc.aio.Server:
+    from . import log_ring
+    log_ring.handler().bind_loop(asyncio.get_running_loop())
     server = grpc.aio.server()
     mgmt_pb2_grpc.add_MgmtServicer_to_server(
         MgmtService(started=started, version=version), server

@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nmgmt.proto\x12\x0bhalbot.mgmt\"\x07\n\x05\x45mpty\"\x0f\n\rHealthRequest\"6\n\x0eVoiceInChannel\x12\x10\n\x08guild_id\x18\x01 \x01(\x04\x12\x12\n\nchannel_id\x18\x02 \x01(\x04\"W\n\nVoiceState\x12\x0e\n\x04idle\x18\x01 \x01(\x08H\x00\x12\x31\n\nin_channel\x18\x02 \x01(\x0b\x32\x1b.halbot.mgmt.VoiceInChannelH\x00\x42\x06\n\x04kind\"\xd4\x01\n\x0bHealthReply\x12\x16\n\x0euptime_seconds\x18\x01 \x01(\x01\x12\x16\n\x0e\x64\x61\x65mon_version\x18\x02 \x01(\t\x12*\n\x07\x64iscord\x18\x03 \x01(\x0e\x32\x19.halbot.mgmt.DiscordState\x12\x15\n\rllm_reachable\x18\x04 \x01(\x08\x12&\n\x05voice\x18\x05 \x01(\x0b\x32\x17.halbot.mgmt.VoiceState\x12\x16\n\x0ewhisper_loaded\x18\x06 \x01(\x08\x12\x12\n\ntts_loaded\x18\x07 \x01(\x08\"G\n\x0bStringValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x06source\x18\x02 \x01(\x0e\x32\x19.halbot.mgmt.ConfigSource\"\x8c\x01\n\x0b\x43onfigState\x12\x34\n\x06\x66ields\x18\x01 \x03(\x0b\x32$.halbot.mgmt.ConfigState.FieldsEntry\x1aG\n\x0b\x46ieldsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\'\n\x05value\x18\x02 \x01(\x0b\x32\x18.halbot.mgmt.StringValue:\x02\x38\x01\"\x12\n\x10GetConfigRequest\"\x85\x01\n\x13UpdateConfigRequest\x12>\n\x07updates\x18\x01 \x03(\x0b\x32-.halbot.mgmt.UpdateConfigRequest.UpdatesEntry\x1a.\n\x0cUpdatesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"&\n\x14PersistConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"$\n\x12ResetConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"/\n\x10SetSecretRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"*\n\x0bStatusReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t*\x88\x01\n\x0c\x43onfigSource\x12\x1d\n\x19\x43ONFIG_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n\x15\x43ONFIG_SOURCE_DEFAULT\x10\x01\x12\x1a\n\x16\x43ONFIG_SOURCE_REGISTRY\x10\x02\x12\"\n\x1e\x43ONFIG_SOURCE_RUNTIME_OVERRIDE\x10\x03*\x81\x02\n\x0c\x44iscordState\x12\x19\n\x15\x44ISCORD_STATE_UNKNOWN\x10\x00\x12\x1e\n\x1a\x44ISCORD_STATE_DISCONNECTED\x10\x01\x12\x1c\n\x18\x44ISCORD_STATE_CONNECTING\x10\x02\x12\x1b\n\x17\x44ISCORD_STATE_CONNECTED\x10\x03\x12\x1e\n\x1a\x44ISCORD_STATE_RECONNECTING\x10\x04\x12\x1e\n\x1a\x44ISCORD_STATE_RATE_LIMITED\x10\x05\x12\x1f\n\x1b\x44ISCORD_STATE_TOKEN_INVALID\x10\x06\x12\x1a\n\x16\x44ISCORD_STATE_NO_TOKEN\x10\x07\x32\xa2\x06\n\x04Mgmt\x12>\n\x06Health\x12\x1a.halbot.mgmt.HealthRequest\x1a\x18.halbot.mgmt.HealthReply\x12\x44\n\tGetConfig\x12\x1d.halbot.mgmt.GetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12J\n\x0cUpdateConfig\x12 .halbot.mgmt.UpdateConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12L\n\rPersistConfig\x12!.halbot.mgmt.PersistConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12H\n\x0bResetConfig\x12\x1f.halbot.mgmt.ResetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12\x44\n\tSetSecret\x12\x1d.halbot.mgmt.SetSecretRequest\x1a\x18.halbot.mgmt.StatusReply\x12>\n\x0eRestartDiscord\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12:\n\nLeaveVoice\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12;\n\x0bLoadWhisper\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12=\n\rUnloadWhisper\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x37\n\x07LoadTTS\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x39\n\tUnloadTTS\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nmgmt.proto\x12\x0bhalbot.mgmt\"\x07\n\x05\x45mpty\"\x0f\n\rHealthRequest\"6\n\x0eVoiceInChannel\x12\x10\n\x08guild_id\x18\x01 \x01(\x04\x12\x12\n\nchannel_id\x18\x02 \x01(\x04\"W\n\nVoiceState\x12\x0e\n\x04idle\x18\x01 \x01(\x08H\x00\x12\x31\n\nin_channel\x18\x02 \x01(\x0b\x32\x1b.halbot.mgmt.VoiceInChannelH\x00\x42\x06\n\x04kind\"\xd4\x01\n\x0bHealthReply\x12\x16\n\x0euptime_seconds\x18\x01 \x01(\x01\x12\x16\n\x0e\x64\x61\x65mon_version\x18\x02 \x01(\t\x12*\n\x07\x64iscord\x18\x03 \x01(\x0e\x32\x19.halbot.mgmt.DiscordState\x12\x15\n\rllm_reachable\x18\x04 \x01(\x08\x12&\n\x05voice\x18\x05 \x01(\x0b\x32\x17.halbot.mgmt.VoiceState\x12\x16\n\x0ewhisper_loaded\x18\x06 \x01(\x08\x12\x12\n\ntts_loaded\x18\x07 \x01(\x08\"\xdf\x01\n\x0bStringValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x06source\x18\x02 \x01(\x0e\x32\x19.halbot.mgmt.ConfigSource\x12*\n\x04type\x18\x03 \x01(\x0e\x32\x1c.halbot.mgmt.ConfigFieldType\x12\x0f\n\x07options\x18\x04 \x03(\t\x12\x13\n\x0b\x64\x65scription\x18\x05 \x01(\t\x12\r\n\x05group\x18\x06 \x01(\t\x12\x0b\n\x03min\x18\x07 \x01(\x01\x12\x0b\n\x03max\x18\x08 \x01(\x01\x12\x0c\n\x04step\x18\t \x01(\x01\x12\r\n\x05label\x18\n \x01(\t\"\x8c\x01\n\x0b\x43onfigState\x12\x34\n\x06\x66ields\x18\x01 \x03(\x0b\x32$.halbot.mgmt.ConfigState.FieldsEntry\x1aG\n\x0b\x46ieldsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\'\n\x05value\x18\x02 \x01(\x0b\x32\x18.halbot.mgmt.StringValue:\x02\x38\x01\"\x12\n\x10GetConfigRequest\"\x85\x01\n\x13UpdateConfigRequest\x12>\n\x07updates\x18\x01 \x03(\x0b\x32-.halbot.mgmt.UpdateConfigRequest.UpdatesEntry\x1a.\n\x0cUpdatesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"&\n\x14PersistConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"$\n\x12ResetConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"/\n\x10SetSecretRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"*\n\x0bStatusReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"7\n\x11StreamLogsRequest\x12\x0f\n\x07\x62\x61\x63klog\x18\x01 \x01(\x05\x12\x11\n\tmin_level\x18\x02 \x01(\t\"P\n\x07LogLine\x12\x15\n\rts_unix_nanos\x18\x01 \x01(\x03\x12\r\n\x05level\x18\x02 \x01(\t\x12\x0e\n\x06source\x18\x03 \x01(\t\x12\x0f\n\x07message\x18\x04 \x01(\t\"r\n\x0fSoundboardStats\x12\x18\n\x10sounds_backed_up\x18\x01 \x01(\x05\x12\x15\n\rstorage_bytes\x18\x02 \x01(\x03\x12\x16\n\x0elast_sync_unix\x18\x03 \x01(\x03\x12\x16\n\x0enew_since_last\x18\x04 \x01(\x05\"{\n\x12VoicePlaybackStats\x12\x14\n\x0cplayed_today\x18\x01 \x01(\x05\x12\x17\n\x0fplayed_all_time\x18\x02 \x01(\x05\x12\x1d\n\x15session_seconds_today\x18\x03 \x01(\x03\x12\x17\n\x0f\x61vg_response_ms\x18\x04 \x01(\x05\"\x82\x01\n\rWakeWordStats\x12\x18\n\x10\x64\x65tections_today\x18\x01 \x01(\x05\x12\x1b\n\x13\x64\x65tections_all_time\x18\x02 \x01(\x05\x12\x1d\n\x15\x66\x61lse_positives_today\x18\x03 \x01(\x05\x12\x1b\n\x13\x61vg_join_latency_ms\x18\x04 \x01(\x05\"C\n\x0cLatencyStats\x12\x0e\n\x06\x61vg_ms\x18\x01 \x01(\x05\x12\x0e\n\x06p95_ms\x18\x02 \x01(\x05\x12\x13\n\x0b\x63ount_today\x18\x03 \x01(\x05\"\xe1\x01\n\x08LlmStats\x12\x17\n\x0fresponse_avg_ms\x18\x01 \x01(\x05\x12\x17\n\x0fresponse_p95_ms\x18\x02 \x01(\x05\x12\x13\n\x0bttft_avg_ms\x18\x03 \x01(\x05\x12\x13\n\x0bttft_p95_ms\x18\x04 \x01(\x05\x12\x16\n\x0etokens_per_sec\x18\x05 \x01(\x05\x12\x16\n\x0erequests_today\x18\x06 \x01(\x05\x12\x16\n\x0e\x61vg_tokens_out\x18\x07 \x01(\x05\x12\x19\n\x11\x63ontext_usage_pct\x18\x08 \x01(\x05\x12\x16\n\x0etimeouts_today\x18\t \x01(\x05\"\xa8\x02\n\nStatsReply\x12\x30\n\nsoundboard\x18\x01 \x01(\x0b\x32\x1c.halbot.mgmt.SoundboardStats\x12\x37\n\x0evoice_playback\x18\x02 \x01(\x0b\x32\x1f.halbot.mgmt.VoicePlaybackStats\x12-\n\twake_word\x18\x03 \x01(\x0b\x32\x1a.halbot.mgmt.WakeWordStats\x12&\n\x03stt\x18\x04 \x01(\x0b\x32\x19.halbot.mgmt.LatencyStats\x12&\n\x03tts\x18\x05 \x01(\x0b\x32\x19.halbot.mgmt.LatencyStats\x12\"\n\x03llm\x18\x06 \x01(\x0b\x32\x15.halbot.mgmt.LlmStats\x12\x0c\n\x04mock\x18\x63 \x01(\x08*\x88\x01\n\x0c\x43onfigSource\x12\x1d\n\x19\x43ONFIG_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n\x15\x43ONFIG_SOURCE_DEFAULT\x10\x01\x12\x1a\n\x16\x43ONFIG_SOURCE_REGISTRY\x10\x02\x12\"\n\x1e\x43ONFIG_SOURCE_RUNTIME_OVERRIDE\x10\x03*\xe2\x01\n\x0f\x43onfigFieldType\x12!\n\x1d\x43ONFIG_FIELD_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x43ONFIG_FIELD_TYPE_STRING\x10\x01\x12\x1c\n\x18\x43ONFIG_FIELD_TYPE_NUMBER\x10\x02\x12\x1a\n\x16\x43ONFIG_FIELD_TYPE_BOOL\x10\x03\x12\x1c\n\x18\x43ONFIG_FIELD_TYPE_SELECT\x10\x04\x12\x19\n\x15\x43ONFIG_FIELD_TYPE_URL\x10\x05\x12\x1b\n\x17\x43ONFIG_FIELD_TYPE_RANGE\x10\x06*\x81\x02\n\x0c\x44iscordState\x12\x19\n\x15\x44ISCORD_STATE_UNKNOWN\x10\x00\x12\x1e\n\x1a\x44ISCORD_STATE_DISCONNECTED\x10\x01\x12\x1c\n\x18\x44ISCORD_STATE_CONNECTING\x10\x02\x12\x1b\n\x17\x44ISCORD_STATE_CONNECTED\x10\x03\x12\x1e\n\x1a\x44ISCORD_STATE_RECONNECTING\x10\x04\x12\x1e\n\x1a\x44ISCORD_STATE_RATE_LIMITED\x10\x05\x12\x1f\n\x1b\x44ISCORD_STATE_TOKEN_INVALID\x10\x06\x12\x1a\n\x16\x44ISCORD_STATE_NO_TOKEN\x10\x07\x32\xa1\x07\n\x04Mgmt\x12>\n\x06Health\x12\x1a.halbot.mgmt.HealthRequest\x1a\x18.halbot.mgmt.HealthReply\x12\x44\n\tGetConfig\x12\x1d.halbot.mgmt.GetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12J\n\x0cUpdateConfig\x12 .halbot.mgmt.UpdateConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12L\n\rPersistConfig\x12!.halbot.mgmt.PersistConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12H\n\x0bResetConfig\x12\x1f.halbot.mgmt.ResetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12\x44\n\tSetSecret\x12\x1d.halbot.mgmt.SetSecretRequest\x1a\x18.halbot.mgmt.StatusReply\x12>\n\x0eRestartDiscord\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12:\n\nLeaveVoice\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12;\n\x0bLoadWhisper\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12=\n\rUnloadWhisper\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x37\n\x07LoadTTS\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x39\n\tUnloadTTS\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x44\n\nStreamLogs\x12\x1e.halbot.mgmt.StreamLogsRequest\x1a\x14.halbot.mgmt.LogLine0\x01\x12\x37\n\x08GetStats\x12\x12.halbot.mgmt.Empty\x1a\x17.halbot.mgmt.StatsReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,10 +35,12 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_options = b'8\001'
   _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._loaded_options = None
   _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_options = b'8\001'
-  _globals['_CONFIGSOURCE']._serialized_start=957
-  _globals['_CONFIGSOURCE']._serialized_end=1093
-  _globals['_DISCORDSTATE']._serialized_start=1096
-  _globals['_DISCORDSTATE']._serialized_end=1353
+  _globals['_CONFIGSOURCE']._serialized_start=2219
+  _globals['_CONFIGSOURCE']._serialized_end=2355
+  _globals['_CONFIGFIELDTYPE']._serialized_start=2358
+  _globals['_CONFIGFIELDTYPE']._serialized_end=2584
+  _globals['_DISCORDSTATE']._serialized_start=2587
+  _globals['_DISCORDSTATE']._serialized_end=2844
   _globals['_EMPTY']._serialized_start=27
   _globals['_EMPTY']._serialized_end=34
   _globals['_HEALTHREQUEST']._serialized_start=36
@@ -49,26 +51,42 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_VOICESTATE']._serialized_end=196
   _globals['_HEALTHREPLY']._serialized_start=199
   _globals['_HEALTHREPLY']._serialized_end=411
-  _globals['_STRINGVALUE']._serialized_start=413
-  _globals['_STRINGVALUE']._serialized_end=484
-  _globals['_CONFIGSTATE']._serialized_start=487
-  _globals['_CONFIGSTATE']._serialized_end=627
-  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_start=556
-  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_end=627
-  _globals['_GETCONFIGREQUEST']._serialized_start=629
-  _globals['_GETCONFIGREQUEST']._serialized_end=647
-  _globals['_UPDATECONFIGREQUEST']._serialized_start=650
-  _globals['_UPDATECONFIGREQUEST']._serialized_end=783
-  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_start=737
-  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_end=783
-  _globals['_PERSISTCONFIGREQUEST']._serialized_start=785
-  _globals['_PERSISTCONFIGREQUEST']._serialized_end=823
-  _globals['_RESETCONFIGREQUEST']._serialized_start=825
-  _globals['_RESETCONFIGREQUEST']._serialized_end=861
-  _globals['_SETSECRETREQUEST']._serialized_start=863
-  _globals['_SETSECRETREQUEST']._serialized_end=910
-  _globals['_STATUSREPLY']._serialized_start=912
-  _globals['_STATUSREPLY']._serialized_end=954
-  _globals['_MGMT']._serialized_start=1356
-  _globals['_MGMT']._serialized_end=2158
+  _globals['_STRINGVALUE']._serialized_start=414
+  _globals['_STRINGVALUE']._serialized_end=637
+  _globals['_CONFIGSTATE']._serialized_start=640
+  _globals['_CONFIGSTATE']._serialized_end=780
+  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_start=709
+  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_end=780
+  _globals['_GETCONFIGREQUEST']._serialized_start=782
+  _globals['_GETCONFIGREQUEST']._serialized_end=800
+  _globals['_UPDATECONFIGREQUEST']._serialized_start=803
+  _globals['_UPDATECONFIGREQUEST']._serialized_end=936
+  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_start=890
+  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_end=936
+  _globals['_PERSISTCONFIGREQUEST']._serialized_start=938
+  _globals['_PERSISTCONFIGREQUEST']._serialized_end=976
+  _globals['_RESETCONFIGREQUEST']._serialized_start=978
+  _globals['_RESETCONFIGREQUEST']._serialized_end=1014
+  _globals['_SETSECRETREQUEST']._serialized_start=1016
+  _globals['_SETSECRETREQUEST']._serialized_end=1063
+  _globals['_STATUSREPLY']._serialized_start=1065
+  _globals['_STATUSREPLY']._serialized_end=1107
+  _globals['_STREAMLOGSREQUEST']._serialized_start=1109
+  _globals['_STREAMLOGSREQUEST']._serialized_end=1164
+  _globals['_LOGLINE']._serialized_start=1166
+  _globals['_LOGLINE']._serialized_end=1246
+  _globals['_SOUNDBOARDSTATS']._serialized_start=1248
+  _globals['_SOUNDBOARDSTATS']._serialized_end=1362
+  _globals['_VOICEPLAYBACKSTATS']._serialized_start=1364
+  _globals['_VOICEPLAYBACKSTATS']._serialized_end=1487
+  _globals['_WAKEWORDSTATS']._serialized_start=1490
+  _globals['_WAKEWORDSTATS']._serialized_end=1620
+  _globals['_LATENCYSTATS']._serialized_start=1622
+  _globals['_LATENCYSTATS']._serialized_end=1689
+  _globals['_LLMSTATS']._serialized_start=1692
+  _globals['_LLMSTATS']._serialized_end=1917
+  _globals['_STATSREPLY']._serialized_start=1920
+  _globals['_STATSREPLY']._serialized_end=2216
+  _globals['_MGMT']._serialized_start=2847
+  _globals['_MGMT']._serialized_end=3776
 # @@protoc_insertion_point(module_scope)
