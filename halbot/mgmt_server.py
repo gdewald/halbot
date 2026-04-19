@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
 
 import grpc
 
@@ -68,8 +67,11 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             try:
                 from . import voice as voice_mod
                 whisper_loaded = voice_mod._whisper_model is not None
-            except Exception:
+            except ImportError:
                 pass
+            except Exception as e:
+                log.warning(f"Could not check whisper load status: {e}")
+                whisper_loaded = False
             try:
                 from . import tts as tts_mod
                 tts_loaded = tts_mod.engine_loaded()
@@ -115,9 +117,11 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             return mgmt_pb2.StatusReply(ok=False, message="name required")
         try:
             secrets_mod.set_secret(request.name, request.value)
+        try:
+            secrets_mod.set_secret(request.name, request.value)
         except Exception as e:
-            log.exception("SetSecret persist failed")
-            return mgmt_pb2.StatusReply(ok=False, message=f"persist failed: {e}")
+            log.error(f"SetSecret persist failed due to exception: {type(e).__name__}: {str(e)}")
+            return mgmt_pb2.StatusReply(ok=False, message=f"persist failed: {type(e).__name__} - {str(e)[:60]}...")
         if request.name == "DISCORD_TOKEN":
             asyncio.create_task(bot_module.reconnect())
         return mgmt_pb2.StatusReply(ok=True, message="secret stored")
@@ -139,7 +143,8 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             try:
                 await bot_module.reconnect()
             except Exception as e:
-                return mgmt_pb2.StatusReply(ok=False, message=f"reconnect failed: {e}")
+                log.error(f"Discord reconnect failed due to exception: {type(e).__name__}: {str(e)}")
+                return mgmt_pb2.StatusReply(ok=False, message=f"reconnect failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="discord reconnected")
 
     async def LeaveVoice(self, request, context):
@@ -151,7 +156,8 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         for sess in active:
             try:
                 await sess.vc.disconnect(force=True)
-            except Exception:
+            except Exception as e:
+                log.warning(f"Failed to disconnect from voice session for {sess}: {type(e).__name__} - {str(e)}")
                 pass
         voice_session.voice_listeners.clear()
         return mgmt_pb2.StatusReply(ok=True, message=f"left {len(active)} voice session(s)")
@@ -168,7 +174,8 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             try:
                 await asyncio.to_thread(voice_mod.load_whisper)
             except Exception as e:
-                return mgmt_pb2.StatusReply(ok=False, message=f"load failed: {e}")
+                log.error(f"Whisper load failed due to exception: {type(e).__name__}: {str(e)}")
+                return mgmt_pb2.StatusReply(ok=False, message=f"load failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="whisper loaded")
 
     async def UnloadWhisper(self, request, context):
@@ -189,7 +196,8 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                 from . import voice as voice_mod
                 voice_mod.unload_whisper()
             except Exception as e:
-                return mgmt_pb2.StatusReply(ok=False, message=f"unload failed: {e}")
+                log.error(f"Whisper unload failed due to exception: {type(e).__name__}: {str(e)}")
+                return mgmt_pb2.StatusReply(ok=False, message=f"unload failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="whisper unloaded")
 
     async def LoadTTS(self, request, context):
@@ -201,7 +209,8 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                 from . import tts as tts_mod
                 await asyncio.to_thread(tts_mod.get_engine)
             except Exception as e:
-                return mgmt_pb2.StatusReply(ok=False, message=f"load failed: {e}")
+                log.error(f"TTS load failed due to exception: {type(e).__name__}: {str(e)}")
+                return mgmt_pb2.StatusReply(ok=False, message=f"load failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="tts loaded")
 
     async def UnloadTTS(self, request, context):
@@ -213,7 +222,8 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                 from . import tts as tts_mod
                 tts_mod.unload_engine()
             except Exception as e:
-                return mgmt_pb2.StatusReply(ok=False, message=f"unload failed: {e}")
+                log.error(f"TTS unload failed due to exception: {type(e).__name__}: {str(e)}")
+                return mgmt_pb2.StatusReply(ok=False, message=f"unload failed: {type(e).__name__} - {str(e)[:60]}...")
         return mgmt_pb2.StatusReply(ok=True, message="tts unloaded")
 
 

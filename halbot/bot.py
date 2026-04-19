@@ -20,15 +20,14 @@ from .db import (
     voice_history_load,
 )
 from .llm import (
-    CHANNEL_HISTORY_LIMIT, LMSTUDIO_MODEL, LMSTUDIO_URL,
-    customize_response_async, describe_emoji_image, parse_intent,
+    CHANNEL_HISTORY_LIMIT, customize_response_async, describe_emoji_image, 
+    parse_intent,
 )
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
     VoiceSession, _channel_has_humans, _maybe_unload_whisper, _preload_tts_engine,
     _spec_to_sink, cancel_voice_idle_timer, handle_voice_command, load_whisper,
-    schedule_voice_idle_timer, snapshot_voice_state, voice_listeners,
-    _voice_reconnect,
+    schedule_voice_idle_timer, voice_listeners, _voice_reconnect
 )
 
 log = logging.getLogger("halbot")
