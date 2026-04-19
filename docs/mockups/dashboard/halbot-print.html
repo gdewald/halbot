@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>halbot — Print</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: #fff; }
+  body { font-family: 'DM Sans', sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  .page {
+    width: 1080px;
+    height: 680px;
+    position: relative;
+    overflow: hidden;
+    page-break-after: always;
+    break-after: page;
+    margin: 0 auto;
+  }
+  .page:last-child { page-break-after: avoid; break-after: avoid; }
+
+  @media print {
+    @page { size: 1080px 680px; margin: 0; }
+    html, body { width: 1080px; background: #fff; }
+    .page { margin: 0; }
+  }
+  @media screen {
+    body { background: #888; padding: 24px; display: flex; flex-direction: column; gap: 24px; align-items: center; }
+    .page { box-shadow: 0 4px 32px rgba(0,0,0,0.4); }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const T={
+  bg:'#0c0c0f', surface:'#111115', panel:'#16161b', raised:'#1c1c22',
+  border:'rgba(255,255,255,0.065)', border2:'rgba(255,255,255,0.11)',
+  text:'#e2e2ef', sub:'rgba(226,226,239,0.55)', dim:'rgba(226,226,239,0.3)',
+  blurple:'#5865F2', blurpleD:'#4752c4', blurpleL:'#7289da',
+  green:'#23d18b', red:'#f04747', yellow:'#faa61a', cyan:'#4fc3f7',
+};
+
+const LC={DEBUG:T.dim,INFO:T.cyan,WARN:T.yellow,ERROR:T.red};
+const LB={DEBUG:'rgba(255,255,255,0.04)',INFO:'rgba(79,195,247,0.1)',WARN:'rgba(250,166,26,0.1)',ERROR:'rgba(240,71,71,0.1)'};
+
+// ── STATIC LOG DATA ───────────────────────────────────────────
+const STATIC_LOGS=[
+  {id:1, ts:'09:41:03.112',level:'INFO', source:'gateway',  message:'Bot ready — server connected'},
+  {id:2, ts:'09:41:03.204',level:'DEBUG',source:'cache',    message:'Cache miss for guild'},
+  {id:3, ts:'09:41:04.018',level:'INFO', source:'voice',    message:'Voice session started'},
+  {id:4, ts:'09:41:05.440',level:'INFO', source:'tts',      message:'TTS render complete: kokoro'},
+  {id:5, ts:'09:41:06.811',level:'DEBUG',source:'llm',      message:'LLM context window: 4096 tokens'},
+  {id:6, ts:'09:41:08.002',level:'WARN', source:'api',      message:'Rate limit hit: retry in 1.2s'},
+  {id:7, ts:'09:41:09.330',level:'INFO', source:'commands', message:'Command /ping registered'},
+  {id:8, ts:'09:41:10.100',level:'INFO', source:'voice',    message:'Wake word detected — joining voice'},
+  {id:9, ts:'09:41:11.547',level:'INFO', source:'tts',      message:'Playing sound: bruh.mp3'},
+  {id:10,ts:'09:41:12.021',level:'ERROR',source:'llm',      message:'LLM connection refused: llm_url unreachable'},
+  {id:11,ts:'09:41:13.405',level:'INFO', source:'gateway',  message:'Sound backed up: airhorn.mp3'},
+  {id:12,ts:'09:41:14.882',level:'DEBUG',source:'cache',    message:'Voice buffer flushed'},
+  {id:13,ts:'09:41:15.210',level:'WARN', source:'voice',    message:'Voice idle timeout approaching'},
+  {id:14,ts:'09:41:16.004',level:'INFO', source:'events',   message:'User joined voice channel'},
+  {id:15,ts:'09:41:17.318',level:'INFO', source:'llm',      message:'LLM response: 342ms'},
+  {id:16,ts:'09:41:18.740',level:'DEBUG',source:'api',      message:'Heartbeat ACK received'},
+  {id:17,ts:'09:41:19.902',level:'INFO', source:'tts',      message:'TTS render complete: kokoro'},
+  {id:18,ts:'09:41:21.008',level:'WARN', source:'tts',      message:'TTS fallback to espeak'},
+  {id:19,ts:'09:41:22.111',level:'INFO', source:'voice',    message:'Wake word detected — joining voice'},
+  {id:20,ts:'09:41:23.456',level:'ERROR',source:'voice',    message:'Voice session dropped: timeout'},
+  {id:21,ts:'09:41:24.789',level:'INFO', source:'commands', message:'Sound backed up: airhorn.mp3'},
+  {id:22,ts:'09:41:25.012',level:'DEBUG',source:'llm',      message:'LLM context window: 4096 tokens'},
+  {id:23,ts:'09:41:26.340',level:'INFO', source:'gateway',  message:'Bot ready — server connected'},
+  {id:24,ts:'09:41:27.561',level:'WARN', source:'api',      message:'Slow LLM response: 4.8s'},
+  {id:25,ts:'09:41:28.003',level:'INFO', source:'tts',      message:'Playing sound: vine_boom.mp3'},
+];
+
+// ── SHARED COMPONENTS ─────────────────────────────────────────
+function LevelPill({level}){
+  return <span style={{fontFamily:'JetBrains Mono',fontSize:9,fontWeight:600,
+    color:LC[level],background:LB[level],border:`1px solid ${LC[level]}28`,
+    borderRadius:3,padding:'1px 5px',letterSpacing:'0.06em',whiteSpace:'nowrap'}}>{level}</span>;
+}
+
+function WinFrame({title, subtitle, panel, children}){
+  const NAV=[
+    {id:'logs',  label:'Logs'},
+    {id:'daemon',label:'Daemon'},
+    {id:'config',label:'Config'},
+    {id:'stats', label:'Stats'},
+  ];
+  return(
+    <div style={{width:'100%',height:'100%',background:T.bg,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      {/* Title bar */}
+      <div style={{height:32,flexShrink:0,background:T.surface,borderBottom:`1px solid ${T.border}`,
+        display:'flex',alignItems:'center',paddingLeft:12,paddingRight:0}}>
+        <div style={{width:16,height:16,borderRadius:4,
+          background:`linear-gradient(135deg,${T.blurple},${T.blurpleL})`,
+          display:'flex',alignItems:'center',justifyContent:'center',
+          fontSize:9,fontWeight:700,color:'#fff',marginRight:8}}>H</div>
+        <span style={{fontSize:12,fontWeight:600,color:T.text,marginRight:6}}>{title}</span>
+        <span style={{fontSize:10,color:T.dim,fontFamily:'JetBrains Mono'}}>{subtitle}</span>
+        <div style={{flex:1}}/>
+        {['─','□','✕'].map((l,i)=>(
+          <div key={i} style={{width:46,height:32,display:'flex',alignItems:'center',
+            justifyContent:'center',color:T.sub,fontSize:i===2?12:11}}>{l}</div>
+        ))}
+      </div>
+      {/* Tab bar */}
+      <div style={{height:40,flexShrink:0,background:T.surface,borderBottom:`1px solid ${T.border}`,
+        display:'flex',alignItems:'center',paddingLeft:8,gap:2}}>
+        {NAV.map(n=>{
+          const a=n.id===panel;
+          return(
+            <div key={n.id} style={{display:'flex',alignItems:'center',gap:6,
+              height:32,padding:'0 14px',borderRadius:6,position:'relative',
+              background:a?`${T.blurple}1a`:'transparent',
+              color:a?T.blurple:T.sub,fontSize:12,fontWeight:a?600:400}}>
+              {n.label}
+              {a&&<div style={{position:'absolute',bottom:0,left:'50%',transform:'translateX(-50%)',
+                width:24,height:2,borderRadius:'2px 2px 0 0',background:T.blurple}}/>}
+            </div>
+          );
+        })}
+      </div>
+      {/* Content */}
+      <div style={{flex:1,overflow:'hidden'}}>{children}</div>
+      {/* Status bar */}
+      <div style={{height:22,flexShrink:0,background:T.blurple,
+        display:'flex',alignItems:'center',padding:'0 10px',gap:12}}>
+        <div style={{display:'flex',alignItems:'center',gap:5}}>
+          <div style={{width:6,height:6,borderRadius:'50%',background:'rgba(255,255,255,0.7)'}}/>
+          <span style={{fontSize:10,color:'rgba(255,255,255,0.85)',fontFamily:'JetBrains Mono'}}>connected</span>
+        </div>
+        <span style={{fontSize:10,color:'rgba(255,255,255,0.5)'}}>|</span>
+        <span style={{fontSize:10,color:'rgba(255,255,255,0.75)',fontFamily:'JetBrains Mono'}}>halbot v0.4.2-dev</span>
+        <div style={{flex:1}}/>
+        <span style={{fontSize:10,color:'rgba(255,255,255,0.65)',fontFamily:'JetBrains Mono'}}>09:41:28</span>
+      </div>
+    </div>
+  );
+}
+
+// ── PAGE 1: LOGS ──────────────────────────────────────────────
+function LogsPage(){
+  const counts={ALL:STATIC_LOGS.length,DEBUG:5,INFO:13,WARN:4,ERROR:3};
+  return(
+    <WinFrame title="halbot" subtitle="· Live log stream" panel="logs">
+      <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+        {/* toolbar */}
+        <div style={{display:'flex',alignItems:'center',gap:6,padding:'8px 12px',
+          borderBottom:`1px solid ${T.border}`,flexShrink:0}}>
+          <div style={{display:'flex',gap:2}}>
+            {['ALL','DEBUG','INFO','WARN','ERROR'].map((f,fi)=>(
+              <div key={f} style={{height:26,padding:'0 9px',borderRadius:5,display:'flex',
+                alignItems:'center',gap:4,fontSize:10,fontWeight:600,fontFamily:'JetBrains Mono',
+                border:`1px solid ${fi===0?T.blurple:T.border}`,
+                background:fi===0?`${T.blurple}22`:'transparent',
+                color:fi===0?T.blurple:T.dim}}>
+                {f}
+                <span style={{fontSize:9,opacity:0.65,background:'rgba(255,255,255,0.08)',
+                  borderRadius:3,padding:'0 3px'}}>{counts[f]}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{flex:1}}/>
+          <div style={{display:'flex',alignItems:'center',gap:6,background:T.panel,
+            border:`1px solid ${T.border2}`,borderRadius:5,padding:'0 9px',height:26}}>
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+              <circle cx="5" cy="5" r="3.5" stroke={T.sub} strokeWidth="1.3"/>
+              <path d="M8 8l2.5 2.5" stroke={T.sub} strokeWidth="1.3" strokeLinecap="round"/>
+            </svg>
+            <span style={{fontSize:11,color:T.dim,fontFamily:'JetBrains Mono',width:80}}>grep…</span>
+          </div>
+          {['wrap','tail'].map(l=>(
+            <div key={l} style={{height:26,padding:'0 9px',borderRadius:5,border:`1px solid ${T.border}`,
+              background:'transparent',color:T.dim,fontSize:10,fontFamily:'DM Sans',
+              display:'flex',alignItems:'center',gap:5}}>
+              <span style={{fontSize:8}}>●</span>{l}
+            </div>
+          ))}
+          <div style={{height:26,padding:'0 9px',borderRadius:5,border:`1px solid ${T.border}`,
+            background:'transparent',color:T.dim,fontSize:10}}>clear</div>
+        </div>
+        {/* log rows */}
+        <div style={{flex:1,overflow:'hidden',fontFamily:'JetBrains Mono',fontSize:11.5,lineHeight:1.5}}>
+          {STATIC_LOGS.map((log,i)=>{
+            const err=log.level==='ERROR',warn=log.level==='WARN';
+            return(
+              <div key={log.id} style={{display:'flex',alignItems:'baseline',gap:8,
+                padding:'1.5px 12px',
+                background:i%2===0?'transparent':'rgba(255,255,255,0.012)',
+                borderLeft:`2px solid ${err?`${T.red}50`:warn?`${T.yellow}35`:'transparent'}`}}>
+                <span style={{color:T.dim,fontSize:9.5,flexShrink:0,minWidth:84}}>{log.ts}</span>
+                <LevelPill level={log.level}/>
+                <span style={{color:`${T.blurple}bb`,fontSize:10,flexShrink:0,minWidth:58}}>{log.source}</span>
+                <span style={{color:err?T.red:warn?T.yellow:T.text,whiteSpace:'nowrap',
+                  overflow:'hidden',textOverflow:'ellipsis',flex:1,minWidth:0}}>{log.message}</span>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{height:22,flexShrink:0,borderTop:`1px solid ${T.border}`,background:T.surface,
+          display:'flex',alignItems:'center',padding:'0 12px',gap:16}}>
+          <span style={{fontSize:10,color:T.dim,fontFamily:'JetBrains Mono'}}>25 lines</span>
+          <div style={{flex:1}}/>
+          <span style={{fontSize:10,color:T.dim,fontFamily:'JetBrains Mono'}}>3 errors · 4 warnings</span>
+        </div>
+      </div>
+    </WinFrame>
+  );
+}
+
+// ── PAGE 2: DAEMON ────────────────────────────────────────────
+function DaemonPage(){
+  const history=[
+    {time:'09:14:02',event:'Started',type:'ok'},
+    {time:'09:13:58',event:'Stopped (manual)',type:'warn'},
+    {time:'07:22:11',event:'Crashed — SIGTERM',type:'err'},
+    {time:'07:20:00',event:'Started',type:'ok'},
+    {time:'06:01:33',event:'Crashed — LLM timeout',type:'err'},
+  ];
+  return(
+    <WinFrame title="halbot" subtitle="· Service control" panel="daemon">
+      <div style={{padding:20,display:'flex',flexDirection:'column',gap:16,overflow:'hidden',height:'100%'}}>
+        {/* Status card */}
+        <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:10,padding:18,
+          display:'flex',alignItems:'center',gap:16,flexShrink:0}}>
+          <div style={{position:'relative'}}>
+            <div style={{width:52,height:52,borderRadius:12,background:`${T.green}12`,
+              border:`1px solid ${T.green}28`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <circle cx="10" cy="10" r="8" stroke={T.green} strokeWidth="1.5"/>
+                <rect x="7.5" y="7.5" width="1.8" height="5" rx=".9" fill={T.green}/>
+                <rect x="10.7" y="7.5" width="1.8" height="5" rx=".9" fill={T.green}/>
+              </svg>
+            </div>
+            <div style={{position:'absolute',top:-2,right:-2,width:11,height:11,borderRadius:'50%',
+              background:T.green,border:`2px solid ${T.bg}`}}/>
+          </div>
+          <div>
+            <div style={{fontSize:16,fontWeight:600,color:T.text,display:'flex',alignItems:'center',gap:8}}>
+              halbot daemon
+              <span style={{fontSize:10,fontWeight:500,color:T.green,background:`${T.green}14`,
+                padding:'2px 7px',borderRadius:20,border:`1px solid ${T.green}28`}}>RUNNING</span>
+            </div>
+            <div style={{fontSize:11,color:T.sub,marginTop:3,fontFamily:'JetBrains Mono'}}>
+              headless discord bot service · PID 28471
+            </div>
+          </div>
+          <div style={{flex:1}}/>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginRight:8}}>
+              <span style={{fontSize:11,color:T.sub}}>auto-restart</span>
+              <div style={{width:34,height:18,borderRadius:9,background:T.blurple,position:'relative'}}>
+                <div style={{position:'absolute',top:2,left:16,width:14,height:14,borderRadius:'50%',
+                  background:'#fff',boxShadow:'0 1px 3px rgba(0,0,0,0.4)'}}/>
+              </div>
+            </div>
+            {[{label:'Restart',icon:'↺',color:T.yellow},{label:'Stop',icon:'■',color:T.red}].map(b=>(
+              <div key={b.label} style={{display:'flex',alignItems:'center',gap:5,height:32,padding:'0 12px',
+                borderRadius:7,border:`1px solid ${b.color}35`,background:`${b.color}10`,
+                color:b.color,fontSize:12,fontWeight:600}}>
+                <span style={{fontSize:13}}>{b.icon}</span>{b.label}
+              </div>
+            ))}
+          </div>
+        </div>
+        {/* Stats */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:10,flexShrink:0}}>
+          {[
+            {label:'Uptime',value:'04:01:13',mono:true},
+            {label:'Memory',value:'142',unit:'MB'},
+            {label:'CPU',value:'0.8',unit:'%'},
+            {label:'Server',value:'connected'},
+          ].map(s=>(
+            <div key={s.label} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,padding:'12px 14px'}}>
+              <div style={{fontSize:9,color:T.dim,textTransform:'uppercase',letterSpacing:'0.09em',marginBottom:5}}>{s.label}</div>
+              <div style={{fontSize:20,fontWeight:600,color:T.text,fontFamily:s.mono?'JetBrains Mono':'DM Sans'}}>
+                {s.value}{s.unit&&<span style={{fontSize:11,color:T.sub,fontWeight:400}}> {s.unit}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Event log */}
+        <div style={{flexShrink:0}}>
+          <div style={{fontSize:10,color:T.dim,textTransform:'uppercase',letterSpacing:'0.09em',marginBottom:8}}>Event Log</div>
+          <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,overflow:'hidden'}}>
+            {history.map((h,i)=>(
+              <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 14px',
+                borderBottom:i<history.length-1?`1px solid ${T.border}`:'none'}}>
+                <div style={{width:6,height:6,borderRadius:'50%',flexShrink:0,
+                  background:h.type==='ok'?T.green:h.type==='err'?T.red:T.yellow}}/>
+                <span style={{fontFamily:'JetBrains Mono',fontSize:10,color:T.dim,minWidth:65}}>{h.time}</span>
+                <span style={{fontSize:12,color:h.type==='ok'?T.text:h.type==='err'?T.red:T.yellow}}>{h.event}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </WinFrame>
+  );
+}
+
+// ── PAGE 3: CONFIG ────────────────────────────────────────────
+const CONFIG_GROUPS=[
+  {id:'general',label:'General',fields:[
+    {key:'log_level',label:'LOG_LEVEL',type:'select',value:'INFO',desc:'Minimum log level emitted'},
+  ]},
+  {id:'llm',label:'LLM (LM Studio)',fields:[
+    {key:'llm_url',  label:'LMSTUDIO_URL',  type:'text',  value:'http://localhost:1234/v1',desc:'LM Studio API base URL'},
+    {key:'llm_model',label:'LMSTUDIO_MODEL',type:'text',  value:'mistral-7b-instruct',    desc:'Model name as shown in LM Studio'},
+  ]},
+  {id:'voice',label:'Voice',fields:[
+    {key:'voice_idle_timeout_seconds',label:'VOICE_IDLE_TIMEOUT_SECONDS',type:'number',value:'120',desc:'Seconds before bot leaves empty channel'},
+    {key:'voice_history_turns',       label:'VOICE_HISTORY_TURNS',       type:'number',value:'8',  desc:'Conversation turns kept in context'},
+    {key:'voice_llm_combine_calls',   label:'VOICE_LLM_COMBINE_CALLS',   type:'bool',  value:'true',desc:'Batch LLM calls for lower latency'},
+  ]},
+  {id:'tts',label:'TTS (Kokoro)',fields:[
+    {key:'tts_engine',label:'TTS_ENGINE',  type:'select',value:'kokoro',desc:'TTS backend'},
+    {key:'tts_voice', label:'KOKORO_VOICE',type:'text',  value:'af_heart',desc:'Kokoro voice ID'},
+    {key:'tts_lang',  label:'KOKORO_LANG', type:'text',  value:'en-us',  desc:'Language code'},
+    {key:'tts_speed', label:'KOKORO_SPEED',type:'range', value:'1.0',    desc:'Playback speed multiplier'},
+  ]},
+];
+
+function ConfigPage(){
+  return(
+    <WinFrame title="halbot" subtitle="· Runtime configuration" panel="config">
+      <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 14px',
+          borderBottom:`1px solid ${T.border}`,flexShrink:0}}>
+          <span style={{fontSize:11,color:T.dim}}>No unsaved changes</span>
+          <div style={{flex:1}}/>
+          {['Revert all','Save to disk'].map((l,i)=>(
+            <div key={l} style={{height:28,padding:'0 12px',borderRadius:6,
+              border:i===0?`1px solid ${T.border2}`:'none',
+              background:i===1?'rgba(255,255,255,0.08)':'transparent',
+              color:T.dim,fontSize:11}}>{l}</div>
+          ))}
+        </div>
+        <div style={{flex:1,overflow:'hidden',padding:14,display:'flex',flexDirection:'column',gap:12}}>
+          {CONFIG_GROUPS.map(g=>(
+            <div key={g.id} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,overflow:'hidden',flexShrink:0}}>
+              <div style={{padding:'8px 14px',borderBottom:`1px solid ${T.border}`}}>
+                <span style={{fontSize:11,fontWeight:600,color:T.text,textTransform:'uppercase',letterSpacing:'0.06em'}}>{g.label}</span>
+              </div>
+              {g.fields.map((f,fi)=>(
+                <div key={f.key} style={{display:'grid',gridTemplateColumns:'200px 1fr',alignItems:'center',
+                  borderBottom:fi<g.fields.length-1?`1px solid ${T.border}`:'none'}}>
+                  <div style={{padding:'8px 14px',borderRight:`1px solid ${T.border}`}}>
+                    <div style={{fontFamily:'JetBrains Mono',fontSize:11,color:T.cyan}}>{f.label}</div>
+                    <div style={{fontSize:10,color:T.dim,marginTop:1}}>{f.desc}</div>
+                  </div>
+                  <div style={{padding:'6px 14px'}}>
+                    {f.type==='bool'
+                      ?<div style={{display:'flex',alignItems:'center',gap:8}}>
+                          <div style={{width:34,height:18,borderRadius:9,background:T.blurple,position:'relative'}}>
+                            <div style={{position:'absolute',top:2,left:16,width:14,height:14,
+                              borderRadius:'50%',background:'#fff'}}/>
+                          </div>
+                          <span style={{fontSize:12,color:T.green}}>enabled</span>
+                        </div>
+                      :f.type==='range'
+                      ?<div style={{display:'flex',alignItems:'center',gap:10}}>
+                          <div style={{flex:1,height:4,background:'rgba(255,255,255,0.07)',borderRadius:2,position:'relative'}}>
+                            <div style={{width:'50%',height:'100%',background:T.blurple,borderRadius:2}}/>
+                          </div>
+                          <span style={{fontFamily:'JetBrains Mono',fontSize:12,color:T.text,minWidth:36}}>1.00×</span>
+                        </div>
+                      :<div style={{height:28,padding:'0 9px',borderRadius:6,
+                          border:`1px solid ${T.border2}`,background:T.panel,
+                          display:'flex',alignItems:'center',maxWidth:320}}>
+                          <span style={{fontFamily:'JetBrains Mono',fontSize:12,color:T.text,
+                            overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.value}</span>
+                        </div>
+                    }
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </WinFrame>
+  );
+}
+
+// ── PAGE 4: STATS ─────────────────────────────────────────────
+const SOUND_LIST=[
+  {name:'airhorn',   emoji:'📯',desc:'Classic airhorn blast',        plays:142,lastPlayed:'10 min ago',size:'48 KB'},
+  {name:'bruh',      emoji:'😐',desc:'',                             plays:89, lastPlayed:'2 hrs ago', size:'32 KB'},
+  {name:'vine boom', emoji:'💥',desc:'Vine era impact sound',        plays:211,lastPlayed:'just now',  size:'61 KB'},
+  {name:'rizz',      emoji:'😎',desc:'',                             plays:34, lastPlayed:'yesterday', size:'29 KB'},
+  {name:'nope',      emoji:'🚫',desc:'',                             plays:17, lastPlayed:'3 days ago',size:'18 KB'},
+  {name:'tada',      emoji:'🎉',desc:'Tada fanfare',                 plays:55, lastPlayed:'1 hr ago',  size:'72 KB'},
+];
+const WAKE_HISTORY=[
+  {time:'09:41:22',phrase:'hey hal',action:'Joined #gaming, played vine_boom.mp3',ok:true},
+  {time:'09:28:07',phrase:'hey hal',action:'Joined #general, played airhorn.mp3', ok:true},
+  {time:'08:55:44',phrase:'hey hal',action:'False positive — no voice channel',   ok:false},
+  {time:'07:12:03',phrase:'hey hal',action:'Joined #music, played bruh.mp3',      ok:true},
+];
+const maxPlays=211;
+
+function MiniBar({value,max,color}){
+  return(
+    <div style={{flex:1,height:4,background:'rgba(255,255,255,0.07)',borderRadius:2}}>
+      <div style={{width:`${Math.min(100,(value/max)*100)}%`,height:'100%',background:color||T.blurple,borderRadius:2}}/>
+    </div>
+  );
+}
+
+function StatCard({label,value,unit,sub,accent}){
+  const ac=accent||T.blurple;
+  return(
+    <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,
+      padding:'10px 14px',position:'relative',overflow:'hidden'}}>
+      <div style={{position:'absolute',top:0,left:0,right:0,height:2,
+        background:`linear-gradient(90deg,${ac},${ac}44)`}}/>
+      <div style={{fontSize:9,color:T.dim,textTransform:'uppercase',letterSpacing:'0.09em',marginBottom:4}}>{label}</div>
+      <div style={{fontSize:20,fontWeight:600,color:T.text,lineHeight:1}}>
+        {value}{unit&&<span style={{fontSize:11,color:T.sub,fontWeight:400,marginLeft:3}}>{unit}</span>}
+      </div>
+      {sub&&<div style={{fontSize:9,color:T.dim,marginTop:4}}>{sub}</div>}
+    </div>
+  );
+}
+
+function SectionHdr({label,icon}){
+  return(
+    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+      <span style={{fontSize:13}}>{icon}</span>
+      <span style={{fontSize:10,fontWeight:600,color:T.text,textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</span>
+      <div style={{flex:1,height:1,background:T.border,marginLeft:4}}/>
+    </div>
+  );
+}
+
+function StatsPage(){
+  return(
+    <WinFrame title="halbot" subtitle="· Activity & stats" panel="stats">
+      <div style={{height:'100%',overflow:'hidden',padding:'12px 16px',display:'flex',flexDirection:'column',gap:14}}>
+
+        {/* Soundboard */}
+        <div style={{flexShrink:0}}>
+          <SectionHdr label="Soundboard Backup" icon="💾"/>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:10}}>
+            <StatCard label="Sounds backed up" value="847" sub="across all categories" accent={T.blurple}/>
+            <StatCard label="Storage used" value="214" unit="MB" sub="of sounds on disk" accent={T.blurple}/>
+            <StatCard label="Last sync" value="4m" unit="ago" sub="09:38:12 today" accent={T.cyan}/>
+            <StatCard label="New since last run" value="12" sub="added since yesterday" accent={T.green}/>
+          </div>
+          <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,overflow:'hidden'}}>
+            <div style={{display:'grid',gridTemplateColumns:'24px 130px 1fr 80px 110px 56px',
+              gap:6,padding:'7px 12px',borderBottom:`1px solid ${T.border}`,
+              fontSize:9,color:T.dim,textTransform:'uppercase',letterSpacing:'0.07em'}}>
+              <span/><span>Name</span><span>Description</span><span>Plays</span><span>Last played</span><span style={{textAlign:'right'}}>Size</span>
+            </div>
+            {SOUND_LIST.map((s,i)=>(
+              <div key={s.name} style={{display:'grid',gridTemplateColumns:'24px 130px 1fr 80px 110px 56px',
+                alignItems:'center',gap:6,padding:'5px 12px',
+                borderBottom:i<SOUND_LIST.length-1?`1px solid ${T.border}`:'none',
+                background:i%2===0?'transparent':'rgba(255,255,255,0.012)'}}>
+                <span style={{fontSize:13,textAlign:'center'}}>{s.emoji}</span>
+                <span style={{fontFamily:'JetBrains Mono',fontSize:11,color:T.cyan,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.name}</span>
+                <span style={{fontSize:10,color:T.dim,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontStyle:s.desc?'normal':'italic'}}>{s.desc||'—'}</span>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <MiniBar value={s.plays} max={maxPlays} color={T.blurple}/>
+                  <span style={{fontFamily:'JetBrains Mono',fontSize:10,color:T.text,minWidth:24,textAlign:'right'}}>{s.plays}</span>
+                </div>
+                <span style={{fontSize:10,color:T.sub}}>{s.lastPlayed}</span>
+                <span style={{fontFamily:'JetBrains Mono',fontSize:9,color:T.dim,textAlign:'right'}}>{s.size}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Voice + Wake side by side */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,flexShrink:0}}>
+          {/* Voice */}
+          <div>
+            <SectionHdr label="Voice Playback" icon="🔊"/>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+              <StatCard label="Played today" value="38" sub="all sessions" accent={T.cyan}/>
+              <StatCard label="Total all-time" value="2,841" sub="since start" accent={T.cyan}/>
+              <StatCard label="Session time" value="1h 12m" sub="today cumulative" accent={T.yellow}/>
+              <StatCard label="Avg response" value="340" unit="ms" sub="TTS + join" accent={T.green}/>
+            </div>
+          </div>
+          {/* Wake word */}
+          <div>
+            <SectionHdr label="Wake Word" icon="🎙"/>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+              <StatCard label="Detections today" value="4" sub="hey hal" accent={T.green}/>
+              <StatCard label="Total all-time" value="312" sub="since tracking" accent={T.green}/>
+              <StatCard label="False positives" value="1" unit="today" sub="0.3% rate" accent={T.yellow}/>
+              <StatCard label="Avg join latency" value="620" unit="ms" sub="wake → audio" accent={T.blurple}/>
+            </div>
+            <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:7,overflow:'hidden'}}>
+              {WAKE_HISTORY.map((w,i)=>(
+                <div key={i} style={{display:'grid',gridTemplateColumns:'70px 70px 1fr',
+                  alignItems:'center',gap:6,padding:'5px 10px',
+                  borderBottom:i<WAKE_HISTORY.length-1?`1px solid ${T.border}`:'none'}}>
+                  <span style={{fontFamily:'JetBrains Mono',fontSize:9,color:T.dim}}>{w.time}</span>
+                  <span style={{fontFamily:'JetBrains Mono',fontSize:10,color:T.blurpleL}}>{w.phrase}</span>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}>
+                    <div style={{width:5,height:5,borderRadius:'50%',flexShrink:0,background:w.ok?T.green:T.yellow}}/>
+                    <span style={{fontSize:10,color:w.ok?T.text:T.yellow,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.action}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </WinFrame>
+  );
+}
+
+// ── ROOT ──────────────────────────────────────────────────────
+function PrintDoc(){
+  const pages=[
+    {id:'logs',   El:LogsPage},
+    {id:'daemon', El:DaemonPage},
+    {id:'config', El:ConfigPage},
+    {id:'stats',  El:StatsPage},
+  ];
+  return(
+    <>
+      {pages.map(({id,El})=>(
+        <div key={id} className="page">
+          <El/>
+        </div>
+      ))}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<PrintDoc/>);
+
+// Auto-print after fonts + Babel settle
+document.fonts.ready.then(()=>{
+  setTimeout(()=>window.print(), 500);
+});
+</script>
+</body>
+</html>
