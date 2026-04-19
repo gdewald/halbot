@@ -54,11 +54,12 @@ class KokoroEngine(TTSEngine):
         self._lock = threading.Lock()
         # See https://huggingface.co/hexgrad/Kokoro-82M for the voice list.
         # af_heart is a warm, neutral American-English default.
-        self.voice = os.environ.get("KOKORO_VOICE", "af_heart")
-        self.lang = os.environ.get("KOKORO_LANG", "a")  # 'a' = American English
+        from . import config as _config
+        self.voice = _config.get("tts_voice")
+        self.lang = _config.get("tts_lang")
         try:
-            self.speed = float(os.environ.get("KOKORO_SPEED", "1.0"))
-        except ValueError:
+            self.speed = float(_config.get("tts_speed"))
+        except (ValueError, TypeError):
             self.speed = 1.0
 
     def _load(self):
@@ -137,7 +138,8 @@ def get_engine() -> TTSEngine | None:
         if _engine is not None or _engine_tried:
             return _engine
         _engine_tried = True
-        name = os.environ.get("TTS_ENGINE", "kokoro").strip().lower()
+        from . import config as _config
+        name = str(_config.get("tts_engine") or "kokoro").strip().lower()
         if name in ("", "none", "off", "disabled"):
             log.info("[tts] Disabled via TTS_ENGINE=%s", name or "<empty>")
             return None
