@@ -81,6 +81,9 @@ class MgmtClient:
             "ResetConfig", mgmt_pb2.ResetConfigRequest(fields=fields or [])
         )
 
+    def get_stats(self):
+        return self._call("GetStats", mgmt_pb2.Empty())
+
     def wait_ready(self, deadline: float = 5.0) -> bool:
         end = time.time() + deadline
         while time.time() < end:

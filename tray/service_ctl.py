@@ -94,3 +94,23 @@ def status() -> str:
         6: "pause-pending",
         7: "paused",
     }.get(state, str(state))
+
+
+def query() -> dict:
+    """Return {'state': str, 'pid': int}. pid=0 if not running."""
+    try:
+        scm, svc = _open()
+    except Exception as e:
+        return {"state": f"unknown ({e})", "pid": 0}
+    try:
+        info = win32service.QueryServiceStatusEx(svc)
+        state_code = info["CurrentState"]
+        pid = int(info.get("ProcessId", 0) or 0)
+    finally:
+        _close(scm, svc)
+    name = {
+        1: "stopped", 2: "start-pending", 3: "stop-pending",
+        4: "running", 5: "continue-pending", 6: "pause-pending",
+        7: "paused",
+    }.get(state_code, str(state_code))
+    return {"state": name, "pid": pid}
