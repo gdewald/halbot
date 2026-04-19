@@ -117,8 +117,6 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             return mgmt_pb2.StatusReply(ok=False, message="name required")
         try:
             secrets_mod.set_secret(request.name, request.value)
-        try:
-            secrets_mod.set_secret(request.name, request.value)
         except Exception as e:
             log.error(f"SetSecret persist failed due to exception: {type(e).__name__}: {str(e)}")
             return mgmt_pb2.StatusReply(ok=False, message=f"persist failed: {type(e).__name__} - {str(e)[:60]}...")

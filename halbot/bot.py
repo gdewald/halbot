@@ -826,7 +826,12 @@ async def on_message(message: discord.Message):
 
             replies.append(f'Couldn\'t find a sound called "{name}".')
 
+        elif action == "reply":
+            msg = (intent.get("message") or "").strip()
+            replies.append(msg or "...")
+
         else:
+            log.warning("Unhandled action %r in text-channel response; falling back to message field", action)
             replies.append(intent.get("message", "I didn't understand that."))
 
     if replies:

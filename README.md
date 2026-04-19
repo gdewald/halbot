@@ -69,83 +69,91 @@ Last 50 channel messages passed to the LLM so follow-ups resolve correctly.
 - [ffmpeg](https://ffmpeg.org/) on PATH (audio effects)
 - Discord bot token with message content + guild + voice intents
 
-## Build
+## Build + deploy
+
+All commands assume CWD is repo root and PowerShell is **elevated**. Copy
+blocks verbatim — no placeholders to fill in. One-time tooling:
+`winget install 7zip.7zip` (10× faster archiving than
+`Compress-Archive`).
+
+### First install (one-time setup)
+
+Builds both bundles, extracts to `Program Files`, creates NSSM service,
+stores Discord token, launches tray.
 
 ```powershell
-# Full build (default): proto stubs + uv sync + pyinstaller + zip, both targets.
-# Outputs: dist\halbot-daemon.zip, dist\halbot-tray.zip (nssm.exe bundled).
 scripts\build.ps1
 
-# Single target (faster iteration):
-scripts\build.ps1 -Target daemon
-scripts\build.ps1 -Target tray
-```
-
-Flags:
-
-| Flag | Effect |
-|------|--------|
-| `-Target all\|daemon\|tray` | Default `all`. |
-| `-Clean` | Wipe `build/` + `dist/` first. Default is incremental — keeping `build/` reuses the PyInstaller analysis cache and cuts a daemon rebuild from ~150 s to ~20–30 s. |
-| `-NoZip` | Skip archive; leave `dist\halbot-{daemon,tray}\` only. |
-
-7zip autodetected (PATH or `%ProgramFiles%\7-Zip\7z.exe`) — install via
-`winget install 7zip.7zip` for ~10× faster archiving than the
-`Compress-Archive` fallback.
-
-## One-time setup (first install)
-
-Run from an **elevated** PowerShell.
-
-**1. Extract and install service:**
-
-```powershell
-$src = "<repo>\dist"
 $dst = "$env:ProgramFiles\Halbot"
 New-Item -ItemType Directory -Force -Path "$dst\daemon","$dst\tray" | Out-Null
-Expand-Archive -Force -Path "$src\halbot-daemon.zip" -DestinationPath "$dst\daemon"
-Expand-Archive -Force -Path "$src\halbot-tray.zip"   -DestinationPath "$dst\tray"
+Expand-Archive -Force -Path ".\dist\halbot-daemon.zip" -DestinationPath "$dst\daemon"
+Expand-Archive -Force -Path ".\dist\halbot-tray.zip"   -DestinationPath "$dst\tray"
 
-# Creates NSSM service, grants current user ACLs on HKLM\SOFTWARE\Halbot\{Config,Secrets}
-# and %ProgramData%\Halbot\, grants SERVICE_START|STOP|QUERY_STATUS via sc sdset,
-# auto-starts the service.
+# NSSM service + HKLM ACLs + ProgramData ACLs + service-control ACL, auto-start.
 & "$dst\daemon\halbot-daemon.exe" setup --install
+
+# Store Discord token (DPAPI, CRYPTPROTECT_LOCAL_MACHINE).
+& "$dst\daemon\halbot-daemon.exe" setup --set-secret DISCORD_TOKEN <paste-token-here>
+
+# Launch tray (no autostart this phase — relaunch after each login, or pin to Startup).
+Start-Process "$dst\tray\halbot-tray.exe"
 ```
 
-**2. Store the Discord token** (DPAPI-encrypted,
-`CRYPTPROTECT_LOCAL_MACHINE`):
+### Update existing install (operational)
+
+Rebuild + hot-swap binaries. Preserves config, secrets, logs, sqlite
+data. Day-to-day Start / Stop / Restart: use the **tray menu** (no
+elevation needed — ACL granted at install time).
 
 ```powershell
-& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --set-secret DISCORD_TOKEN <token>
-```
+# Both targets:
+scripts\build.ps1
 
-**3. Launch the tray** (non-elevated — no autostart yet, launch once per
-login or pin to Startup manually):
-
-```powershell
-& "$env:ProgramFiles\Halbot\tray\halbot-tray.exe"
-```
-
-## Operational — update existing install
-
-After a rebuild, swap binaries without touching config, secrets, or data.
-
-```powershell
-# Daemon (elevated — stops service, swaps bundle, restarts):
-Expand-Archive -Force -Path "<repo>\dist\halbot-daemon.zip" -DestinationPath "$env:TEMP\halbot-daemon-new"
+Expand-Archive -Force -Path ".\dist\halbot-daemon.zip" -DestinationPath "$env:TEMP\halbot-daemon-new"
 scripts\update-daemon.bat "$env:TEMP\halbot-daemon-new"
 
-# Tray (elevated — writes to Program Files; kills running tray, swaps, relaunches):
-Expand-Archive -Force -Path "<repo>\dist\halbot-tray.zip" -DestinationPath "$env:TEMP\halbot-tray-new"
-scripts\update-tray.bat "$env:TEMP\halbot-tray-new"
+Expand-Archive -Force -Path ".\dist\halbot-tray.zip"   -DestinationPath "$env:TEMP\halbot-tray-new"
+scripts\update-tray.bat   "$env:TEMP\halbot-tray-new"
 ```
 
-Day-to-day service Start / Stop / Restart: use the tray menu (user has
-been granted service-control ACL at install time — no elevation needed).
+Single target (faster — skip building the one you didn't change):
 
-To rotate the Discord token or change config values that aren't
-surfaced in the tray: re-run `setup --set-secret`, or edit
-`HKLM\SOFTWARE\Halbot\Config` via `regedit` and restart the service.
+```powershell
+scripts\build.ps1 -Target daemon    # or: -Target tray
+```
+
+### When to pass `-Clean`
+
+Default build is incremental — reuses PyInstaller's analysis cache in
+`build/`, cutting a daemon rebuild from ~150 s to ~20–30 s. Safe for
+pure Python edits in `halbot/` or `tray/`. Add `-Clean` when any of
+these changed:
+
+- `build_daemon.spec` / `build_tray.spec` (hiddenimports, datas,
+  `collect_submodules` / `collect_data_files` calls) — PyInstaller's
+  cache invalidation on spec changes is flaky; stale analysis can ship
+  a bundle missing newly-referenced modules.
+- `proto/mgmt.proto` (or anything regenerating gRPC stubs).
+- `pyproject.toml` / `uv.lock` dependency bumps that move import graph
+  (new packages, major version jumps, removed deps).
+- Python interpreter upgrade.
+
+If the daemon crashes on startup with `ModuleNotFoundError: No module
+named 'halbot.<something>'` after a rebuild, that's the cache-staleness
+symptom — rerun with `-Clean`.
+
+Other flags: `-NoZip` skips the archive step (leaves
+`dist\halbot-{daemon,tray}\` only — handy when iterating locally).
+
+### Rotating the Discord token or editing config
+
+```powershell
+# Rotate token:
+& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --set-secret DISCORD_TOKEN <new-token>
+
+# Config values not exposed in the tray: edit HKLM\SOFTWARE\Halbot\Config in regedit,
+# then restart via tray menu.
+```
 
 ## Uninstall (destructive — **wipes all config and data**)
 
