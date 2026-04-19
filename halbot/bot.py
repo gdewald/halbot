@@ -8,7 +8,6 @@ from pathlib import Path
 
 import discord
 import requests
-from dotenv import load_dotenv
 
 from .audio import (
     ALLOWED_CONTENT_TYPES, ALLOWED_EXTENSIONS, SUPPORTED_EFFECTS,
@@ -32,10 +31,6 @@ from .voice_session import (
     _voice_reconnect,
 )
 
-load_dotenv()
-
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 log = logging.getLogger("halbot")
 
 _discord_state: str = "DISCONNECTED"
@@ -840,15 +835,9 @@ async def on_message(message: discord.Message):
 
 
 def _resolve_token() -> str | None:
-    """Resolve DISCORD_TOKEN. DPAPI-backed secret first, .env fallback for now."""
-    try:
-        from . import secrets as secrets_mod
-        tok = secrets_mod.get_secret("DISCORD_TOKEN")
-        if tok:
-            return tok
-    except Exception:
-        log.debug("secrets backend unavailable", exc_info=True)
-    return DISCORD_TOKEN or None
+    """Resolve DISCORD_TOKEN from DPAPI-encrypted HKLM registry. No env fallback."""
+    from . import secrets as secrets_mod
+    return secrets_mod.get_secret("DISCORD_TOKEN")
 
 
 async def run() -> None:
