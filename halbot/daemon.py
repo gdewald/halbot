@@ -92,11 +92,24 @@ def _cmd_run(_args) -> int:
 def _cmd_setup(args) -> int:
     from . import installer
 
-    if args.install:
+    if getattr(args, "install", False):
         return installer.install()
-    if args.uninstall:
+    if getattr(args, "uninstall", False):
         return installer.uninstall()
-    print("setup: specify --install or --uninstall", file=sys.stderr)
+    if getattr(args, "set_secret", None):
+        from . import secrets as secrets_mod
+        name, value = args.set_secret
+        try:
+            secrets_mod.set_secret(name, value)
+        except PermissionError as e:
+            print(f"setup set-secret: permission denied ({e}). Run from elevated shell.", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"setup set-secret: failed: {e}", file=sys.stderr)
+            return 1
+        print(f"secret '{name}' stored")
+        return 0
+    print("setup: specify --install, --uninstall, or set-secret NAME VALUE", file=sys.stderr)
     return 2
 
 
@@ -106,10 +119,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("run", help="run the daemon (foreground)")
 
-    sp = sub.add_parser("setup", help="install/uninstall Windows service + registry")
+    sp = sub.add_parser("setup", help="install/uninstall Windows service + registry, or set-secret")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--install", action="store_true")
     g.add_argument("--uninstall", action="store_true")
+    g.add_argument(
+        "--set-secret",
+        nargs=2,
+        metavar=("NAME", "VALUE"),
+        help="Encrypt VALUE via DPAPI and store under HKLM\\SOFTWARE\\Halbot\\Secrets\\NAME",
+    )
 
     return p
 
