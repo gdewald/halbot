@@ -1,5 +1,7 @@
 # Project Restructure — Phase 2 Implementation Plan
 
+Status: done, merged to main.
+
 Integration Target: Discord bot code from main branch moves into skeleton daemon service.
 Scope Focus: Replicate existing Discord functionality (command parsing, message handling) within the halbot/daemon.py process
 lifecycle.

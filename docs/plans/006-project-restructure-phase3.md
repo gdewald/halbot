@@ -1,6 +1,6 @@
 # Project Restructure — Phase 3 Implementation Plan
 
-Status: MVP. Lands on branch `restructure/phase-3-migration`.
+Status: Done; merged to `main`. Landed on branch `restructure/phase-3-migration`.
 
 ## Goal
 
