@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package halbot.mgmt;
+
+service Mgmt {
+  rpc Health (HealthRequest) returns (HealthReply);
+  rpc GetConfig (GetConfigRequest) returns (ConfigState);
+  rpc UpdateConfig (UpdateConfigRequest) returns (ConfigState);
+  rpc PersistConfig (PersistConfigRequest) returns (ConfigState);
+  rpc ResetConfig (ResetConfigRequest) returns (ConfigState);
+  rpc SetSecret (SetSecretRequest) returns (StatusReply);
+  rpc RestartDiscord (Empty) returns (StatusReply);
+  rpc LeaveVoice (Empty) returns (StatusReply);
+  rpc LoadWhisper (Empty) returns (StatusReply);
+  rpc UnloadWhisper (Empty) returns (StatusReply);
+  rpc LoadTTS (Empty) returns (StatusReply);
+  rpc UnloadTTS (Empty) returns (StatusReply);
+}
+
+enum ConfigSource {
+  CONFIG_SOURCE_UNSPECIFIED = 0;
+  CONFIG_SOURCE_DEFAULT = 1;
+  CONFIG_SOURCE_REGISTRY = 2;
+  CONFIG_SOURCE_RUNTIME_OVERRIDE = 3;
+}
+
+enum DiscordState {
+  DISCORD_STATE_UNKNOWN = 0;
+  DISCORD_STATE_DISCONNECTED = 1;
+  DISCORD_STATE_CONNECTING = 2;
+  DISCORD_STATE_CONNECTED = 3;
+  DISCORD_STATE_RECONNECTING = 4;
+  DISCORD_STATE_RATE_LIMITED = 5;
+  DISCORD_STATE_TOKEN_INVALID = 6;
+  DISCORD_STATE_NO_TOKEN = 7;
+}
+
+message Empty {}
+
+message HealthRequest {}
+
+message VoiceInChannel {
+  uint64 guild_id = 1;
+  uint64 channel_id = 2;
+}
+
+message VoiceState {
+  oneof kind {
+    bool idle = 1;
+    VoiceInChannel in_channel = 2;
+  }
+}
+
+message HealthReply {
+  double uptime_seconds = 1;
+  string daemon_version = 2;
+  DiscordState discord = 3;
+  bool llm_reachable = 4;
+  VoiceState voice = 5;
+  bool whisper_loaded = 6;
+  bool tts_loaded = 7;
+}
+
+message StringValue {
+  string value = 1;
+  ConfigSource source = 2;
+}
+
+message ConfigState {
+  map<string, StringValue> fields = 1;
+}
+
+message GetConfigRequest {}
+
+message UpdateConfigRequest {
+  // Field name -> new string value. Sets runtime override.
+  map<string, string> updates = 1;
+}
+
+message PersistConfigRequest {
+  // Field names to persist to registry. Empty = persist all currently-overridden.
+  repeated string fields = 1;
+}
+
+message ResetConfigRequest {
+  // Field names whose runtime override is dropped. Empty = reset all.
+  repeated string fields = 1;
+}
+
+message SetSecretRequest {
+  string name = 1;   // e.g. "DISCORD_TOKEN"
+  string value = 2;  // plaintext; daemon encrypts via DPAPI
+}
+
+message StatusReply {
+  bool ok = 1;
+  string message = 2;
+}

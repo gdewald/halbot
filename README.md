@@ -2,6 +2,26 @@
 
 A Discord bot that manages your server's soundboard using natural language. Mention the bot and tell it what to do — it uses a local LLM (via LM Studio) to interpret your requests and take action.
 
+> DISCLAIMER: THIS IS A TOY PROJECT DON'T TRY TO USE IT OUTSIDE YOUR PERSONAL PRIVATE DISCORD SERVER WITH TRUSTED USERS
+> YOU CAN AND WILL BE PWND IF YOU TRY TO RUN THIS AGAINST A PUBLIC DISCORD SERVER OR A DISCORD SERVER WITH RANDOM PEOPLE
+> I TAKE 0% LIABILITY FOR YOU IGNORING THIS MESSAGE FOR ANYTHING WHATSOEVER.
+
+## Architecture (v0.6+)
+
+Halbot runs as two PyInstaller onedir bundles on Windows:
+
+- **Daemon** (`halbot-daemon.exe`) — NSSM-managed Windows service running under
+  `LocalSystem`. Hosts the Discord client, LM Studio bridge, Whisper STT, and
+  Kokoro TTS. Exposes an async gRPC management API on `127.0.0.1:50199`.
+- **Tray** (`halbot-tray.exe`) — user-mode pystray app. Start/Stop/Restart the
+  service, view logs, toggle log level, trigger reconnect, unload VRAM-heavy
+  models, read health. Pure gRPC client — no bot logic.
+
+Configuration lives in `HKLM\SOFTWARE\Halbot\Config` (plain REG_SZ) and secrets
+(e.g. `DISCORD_TOKEN`) in `HKLM\SOFTWARE\Halbot\Secrets` (DPAPI-encrypted with
+`CRYPTPROTECT_LOCAL_MACHINE`). No `.env`. Data (sqlite, logs) in
+`%ProgramData%\Halbot\`.
+
 ## Features
 
 ### Soundboard Management
@@ -10,7 +30,7 @@ A Discord bot that manages your server's soundboard using natural language. Ment
 - **Edit sounds** — rename sounds or change their emoji (supports both unicode and custom server emojis)
 
 ### Sound Library
-A local SQLite-backed library for saving and organizing sounds beyond what's on the live soundboard.
+Local SQLite-backed library for saving and organizing sounds beyond what's on the live soundboard.
 
 - **Save from soundboard** — back up sounds from the live soundboard to the library
 - **Upload files** — save audio attachments (from the current message or recent chat history) directly to the library
@@ -20,62 +40,99 @@ A local SQLite-backed library for saving and organizing sounds beyond what's on 
 ### Audio Effects
 Apply effects to saved sounds and store the results as new clips. Powered by pydub/ffmpeg.
 
-- **Echo** — configurable delay, decay, and repeat count (presets: light, medium, heavy)
-- **Reverb** — simulated room reverb with adjustable room size (presets: small, medium, large)
-- **Pitch shift** — adjust pitch up or down by semitones (presets: chipmunk, deep, subtle shifts)
-- **Composable** — effects chain together. Applying echo to a pitch-shifted clip creates an "echo+pitch" variant
-- **Non-destructive** — modified clips are tracked as children of the original. The full effect chain is always re-applied from the original audio to avoid quality degradation
-- **Conversational flow** — if you don't specify parameters, the bot asks you to pick a preset or give custom values
+- **Echo**, **Reverb**, **Pitch shift** with presets or custom params
+- **Composable & non-destructive** — effect chains re-apply from the original audio
+- **Conversational** — bot asks for preset if params omitted
+
+### Voice Channel Interaction
+- **Join / leave** voice channels on command
+- **Wake-word-triggered playback** via faster-whisper STT
+- **TTS replies** via Kokoro-82M (local, ~300 MB VRAM)
+- **Idle auto-disconnect** after configurable timeout
 
 ### Custom Emoji Awareness
-- Syncs all server custom emojis to a local database on startup
-- Uses LM Studio's vision model to auto-generate descriptions of each emoji
-- Can list emojis with descriptions, and use them when editing sounds
-- Re-syncs automatically when emojis are added or changed on the server
+- Syncs server custom emojis to sqlite on startup
+- Uses LM Studio vision model to auto-describe each emoji
+- Re-syncs when emojis change
 
 ### Persona System
-Users can change how the bot talks by setting behavior directives via natural language.
-
-- **Add** — "from now on respond like a grumpy old man"
-- **Update** — "tone down the grumpy thing a bit" (modifies the existing directive)
-- **Remove** — "stop being grumpy" (drops a specific directive)
-- **List** — view all active behavior directives
-- Directives are stored in the database and injected into the LLM system prompt
-- The LLM flavors all responses (including canned data listings) to match the active persona
-- Guard rails: max 200 characters per directive, max 10 active directives
+Users change the bot's voice via natural language directives stored in the DB and injected into the LLM system prompt. Max 200 chars × 10 directives.
 
 ### Conversation Context
-The bot reads the last 50 messages in the channel and passes them to the LLM, so it understands follow-up requests and can reference recent audio attachments from chat history.
+Last 50 channel messages passed to the LLM so follow-ups resolve correctly.
 
 ## Requirements
 
-- Python 3.12+
-- [LM Studio](https://lmstudio.ai/) running locally (or any OpenAI-compatible API)
-- [ffmpeg](https://ffmpeg.org/) installed and on PATH (for audio effects)
-- A Discord bot token with message content and guild intents
+- Windows 10/11 (DPAPI, NSSM, pywin32 hard dependencies)
+- Python 3.12+ (build-time only; end users run PyInstaller exes)
+- [LM Studio](https://lmstudio.ai/) running locally, or any OpenAI-compatible endpoint
+- [ffmpeg](https://ffmpeg.org/) on PATH (audio effects)
+- Discord bot token with message content + guild + voice intents
 
-## Setup
+## Build
 
-1. Clone the repo
-2. Install [uv](https://docs.astral.sh/uv/) and sync dependencies:
-   ```
-   uv sync --all-extras
-   ```
-3. Copy `.env.example` to `.env` and fill in your values:
-   ```
-   DISCORD_TOKEN=your_discord_bot_token_here
-   LMSTUDIO_URL=http://localhost:1234/v1/chat/completions
-   LOG_LEVEL=INFO
-   ```
-4. Start LM Studio and load a model
-5. Run the bot:
-   ```
-   uv run bot.py
-   ```
+```powershell
+# Full build: proto stubs + uv sync + pyinstaller (daemon + tray) + zip.
+# Outputs dist\halbot-daemon.zip and dist\halbot-tray.zip (nssm.exe bundled).
+scripts\build.ps1
+```
+
+## Install
+
+Run from an **elevated** PowerShell:
+
+```powershell
+$src = "<repo>\dist"
+$dst = "$env:ProgramFiles\Halbot"
+New-Item -ItemType Directory -Force -Path "$dst\daemon","$dst\tray" | Out-Null
+Expand-Archive -Force -Path "$src\halbot-daemon.zip" -DestinationPath "$dst\daemon"
+Expand-Archive -Force -Path "$src\halbot-tray.zip"   -DestinationPath "$dst\tray"
+& "$dst\daemon\halbot-daemon.exe" setup --install
+```
+
+`setup --install` creates the NSSM service, grants the installing user
+`KEY_WRITE` on the HKLM config key, `SERVICE_START|STOP|QUERY_STATUS` via
+`sc sdset`, and modify on `%ProgramData%\Halbot\`. Auto-starts the service.
+
+Store the Discord token (elevated):
+
+```powershell
+& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --set-secret DISCORD_TOKEN <token>
+```
+
+Launch the tray (non-elevated):
+
+```powershell
+& "$env:ProgramFiles\Halbot\tray\halbot-tray.exe"
+```
+
+Uninstall (elevated):
+
+```powershell
+& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
+```
+
+## Migrating from v0.5.0
+
+If you were running the flat `bot.py` layout (`.env` + `sounds.db` in repo
+root), run the one-shot migrator from an elevated shell after installing v0.6:
+
+```powershell
+python scripts\migrate_v050.py --repo .
+```
+
+Effects:
+- `.env DISCORD_TOKEN` → DPAPI (`HKLM\SOFTWARE\Halbot\Secrets`)
+- `.env LMSTUDIO_* / VOICE_* / TTS_* / KOKORO_*` → `HKLM\SOFTWARE\Halbot\Config`
+- `./sounds.db` → `%ProgramData%\Halbot\sounds.db`
+
+Flags: `--dry-run`, `--force`, `--env PATH`, `--db PATH`,
+`--skip-{secrets,config,db}`. Idempotent. See
+[docs/plans/006-project-restructure-phase3.md](docs/plans/006-project-restructure-phase3.md).
 
 ## Usage
 
-Mention the bot in any server channel:
+Mention the bot in any channel:
 
 ```
 @Halbot what sounds are on the soundboard
@@ -83,10 +140,10 @@ Mention the bot in any server channel:
 @Halbot save all sounds to the library
 @Halbot add reverb to big-yoshi
 @Halbot from now on talk like a pirate
-@Halbot what custom emojis do we have
+@Halbot join voice
 ```
 
-You can also attach audio files (MP3, OGG, WAV) to your message to save them to the library.
+Attach audio (MP3, OGG, WAV) to save directly to the library.
 
 ### Soundboard Limits
 
@@ -94,60 +151,47 @@ You can also attach audio files (MP3, OGG, WAV) to your message to save them to 
 - Max duration: 5.2 seconds
 - Formats: MP3, OGG, WAV
 
-## Windows Tray App
+## Source run (dev, no build)
 
-Run Halbot as a background tray app (no console window):
-
-```
-.\start.bat
-```
-
-Right-click the tray icon for Start/Stop/Restart, log viewer, and quit.
-
-**Troubleshooting:** If the tray app reports "already running" but isn't visible, a previous `pythonw.exe` process is still lingering. Kill it and retry:
-
-```
-taskkill /f /im pythonw.exe
+```powershell
+uv sync --only-group daemon
+uv run python -m halbot.daemon run
 ```
 
-## CLI Flags
+Data lands in `.\_dev_data\`. Source-run cannot `PersistConfig` or write
+secrets unless `setup --install` has already granted HKLM ACLs to the current
+user, or the shell is elevated.
+
+## Repo layout
 
 ```
-python bot.py --list-personas    # Show all active persona directives
-python bot.py --clear-personas   # Remove all persona directives and exit
+halbot/                 daemon package (Discord + voice + LLM + TTS + gRPC server)
+  _gen/                 generated gRPC stubs
+  daemon.py             CLI: run / setup --install|--uninstall|--set-secret
+  mgmt_server.py        async gRPC server (Health, UpdateConfig, SetSecret, …)
+  bot.py                Discord client + state machine
+  voice_session.py      voice lifecycle + TTS orchestration
+  voice.py              voice-receive + faster-whisper STT
+  tts.py                Kokoro engine (+ pluggable registry)
+  llm.py                LM Studio calls, intent parsing
+  db.py                 sqlite: sounds, personas, voice history, emojis
+  audio.py              validation, format detection, pydub effects
+  config.py             layered config (DEFAULTS → HKLM → runtime override)
+  secrets.py            DPAPI wrapper (HKLM\SOFTWARE\Halbot\Secrets)
+  installer.py          NSSM + registry ACLs + icacls
+  paths.py              data_dir(): %ProgramData%\Halbot / ./_dev_data
+  logging_setup.py      rotating file handler
+  prompts/              system prompt text
+tray/                   pystray + tkinter log viewer + grpc client
+proto/mgmt.proto
+scripts/
+  build.ps1
+  gen_proto.ps1
+  migrate_v050.py       v0.5.0 .env + sounds.db migration
+docs/plans/             design (002) + phase plans (003, 005, 006)
 ```
 
 ## Infrastructure
 
-The `infra/` folder contains Terraform + cloud-init configuration for deploying LM Studio on a GCP VM:
-
-- `main.tf` — GCP Compute Engine instance, VPC, and firewall rules
-- `cloud-init-script.sh` — automated LM Studio installation and systemd service setup
-
-All secrets (LM Studio auth keys, VM user) are externalized as Terraform variables marked `sensitive`.
-
-## Architecture
-
-```
-Discord message
-    |
-    v
-on_message handler
-    |-- parse attachments & validate audio
-    |-- fetch soundboard state
-    |-- fetch channel history (last 50 messages)
-    |-- fetch saved library & emoji DB
-    |
-    v
-parse_intent() --> LM Studio (local LLM)
-    |                returns JSON action(s)
-    v
-action handlers
-    |-- list / remove / edit / clear      (live soundboard)
-    |-- upload / save / restore / ...     (local library)
-    |-- effect_ask / effect_apply         (audio effects)
-    |-- persona_set / update / remove     (behavior directives)
-    |-- emoji_list                        (custom emojis)
-    v
-Discord reply (auto-split at 2000 chars)
-```
+`infra/` contains Terraform + cloud-init for a GCP VM running LM Studio — not
+required if LM Studio runs on the same box as the daemon.
