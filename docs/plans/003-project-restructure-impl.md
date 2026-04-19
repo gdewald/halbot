@@ -23,4 +23,9 @@ Branch holds only new skeleton. No coexistence.
 
 ## Phase 2
 
-> TODO: write this
+Goal: Integrate Discord bot functionality into new skeleton. Bridge old code to daemon model.
+
+Focus: Core bot loop logic, command handling, voice/LLM interaction via Daemon internal mechanisms.
+
+Constraint: gRPC API exposed only for tray management utility (Service Start/Stop/Restart, log viewing). All primary bot/LLM logic
+remains within daemon process memory, not exposed via API.
