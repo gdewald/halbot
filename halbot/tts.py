@@ -154,6 +154,11 @@ def get_engine() -> TTSEngine | None:
         return _engine
 
 
+def engine_loaded() -> bool:
+    """True if a TTS engine singleton has been instantiated."""
+    return _engine is not None
+
+
 def unload_engine() -> None:
     """Release whatever the current engine is holding.  Safe no-op if none."""
     with _engine_lock:

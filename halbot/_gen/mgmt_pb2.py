@@ -24,31 +24,51 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nmgmt.proto\x12\x0bhalbot.mgmt\"\x0f\n\rHealthRequest\"=\n\x0bHealthReply\x12\x16\n\x0euptime_seconds\x18\x01 \x01(\x01\x12\x16\n\x0e\x64\x61\x65mon_version\x18\x02 \x01(\t\"G\n\x0bStringValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x06source\x18\x02 \x01(\x0e\x32\x19.halbot.mgmt.ConfigSource\":\n\x0b\x43onfigState\x12+\n\tlog_level\x18\x01 \x01(\x0b\x32\x18.halbot.mgmt.StringValue\"\x12\n\x10GetConfigRequest\"?\n\x13UpdateConfigRequest\x12(\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\x18.halbot.mgmt.ConfigState\"&\n\x14PersistConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"$\n\x12ResetConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t*\x88\x01\n\x0c\x43onfigSource\x12\x1d\n\x19\x43ONFIG_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n\x15\x43ONFIG_SOURCE_DEFAULT\x10\x01\x12\x1a\n\x16\x43ONFIG_SOURCE_REGISTRY\x10\x02\x12\"\n\x1e\x43ONFIG_SOURCE_RUNTIME_OVERRIDE\x10\x03\x32\xf0\x02\n\x04Mgmt\x12>\n\x06Health\x12\x1a.halbot.mgmt.HealthRequest\x1a\x18.halbot.mgmt.HealthReply\x12\x44\n\tGetConfig\x12\x1d.halbot.mgmt.GetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12J\n\x0cUpdateConfig\x12 .halbot.mgmt.UpdateConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12L\n\rPersistConfig\x12!.halbot.mgmt.PersistConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12H\n\x0bResetConfig\x12\x1f.halbot.mgmt.ResetConfigRequest\x1a\x18.halbot.mgmt.ConfigStateb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nmgmt.proto\x12\x0bhalbot.mgmt\"\x07\n\x05\x45mpty\"\x0f\n\rHealthRequest\"6\n\x0eVoiceInChannel\x12\x10\n\x08guild_id\x18\x01 \x01(\x04\x12\x12\n\nchannel_id\x18\x02 \x01(\x04\"W\n\nVoiceState\x12\x0e\n\x04idle\x18\x01 \x01(\x08H\x00\x12\x31\n\nin_channel\x18\x02 \x01(\x0b\x32\x1b.halbot.mgmt.VoiceInChannelH\x00\x42\x06\n\x04kind\"\xd4\x01\n\x0bHealthReply\x12\x16\n\x0euptime_seconds\x18\x01 \x01(\x01\x12\x16\n\x0e\x64\x61\x65mon_version\x18\x02 \x01(\t\x12*\n\x07\x64iscord\x18\x03 \x01(\x0e\x32\x19.halbot.mgmt.DiscordState\x12\x15\n\rllm_reachable\x18\x04 \x01(\x08\x12&\n\x05voice\x18\x05 \x01(\x0b\x32\x17.halbot.mgmt.VoiceState\x12\x16\n\x0ewhisper_loaded\x18\x06 \x01(\x08\x12\x12\n\ntts_loaded\x18\x07 \x01(\x08\"G\n\x0bStringValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x06source\x18\x02 \x01(\x0e\x32\x19.halbot.mgmt.ConfigSource\"\x8c\x01\n\x0b\x43onfigState\x12\x34\n\x06\x66ields\x18\x01 \x03(\x0b\x32$.halbot.mgmt.ConfigState.FieldsEntry\x1aG\n\x0b\x46ieldsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\'\n\x05value\x18\x02 \x01(\x0b\x32\x18.halbot.mgmt.StringValue:\x02\x38\x01\"\x12\n\x10GetConfigRequest\"\x85\x01\n\x13UpdateConfigRequest\x12>\n\x07updates\x18\x01 \x03(\x0b\x32-.halbot.mgmt.UpdateConfigRequest.UpdatesEntry\x1a.\n\x0cUpdatesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"&\n\x14PersistConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"$\n\x12ResetConfigRequest\x12\x0e\n\x06\x66ields\x18\x01 \x03(\t\"/\n\x10SetSecretRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"*\n\x0bStatusReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t*\x88\x01\n\x0c\x43onfigSource\x12\x1d\n\x19\x43ONFIG_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n\x15\x43ONFIG_SOURCE_DEFAULT\x10\x01\x12\x1a\n\x16\x43ONFIG_SOURCE_REGISTRY\x10\x02\x12\"\n\x1e\x43ONFIG_SOURCE_RUNTIME_OVERRIDE\x10\x03*\x81\x02\n\x0c\x44iscordState\x12\x19\n\x15\x44ISCORD_STATE_UNKNOWN\x10\x00\x12\x1e\n\x1a\x44ISCORD_STATE_DISCONNECTED\x10\x01\x12\x1c\n\x18\x44ISCORD_STATE_CONNECTING\x10\x02\x12\x1b\n\x17\x44ISCORD_STATE_CONNECTED\x10\x03\x12\x1e\n\x1a\x44ISCORD_STATE_RECONNECTING\x10\x04\x12\x1e\n\x1a\x44ISCORD_STATE_RATE_LIMITED\x10\x05\x12\x1f\n\x1b\x44ISCORD_STATE_TOKEN_INVALID\x10\x06\x12\x1a\n\x16\x44ISCORD_STATE_NO_TOKEN\x10\x07\x32\xa2\x06\n\x04Mgmt\x12>\n\x06Health\x12\x1a.halbot.mgmt.HealthRequest\x1a\x18.halbot.mgmt.HealthReply\x12\x44\n\tGetConfig\x12\x1d.halbot.mgmt.GetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12J\n\x0cUpdateConfig\x12 .halbot.mgmt.UpdateConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12L\n\rPersistConfig\x12!.halbot.mgmt.PersistConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12H\n\x0bResetConfig\x12\x1f.halbot.mgmt.ResetConfigRequest\x1a\x18.halbot.mgmt.ConfigState\x12\x44\n\tSetSecret\x12\x1d.halbot.mgmt.SetSecretRequest\x1a\x18.halbot.mgmt.StatusReply\x12>\n\x0eRestartDiscord\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12:\n\nLeaveVoice\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12;\n\x0bLoadWhisper\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12=\n\rUnloadWhisper\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x37\n\x07LoadTTS\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReply\x12\x39\n\tUnloadTTS\x12\x12.halbot.mgmt.Empty\x1a\x18.halbot.mgmt.StatusReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'mgmt_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_CONFIGSOURCE']._serialized_start=404
-  _globals['_CONFIGSOURCE']._serialized_end=540
-  _globals['_HEALTHREQUEST']._serialized_start=27
-  _globals['_HEALTHREQUEST']._serialized_end=42
-  _globals['_HEALTHREPLY']._serialized_start=44
-  _globals['_HEALTHREPLY']._serialized_end=105
-  _globals['_STRINGVALUE']._serialized_start=107
-  _globals['_STRINGVALUE']._serialized_end=178
-  _globals['_CONFIGSTATE']._serialized_start=180
-  _globals['_CONFIGSTATE']._serialized_end=238
-  _globals['_GETCONFIGREQUEST']._serialized_start=240
-  _globals['_GETCONFIGREQUEST']._serialized_end=258
-  _globals['_UPDATECONFIGREQUEST']._serialized_start=260
-  _globals['_UPDATECONFIGREQUEST']._serialized_end=323
-  _globals['_PERSISTCONFIGREQUEST']._serialized_start=325
-  _globals['_PERSISTCONFIGREQUEST']._serialized_end=363
-  _globals['_RESETCONFIGREQUEST']._serialized_start=365
-  _globals['_RESETCONFIGREQUEST']._serialized_end=401
-  _globals['_MGMT']._serialized_start=543
-  _globals['_MGMT']._serialized_end=911
+  _globals['_CONFIGSTATE_FIELDSENTRY']._loaded_options = None
+  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_options = b'8\001'
+  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._loaded_options = None
+  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_options = b'8\001'
+  _globals['_CONFIGSOURCE']._serialized_start=957
+  _globals['_CONFIGSOURCE']._serialized_end=1093
+  _globals['_DISCORDSTATE']._serialized_start=1096
+  _globals['_DISCORDSTATE']._serialized_end=1353
+  _globals['_EMPTY']._serialized_start=27
+  _globals['_EMPTY']._serialized_end=34
+  _globals['_HEALTHREQUEST']._serialized_start=36
+  _globals['_HEALTHREQUEST']._serialized_end=51
+  _globals['_VOICEINCHANNEL']._serialized_start=53
+  _globals['_VOICEINCHANNEL']._serialized_end=107
+  _globals['_VOICESTATE']._serialized_start=109
+  _globals['_VOICESTATE']._serialized_end=196
+  _globals['_HEALTHREPLY']._serialized_start=199
+  _globals['_HEALTHREPLY']._serialized_end=411
+  _globals['_STRINGVALUE']._serialized_start=413
+  _globals['_STRINGVALUE']._serialized_end=484
+  _globals['_CONFIGSTATE']._serialized_start=487
+  _globals['_CONFIGSTATE']._serialized_end=627
+  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_start=556
+  _globals['_CONFIGSTATE_FIELDSENTRY']._serialized_end=627
+  _globals['_GETCONFIGREQUEST']._serialized_start=629
+  _globals['_GETCONFIGREQUEST']._serialized_end=647
+  _globals['_UPDATECONFIGREQUEST']._serialized_start=650
+  _globals['_UPDATECONFIGREQUEST']._serialized_end=783
+  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_start=737
+  _globals['_UPDATECONFIGREQUEST_UPDATESENTRY']._serialized_end=783
+  _globals['_PERSISTCONFIGREQUEST']._serialized_start=785
+  _globals['_PERSISTCONFIGREQUEST']._serialized_end=823
+  _globals['_RESETCONFIGREQUEST']._serialized_start=825
+  _globals['_RESETCONFIGREQUEST']._serialized_end=861
+  _globals['_SETSECRETREQUEST']._serialized_start=863
+  _globals['_SETSECRETREQUEST']._serialized_end=910
+  _globals['_STATUSREPLY']._serialized_start=912
+  _globals['_STATUSREPLY']._serialized_end=954
+  _globals['_MGMT']._serialized_start=1356
+  _globals['_MGMT']._serialized_end=2158
 # @@protoc_insertion_point(module_scope)

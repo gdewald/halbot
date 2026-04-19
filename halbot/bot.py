@@ -38,6 +38,41 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 log = logging.getLogger("halbot")
 
+_discord_state: str = "DISCONNECTED"
+
+
+def _set_discord_state(state: str) -> None:
+    global _discord_state
+    _discord_state = state
+    log.debug("discord state -> %s", state)
+
+
+def discord_state_proto() -> int:
+    """Return current Discord connection state as the proto enum int."""
+    from ._gen import mgmt_pb2
+    return {
+        "UNKNOWN": mgmt_pb2.DISCORD_STATE_UNKNOWN,
+        "DISCONNECTED": mgmt_pb2.DISCORD_STATE_DISCONNECTED,
+        "CONNECTING": mgmt_pb2.DISCORD_STATE_CONNECTING,
+        "CONNECTED": mgmt_pb2.DISCORD_STATE_CONNECTED,
+        "RECONNECTING": mgmt_pb2.DISCORD_STATE_RECONNECTING,
+        "RATE_LIMITED": mgmt_pb2.DISCORD_STATE_RATE_LIMITED,
+        "TOKEN_INVALID": mgmt_pb2.DISCORD_STATE_TOKEN_INVALID,
+        "NO_TOKEN": mgmt_pb2.DISCORD_STATE_NO_TOKEN,
+    }.get(_discord_state, mgmt_pb2.DISCORD_STATE_UNKNOWN)
+
+
+async def reconnect() -> None:
+    """Stop current Discord client and start a fresh one with current token."""
+    global client
+    old = client
+    if old is not None and not old.is_closed():
+        try:
+            await old.close()
+        except Exception:
+            log.exception("reconnect: close failed")
+    await run()
+
 
 def configure_logging(log_path=None) -> None:
     """Install stdout + optional rotating file handler on the root logger. Idempotent."""
@@ -148,6 +183,7 @@ def build_client() -> discord.Client:
 
 
 async def on_ready():
+    _set_discord_state("CONNECTED")
     log.info("Logged in as %s (id: %s)", client.user, client.user.id)
     for guild in client.guilds:
         await sync_emojis(guild)
@@ -803,15 +839,39 @@ async def on_message(message: discord.Message):
         await _deliver(message, "\n\n".join(replies))
 
 
+def _resolve_token() -> str | None:
+    """Resolve DISCORD_TOKEN. DPAPI-backed secret first, .env fallback for now."""
+    try:
+        from . import secrets as secrets_mod
+        tok = secrets_mod.get_secret("DISCORD_TOKEN")
+        if tok:
+            return tok
+    except Exception:
+        log.debug("secrets backend unavailable", exc_info=True)
+    return DISCORD_TOKEN or None
+
+
 async def run() -> None:
     """Entrypoint called from halbot.daemon. Initializes DB, builds client, runs until stopped."""
-    if not DISCORD_TOKEN:
-        log.error("DISCORD_TOKEN not set; skipping Discord client. Set it in env or .env next to daemon.")
+    import discord as _discord
+
+    token = _resolve_token()
+    if not token:
+        _set_discord_state("NO_TOKEN")
+        log.error("DISCORD_TOKEN not set; Discord subsystem idle. Run `halbot-daemon setup set-secret DISCORD_TOKEN <value>`.")
         return
     db_init()
     c = build_client()
+    _set_discord_state("CONNECTING")
     try:
-        await c.start(DISCORD_TOKEN)
+        await c.start(token)
+    except _discord.LoginFailure:
+        _set_discord_state("TOKEN_INVALID")
+        log.error("Discord login failed: invalid token")
+    except Exception:
+        _set_discord_state("DISCONNECTED")
+        log.exception("Discord client crashed")
     finally:
         if not c.is_closed():
             await c.close()
+        _set_discord_state("DISCONNECTED")

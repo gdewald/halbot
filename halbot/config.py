@@ -14,6 +14,20 @@ REG_PATH = r"SOFTWARE\Halbot\Config"
 
 DEFAULTS: Dict[str, Any] = {
     "log_level": "INFO",
+    "llm_backend": "lmstudio",
+    "llm_url": "http://localhost:1234/v1/chat/completions",
+    "llm_model": "",
+    "llm_max_tokens_text": "512",
+    "llm_max_tokens_voice": "256",
+    "voice_wake_word": "halbot",
+    "voice_idle_timeout_seconds": "1800",
+    "voice_energy_threshold": "0.02",
+    "voice_history_turns": "10",
+    "voice_llm_combine_calls": "true",
+    "tts_engine": "kokoro",
+    "tts_voice": "af_heart",
+    "tts_lang": "a",
+    "tts_speed": "1.0",
 }
 
 

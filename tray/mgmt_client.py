@@ -56,10 +56,20 @@ class MgmtClient:
         return self._call("GetConfig", mgmt_pb2.GetConfigRequest())
 
     def update_log_level(self, level: str):
-        req = mgmt_pb2.UpdateConfigRequest(
-            config=mgmt_pb2.ConfigState(log_level=mgmt_pb2.StringValue(value=level))
-        )
+        return self.update_config({"log_level": level})
+
+    def update_config(self, updates: dict):
+        req = mgmt_pb2.UpdateConfigRequest(updates=updates)
         return self._call("UpdateConfig", req)
+
+    def set_secret(self, name: str, value: str):
+        return self._call("SetSecret", mgmt_pb2.SetSecretRequest(name=name, value=value))
+
+    def restart_discord(self):
+        return self._call("RestartDiscord", mgmt_pb2.Empty())
+
+    def leave_voice(self):
+        return self._call("LeaveVoice", mgmt_pb2.Empty())
 
     def persist(self, fields=None):
         return self._call(

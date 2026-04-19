@@ -22,6 +22,27 @@ LLM_RETRY_TIMEOUT = 180
 
 CHANNEL_HISTORY_LIMIT = 50
 
+import time as _time
+_REACH_CACHE: dict = {"ok": False, "ts": 0.0}
+_REACH_TTL = 5.0
+
+
+def is_reachable_cached() -> bool:
+    """Cheap HEAD to LLM backend, cached 5s. False on any error."""
+    now = _time.time()
+    if now - _REACH_CACHE["ts"] < _REACH_TTL:
+        return _REACH_CACHE["ok"]
+    ok = False
+    try:
+        base = LMSTUDIO_URL.split("/v1/")[0]
+        r = requests.get(base + "/v1/models", timeout=0.5)
+        ok = r.status_code == 200
+    except Exception:
+        ok = False
+    _REACH_CACHE["ok"] = ok
+    _REACH_CACHE["ts"] = now
+    return ok
+
 SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "system_prompt.txt").read_text(encoding="utf-8")
 
 VOICE_COMMAND_PROMPT = """\
