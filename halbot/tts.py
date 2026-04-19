@@ -15,7 +15,6 @@ from __future__ import annotations
 import abc
 import io
 import logging
-import os
 import threading
 
 log = logging.getLogger("halbot")

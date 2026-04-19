@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 
-from .db import _env_bool, db_get, db_list, voice_history_append, voice_history_load, VOICE_HISTORY_TURNS
+from .db import _env_bool, db_get, db_list, voice_history_append, VOICE_HISTORY_TURNS
 from .audio import detect_audio_format
 from .llm import (
     check_wake_word, customize_response_async,
