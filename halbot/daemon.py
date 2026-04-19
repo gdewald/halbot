@@ -35,6 +35,15 @@ async def _tick_debug() -> None:
         await asyncio.sleep(1)
 
 
+async def _run_bot(bot_module) -> None:
+    try:
+        await bot_module.run()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("discord bot task crashed")
+
+
 async def _run_async() -> int:
     from .mgmt_server import serve
 
@@ -60,9 +69,12 @@ async def _run_async() -> int:
         except NotImplementedError:
             signal.signal(sig, _stop)
 
+    from . import bot as bot_module
+
     tasks = [
         asyncio.create_task(_tick_info(), name="tick-info"),
         asyncio.create_task(_tick_debug(), name="tick-debug"),
+        asyncio.create_task(_run_bot(bot_module), name="discord-bot"),
     ]
 
     await stop_event.wait()
