@@ -72,34 +72,83 @@ Runtime paths (frozen): `%ProgramFiles%\Halbot\{daemon,tray}\` binaries,
 `%ProgramData%\Halbot\logs\halbot.log` (+ `halbot-service.log` nssm
 stdout), `HKLM\SOFTWARE\Halbot\Config` registry.
 
-## Build / deploy
+## Build
 
 ```powershell
-# Full build: proto stubs + uv sync + pyinstaller (daemon + tray) + zip.
+# Full build (default): proto stubs + uv sync + pyinstaller + zip, both targets.
 # Output: dist\halbot-daemon.zip, dist\halbot-tray.zip (nssm.exe bundled in daemon).
 scripts\build.ps1
 
-# Install (elevated):
+# Single target (faster iteration):
+scripts\build.ps1 -Target daemon
+scripts\build.ps1 -Target tray
+
+# Flags:
+#   -Target all|daemon|tray   default: all
+#   -Clean                    wipe build/ + dist/ first (default: incremental;
+#                             keeps PyInstaller analysis cache — daemon rebuild
+#                             drops from ~150s to ~20-30s)
+#   -NoZip                    skip archive step (dist\halbot-{daemon,tray}\ only)
+```
+
+Build uses 7zip when available (`winget install 7zip.7zip`); falls back to
+`Compress-Archive` (~10x slower on daemon bundle).
+
+## Deploy — one-time setup (first install)
+
+Run from **elevated** PowerShell:
+
+```powershell
 $src = "<repo>\dist"
 $dst = "$env:ProgramFiles\Halbot"
 New-Item -ItemType Directory -Force -Path "$dst\daemon","$dst\tray" | Out-Null
 Expand-Archive -Force -Path "$src\halbot-daemon.zip" -DestinationPath "$dst\daemon"
 Expand-Archive -Force -Path "$src\halbot-tray.zip"   -DestinationPath "$dst\tray"
+
+# Create NSSM service, grant current user ACLs on HKLM keys + ProgramData,
+# auto-start service.
 & "$dst\daemon\halbot-daemon.exe" setup --install
-
-# Launch tray (non-elevated):
-& "$env:ProgramFiles\Halbot\tray\halbot-tray.exe"
-
-# Uninstall (elevated):
-& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
 ```
 
-`setup --install` creates NSSM service, grants installing user
-`KEY_WRITE` on HKLM config key (via win32api DACL), grants
+`setup --install` creates NSSM service, grants installing user `KEY_WRITE`
+on `HKLM\SOFTWARE\Halbot\{Config,Secrets}` (via win32api DACL), grants
 `SERVICE_START|STOP|QUERY_STATUS` via `sc sdset`, grants user modify on
 `%ProgramData%\Halbot` via icacls, auto-starts service.
 
-No per-user autostart this phase — tray launched manually.
+Launch tray (non-elevated, one-time — no autostart yet):
+
+```powershell
+& "$env:ProgramFiles\Halbot\tray\halbot-tray.exe"
+```
+
+## Deploy — operational (update existing install)
+
+After rebuild, swap binaries without touching config/secrets/data:
+
+```powershell
+# From elevated shell. Stops service, swaps bundle, restarts.
+Expand-Archive -Force -Path "<repo>\dist\halbot-daemon.zip" -DestinationPath "$env:TEMP\halbot-daemon-new"
+scripts\update-daemon.bat "$env:TEMP\halbot-daemon-new"
+
+# Tray (elevated — writes to Program Files). Kills running tray, swaps, relaunches.
+Expand-Archive -Force -Path "<repo>\dist\halbot-tray.zip" -DestinationPath "$env:TEMP\halbot-tray-new"
+scripts\update-tray.bat "$env:TEMP\halbot-tray-new"
+```
+
+Service start/stop/restart day-to-day: use tray menu (user has been granted
+control ACL at install time).
+
+## Deploy — uninstall (**destructive: wipes all config + data**)
+
+```powershell
+# Elevated. Removes:
+#   - NSSM service
+#   - HKLM\SOFTWARE\Halbot tree (Config + DPAPI-encrypted Secrets)
+#   - %ProgramData%\Halbot\ (logs, sqlite sounds.db, everything)
+# Does NOT remove: %ProgramFiles%\Halbot\ binaries — rm manually.
+& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
+Remove-Item -Recurse -Force "$env:ProgramFiles\Halbot"
+```
 
 ## Source run (no build)
 
@@ -165,6 +214,5 @@ uv run python -m halbot.daemon run
   registry only.
 - Module-level RPCs (`RestartDiscord`, `LoadWhisper`, etc.).
 - Per-user tray autostart (HKCU Run / Startup shortcut).
-- `README.md` **intentionally stale** — still describes pre-restructure
-  flat `bot.py` + `uv run bot.py` world. Do not read or edit README
-  during phase 1; re-anchor to this file.
+- `README.md` now describes v0.6 daemon+tray architecture — keep in
+  sync with this file when build/deploy commands change.

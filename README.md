@@ -72,14 +72,32 @@ Last 50 channel messages passed to the LLM so follow-ups resolve correctly.
 ## Build
 
 ```powershell
-# Full build: proto stubs + uv sync + pyinstaller (daemon + tray) + zip.
-# Outputs dist\halbot-daemon.zip and dist\halbot-tray.zip (nssm.exe bundled).
+# Full build (default): proto stubs + uv sync + pyinstaller + zip, both targets.
+# Outputs: dist\halbot-daemon.zip, dist\halbot-tray.zip (nssm.exe bundled).
 scripts\build.ps1
+
+# Single target (faster iteration):
+scripts\build.ps1 -Target daemon
+scripts\build.ps1 -Target tray
 ```
 
-## Install
+Flags:
 
-Run from an **elevated** PowerShell:
+| Flag | Effect |
+|------|--------|
+| `-Target all\|daemon\|tray` | Default `all`. |
+| `-Clean` | Wipe `build/` + `dist/` first. Default is incremental — keeping `build/` reuses the PyInstaller analysis cache and cuts a daemon rebuild from ~150 s to ~20–30 s. |
+| `-NoZip` | Skip archive; leave `dist\halbot-{daemon,tray}\` only. |
+
+7zip autodetected (PATH or `%ProgramFiles%\7-Zip\7z.exe`) — install via
+`winget install 7zip.7zip` for ~10× faster archiving than the
+`Compress-Archive` fallback.
+
+## One-time setup (first install)
+
+Run from an **elevated** PowerShell.
+
+**1. Extract and install service:**
 
 ```powershell
 $src = "<repo>\dist"
@@ -87,30 +105,63 @@ $dst = "$env:ProgramFiles\Halbot"
 New-Item -ItemType Directory -Force -Path "$dst\daemon","$dst\tray" | Out-Null
 Expand-Archive -Force -Path "$src\halbot-daemon.zip" -DestinationPath "$dst\daemon"
 Expand-Archive -Force -Path "$src\halbot-tray.zip"   -DestinationPath "$dst\tray"
+
+# Creates NSSM service, grants current user ACLs on HKLM\SOFTWARE\Halbot\{Config,Secrets}
+# and %ProgramData%\Halbot\, grants SERVICE_START|STOP|QUERY_STATUS via sc sdset,
+# auto-starts the service.
 & "$dst\daemon\halbot-daemon.exe" setup --install
 ```
 
-`setup --install` creates the NSSM service, grants the installing user
-`KEY_WRITE` on the HKLM config key, `SERVICE_START|STOP|QUERY_STATUS` via
-`sc sdset`, and modify on `%ProgramData%\Halbot\`. Auto-starts the service.
-
-Store the Discord token (elevated):
+**2. Store the Discord token** (DPAPI-encrypted,
+`CRYPTPROTECT_LOCAL_MACHINE`):
 
 ```powershell
 & "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --set-secret DISCORD_TOKEN <token>
 ```
 
-Launch the tray (non-elevated):
+**3. Launch the tray** (non-elevated — no autostart yet, launch once per
+login or pin to Startup manually):
 
 ```powershell
 & "$env:ProgramFiles\Halbot\tray\halbot-tray.exe"
 ```
 
-Uninstall (elevated):
+## Operational — update existing install
+
+After a rebuild, swap binaries without touching config, secrets, or data.
 
 ```powershell
-& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
+# Daemon (elevated — stops service, swaps bundle, restarts):
+Expand-Archive -Force -Path "<repo>\dist\halbot-daemon.zip" -DestinationPath "$env:TEMP\halbot-daemon-new"
+scripts\update-daemon.bat "$env:TEMP\halbot-daemon-new"
+
+# Tray (elevated — writes to Program Files; kills running tray, swaps, relaunches):
+Expand-Archive -Force -Path "<repo>\dist\halbot-tray.zip" -DestinationPath "$env:TEMP\halbot-tray-new"
+scripts\update-tray.bat "$env:TEMP\halbot-tray-new"
 ```
+
+Day-to-day service Start / Stop / Restart: use the tray menu (user has
+been granted service-control ACL at install time — no elevation needed).
+
+To rotate the Discord token or change config values that aren't
+surfaced in the tray: re-run `setup --set-secret`, or edit
+`HKLM\SOFTWARE\Halbot\Config` via `regedit` and restart the service.
+
+## Uninstall (destructive — **wipes all config and data**)
+
+```powershell
+# Elevated. Removes:
+#   - NSSM service
+#   - HKLM\SOFTWARE\Halbot tree (Config *and* DPAPI-encrypted Secrets, incl. DISCORD_TOKEN)
+#   - %ProgramData%\Halbot\ (logs, sqlite sounds.db, everything)
+# Does NOT remove %ProgramFiles%\Halbot\ binaries — rm them manually.
+& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
+Remove-Item -Recurse -Force "$env:ProgramFiles\Halbot"
+```
+
+There is no "soft" uninstall that preserves config. Back up
+`HKLM\SOFTWARE\Halbot` (`reg export`) and `%ProgramData%\Halbot\` first
+if you want to restore state later.
 
 ## Migrating from v0.5.0
 
