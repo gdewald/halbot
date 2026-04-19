@@ -28,6 +28,7 @@ upgrade. Input: repo root or explicit paths. Effect:
    to `HKLM\SOFTWARE\Halbot\Secrets\DISCORD_TOKEN`.
 3. **Other keys → registry** via `halbot.config.update` +
    `halbot.config.persist`. Key-name translation table:
+   - `LOG_LEVEL`          → `log_level`
    - `LMSTUDIO_URL`       → `llm_url`
    - `LMSTUDIO_MODEL`     → `llm_model`
    - `VOICE_IDLE_TIMEOUT_SECONDS` → `voice_idle_timeout_seconds`
@@ -37,7 +38,10 @@ upgrade. Input: repo root or explicit paths. Effect:
    - `KOKORO_VOICE`       → `tts_voice`
    - `KOKORO_LANG`        → `tts_lang`
    - `KOKORO_SPEED`       → `tts_speed`
-   Unknown keys: logged + skipped, not an error.
+   Unknown keys: logged + skipped, not an error. Known-unmigrated
+   (no corresponding registry field yet): `HF_HUB_OFFLINE`,
+   `LLM_DISABLE_THINKING`. Leave in `.env` until config schema
+   expands.
 4. **Copy `sounds.db`** from source path (default `./sounds.db`) into
    `halbot.paths.data_dir()`. Skip-with-warn if destination already
    exists unless `--force`. Schema migration not required:
