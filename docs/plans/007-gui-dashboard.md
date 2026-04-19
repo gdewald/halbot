@@ -290,3 +290,139 @@ rpc GetEventLog (Empty) returns (EventLogReply);
 ```
 
 Deferred — not part of this plan's delivery scope.
+
+## Implementation increments
+
+Each step ends at a commit; repo stays runnable at every boundary.
+The tray still runs as it does today until step 7 wires the menu
+item in.
+
+### Step 1 — proto + config schema
+
+- Extend `proto/mgmt.proto` with `ConfigFieldType`, the new
+  `StringValue` fields, `StreamLogs`, `GetStats`, and the Stats
+  sub-messages (stub shapes).
+- Regenerate `halbot/_gen/` via `scripts\gen_proto.ps1`.
+- Add `SCHEMA` dict in `halbot/config.py` keyed by field name,
+  holding `(type, options, description, group, min, max, step)`.
+  Populate only `log_level`.
+- Extend `mgmt_server._state_msg()` to fill the new `StringValue`
+  fields from `SCHEMA`.
+- `GetStats` returns `StatsReply(mock=True)` with zeroed
+  sub-messages.
+- `StreamLogs` implemented but not yet consumed.
+- Rebuild daemon with `-Clean` (proto change — see CLAUDE.md
+  pitfall on PyInstaller cache).
+
+Runnable: yes. Tray unchanged.
+
+### Step 2 — dashboard Python backend
+
+- New package `dashboard/` inside the tray codebase:
+  - `dashboard/__init__.py`
+  - `dashboard/app.py` — `open_window()` creates a pywebview
+    window pointed at the bundled `index.html`.
+  - `dashboard/bridge.py` — `JsApi` class: `health()`,
+    `get_config()`, `update_config(updates)`, `persist(fields)`,
+    `reset(fields)`, `service_start/stop/restart/query()`,
+    `nssm_auto_restart_get/set()`, `proc_stats(pid)`,
+    `window_minimize/maximize/close()`.
+  - `dashboard/log_stream.py` — background thread running the
+    `StreamLogs` RPC, fan-out to webview via
+    `window.evaluate_js('window.__pushLog(...)')` OR
+    `js_api.pop_log_batch()` polling — pick one during impl.
+- Add `pywebview` + `psutil` to `[project.optional-dependencies]
+  tray` in `pyproject.toml`.
+- No UI yet — smoke-test by calling `open_window()` from a
+  throwaway script; verify WebView2 loads a placeholder HTML.
+
+Runnable: yes.
+
+### Step 3 — frontend scaffold
+
+- `frontend/` dir at repo root: `package.json`, `vite.config.js`
+  (`base: './'`, `build.outDir: 'dist'`), `index.html`, entry
+  `src/main.jsx`.
+- Extract `T` tokens into `src/tokens.js`.
+- Move `WinTitleBar`, `StatusBar`, the three sidebar variants,
+  and shell `App` from the mockup into `src/App.jsx` +
+  `src/components/`. Panels stub out as empty divs for now.
+- Add bundled fonts under `src/fonts/`.
+- `src/bridge.js` — thin wrapper over `window.pywebview.api.*`
+  promising the same shape the panels will call.
+- `npm run build` produces `frontend/dist/index.html` + assets.
+- `dashboard/app.py` points pywebview at `frontend/dist/index.html`
+  resolved via `halbot.paths` (source run) or `sys._MEIPASS`
+  (frozen).
+- Smoke: open window, see empty shell with title bar + sidebar.
+
+Runnable: yes.
+
+### Step 4 — Logs panel
+
+- Port `LogsPanel` + `LogRow` + `ToggleBtn` from the mockup into
+  `src/panels/Logs.jsx`.
+- Wire log source: either
+  - a) push path — backend calls
+    `window.evaluate_js('window.__pushLog(json)')` per line, or
+  - b) pull path — backend buffers and frontend polls
+    `api.pop_log_batch()` every 250ms.
+  - Default to (b) for simpler lifecycle; swap to (a) if polling
+    cost shows up.
+- Backlog: call `api.backlog_logs(200)` on mount.
+- Frontend filter / grep / wrap / tail stay client-side.
+- Delete `tray/log_viewer.py` usages — kept as a file for one more
+  step in case the window fails to open.
+
+### Step 5 — Daemon panel
+
+- Port `DaemonPanel` + `ActionBtn` into `src/panels/Daemon.jsx`.
+- Wire real RPCs:
+  - status / PID: `api.service_query()` → `{state, pid}`,
+    polled every 2s.
+  - uptime: `api.health().uptime_seconds`.
+  - memory / CPU: `api.proc_stats(pid)` using `psutil`.
+  - Start / Stop / Restart: existing `service_ctl` calls.
+  - auto-restart: `nssm get halbot AppExit` / `set` wrapped in
+    `api.nssm_auto_restart_get/set`. If NSSM lookup fails, hide
+    the toggle rather than lie.
+- Event history: render a single row "event history wires up in
+  phase 2" with a `mock` badge.
+- Guilds card shows `—` with the `mock` badge until Discord lands.
+
+### Step 6 — Config panel
+
+- Port `ConfigPanel` + `ConfigRow` + `FieldInput` into
+  `src/panels/Config.jsx`.
+- Groups list comes from `GetConfig()`'s `group` field;
+  collapsed into `Map<group, field[]>` client-side. Hide
+  any group with zero fields (see panel spec).
+- `FieldInput` switch on `field.type` using the proto enum.
+- Save: `api.update_config(updates)` then `api.persist(keys)`
+  on success. Revert-all: `api.reset([])`.
+- Show a dimmed "planned" card under the real groups listing
+  field names from the mockup that are not present in
+  `GetConfig()`, with a `mock` badge, so design review still
+  shows the full mockup surface without implying they work.
+
+### Step 7 — Stats panel + tray wiring
+
+- Port `StatsPanel` and sub-components into `src/panels/Stats.jsx`
+  (soundboard table, stat cards, latency cards, wake history).
+- Mount a single full-panel overlay when `api.get_stats().mock`
+  is `true`. Everything behind the overlay renders from the
+  mockup's seed data so design stays reviewable.
+- Tray menu: insert `Item("Open dashboard", on_open_dashboard)`
+  at the top; on click spawn `dashboard.app.open_window()` on a
+  daemon thread (pywebview must run on its own thread, not the
+  pystray UI thread).
+- Delete `tray/log_viewer.py` and the "Open log viewer" menu
+  item.
+
+### Step 8 — build + deploy
+
+Covered in the next section.
+
+### Step 9 — validation
+
+Covered two sections down.
