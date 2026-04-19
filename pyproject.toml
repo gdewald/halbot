@@ -15,6 +15,17 @@ daemon = [
     "grpcio-tools>=1.60",
     "protobuf>=4.25",
     "pywin32>=306",
+    "discord.py[voice]>=2.5,<3",
+    "discord-ext-voice-recv>=0.4",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "tinytag>=2.0",
+    "pydub>=0.25",
+    "numpy>=1.24",
+    "faster-whisper>=1.0",
+    "kokoro>=0.9",
+    "soundfile>=0.12",
+    "nvidia-cublas-cu12>=12.9.2.10",
 ]
 tray = [
     "grpcio>=1.60",
