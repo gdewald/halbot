@@ -120,7 +120,7 @@ Merge to `main` only when validation checklist passes on clean VM.
 **4. Daemon body**
 
 - `halbot/mgmt_server.py`: **async gRPC server** (`grpc.aio`) bound
-  `127.0.0.1:50737`. Implements `Health` + four config RPCs. Async
+  `127.0.0.1:50199`. Implements `Health` + four config RPCs. Async
   chosen now so discord.py (asyncio) integrates cleanly later.
 - `halbot/daemon.py run`: init logging, run asyncio event loop hosting
   (a) ticker task emitting `logger.info("tick")` every 5s and

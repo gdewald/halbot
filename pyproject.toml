@@ -1,32 +1,39 @@
 [project]
 name = "halbot"
-version = "0.4.0"
-description = "Discord soundboard management bot powered by a local LLM"
-readme = "README.md"
-requires-python = ">=3.13"
-dependencies = [
-    "discord.py[voice]>=2.5,<3",
-    "python-dotenv>=1.0",
-    "requests>=2.31",
-    "tinytag>=2.0",
-    "pydub>=0.25",
-    "numpy>=1.24",
-    "nvidia-cublas-cu12>=12.9.2.10",
-]
+version = "0.5.0"
+description = "Discord soundboard management bot — daemon + tray skeleton"
+requires-python = ">=3.12"
+dependencies = []
 
-[project.optional-dependencies]
-voice = [
-    "discord-ext-voice-recv>=0.4",
-    "faster-whisper>=1.0",
-]
-tray = [
-    "pystray>=0.19",
-    "pillow>=10",
-]
-tts = [
-    "kokoro>=0.9",
-    "soundfile>=0.12",
-]
+[project.scripts]
+halbot-daemon = "halbot.daemon:main"
+halbot-tray = "tray.tray:main"
 
 [dependency-groups]
+daemon = [
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=4.25",
+    "pywin32>=306",
+]
+tray = [
+    "grpcio>=1.60",
+    "protobuf>=4.25",
+    "pystray>=0.19",
+    "pillow>=10",
+    "pywin32>=306",
+]
+build = [
+    "pyinstaller>=6.3",
+]
 dev = []
+
+[tool.uv]
+default-groups = ["daemon", "tray", "build"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["halbot", "tray"]

@@ -3,5 +3,9 @@ sounds.db
 __pycache__/
 logs/
 .venv/
+_dev_data/
+build/
+dist/
 *.original.md
 docs/plans/drafts/
+halbot/_build_info.py
