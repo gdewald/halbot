@@ -1,18 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller onedir spec for halbot-daemon.
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
-hidden = collect_submodules("grpc") + [
-    "halbot._gen.mgmt_pb2",
-    "halbot._gen.mgmt_pb2_grpc",
-]
+hidden = (
+    collect_submodules("grpc")
+    + collect_submodules("halbot")
+    + [
+        "halbot._gen.mgmt_pb2",
+        "halbot._gen.mgmt_pb2_grpc",
+    ]
+)
 
 a = Analysis(
     ["halbot_daemon_entry.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
+    datas=collect_data_files("halbot"),
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
