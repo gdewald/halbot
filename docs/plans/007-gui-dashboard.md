@@ -118,3 +118,69 @@ Phase-1 ship: entire Stats panel renders behind a single full-panel
 `mock` overlay reading "Stats wire up in phase 2+. Preview only."
 with the mockup content visible but disabled. This keeps the panel
 present for design review without leaking fabricated numbers.
+
+## Tech choice
+
+### Why pywebview
+
+Rejected:
+
+- **Electron** — extra 150MB, separate node toolchain, would need a
+  second proto-stub bundle on the JS side; overkill for a single
+  in-process window.
+- **Qt (PySide6 / PyQt)** — full-native, but 60MB+ runtime pulled
+  into the tray PyInstaller bundle, and porting the React mockup
+  would be a full rewrite in QML or QtWidgets.
+- **Tkinter** — already used for log viewer; not viable for the
+  mockup's density (grid layouts, animated toggles, range sliders,
+  CSS-heavy pill styling) without a multi-week rewrite.
+
+Chosen: **pywebview** with Edge WebView2 runtime (already on
+Windows 10 21H2+ and bundled as evergreen on Win11 — our sole
+target). Adds ~4MB to the tray bundle. Loads a static HTML file
+from the frozen resources dir. Exposes a Python `js_api` object
+for RPC — no HTTP server, no gRPC-web proxy.
+
+Hard dependency: `WebView2Loader.dll` must be present. Verify
+during `scripts\build.ps1` that PyInstaller `--collect-binaries
+webview` picks it up; otherwise add `--add-binary` explicitly.
+
+### Frontend bundling
+
+The mockup as shipped uses CDN scripts (react, react-dom, babel
+standalone, Google Fonts) and in-browser JSX transpilation. Ship
+is different:
+
+- **No CDN at runtime.** Dashboard must work offline — daemon box
+  may be air-gapped, and WebView2 with no internet is common. All
+  JS and fonts bundled as static assets.
+- **No in-browser Babel.** Compile JSX ahead of time — ~800ms
+  cold-start delay otherwise, on every window open.
+
+Tooling: add a `frontend/` dir with minimal Vite + React setup
+(Vite chosen for zero-config JSX; no need for a framework-level
+router). `npm run build` produces `frontend/dist/` which
+`scripts\build.ps1` copies into the tray PyInstaller bundle as a
+datas entry. Vite config sets `base: './'` so relative asset paths
+work when loaded via `file://`.
+
+Mockup HTML becomes `frontend/src/App.jsx` (the single-file mockup
+split into per-panel files under `frontend/src/panels/`). The
+four panels (`LogsPanel`, `DaemonPanel`, `ConfigPanel`,
+`StatsPanel`), `WinTitleBar`, and `StatusBar` components map
+1:1 from the mockup. Tokens object `T` moves to
+`frontend/src/tokens.js`.
+
+### Window chrome
+
+Mockup has custom title bar with Windows min/max/close. Keep it —
+pass `frameless=True` to `webview.create_window`, then wire the
+title-bar buttons through `js_api.{minimize,maximize,close}`
+helpers that call `webview.Window.minimize()` etc. Drag region
+uses `-webkit-app-region: drag` which Edge WebView2 respects.
+
+### Fonts
+
+Bundle JetBrains Mono and DM Sans woff2 under
+`frontend/src/fonts/` and declare via `@font-face` in the entry
+CSS. Remove the Google Fonts `<link>`.
