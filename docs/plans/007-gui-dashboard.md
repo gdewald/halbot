@@ -513,3 +513,101 @@ keys. The frontend is static content inside the tray install dir.
 
 Binary size delta expected: ~8-12 MB (pywebview + psutil +
 frontend assets + fonts). Acceptable.
+
+## Validation
+
+Manual checklist, run on a built install (not source run) after
+step 8. Source-run path works but can't exercise the frozen asset
+resolution.
+
+### Launch & chrome
+
+- Tray icon shows "Open dashboard" as the first menu item.
+- Clicking it opens a 1080×680 borderless window with the custom
+  title bar drawn in-page.
+- Min / max / close buttons in the title bar work.
+- Dragging the title bar moves the window.
+- Closing the window does not kill the tray process.
+- Re-opening the window after close works (no stale WebView2
+  state, no second process).
+
+### Logs panel
+
+- Window opens with ≥1 backlog log line visible.
+- Emitting a daemon INFO tick (wait ~2s) appears live.
+- Level filter buttons flip colors + counts; filtering hides rows.
+- Grep field narrows rows.
+- Tail toggle pauses autoscroll; resuming scrolls to bottom.
+- Wrap toggle changes line wrap behavior.
+- Switching daemon log level in the Config panel changes the
+  stream's emitted levels visibly.
+
+### Daemon panel
+
+- Running/stopped pill matches real SCM state.
+- PID matches `sc queryex halbot`.
+- Stop → pill flips to STOPPED, start button appears, action
+  buttons disable during loading.
+- Start → pill flips back, memory/CPU numbers update.
+- Uptime ticks every second.
+- auto-restart toggle round-trips through NSSM (verify with
+  `nssm get halbot AppExit`).
+- Event history row shows the mock placeholder, not fake events.
+
+### Config panel
+
+- Log level select shows current value.
+- Changing it dirties the row (indicator + "N unsaved").
+- Save persists — reboot service, value still present.
+- Revert drops the draft back to saved value.
+- "planned" section lists LLM / Voice / TTS fields dimmed with
+  the mock badge; widgets disabled.
+
+### Stats panel
+
+- Full-panel mock overlay visible.
+- Mockup content visible (faded) behind it.
+- No fabricated numbers shown as "real".
+
+### Offline
+
+- Disable internet on the box, re-open window. All fonts,
+  scripts, icons still render (no CDN fallback).
+
+### Update flow
+
+- Edit a panel, rebuild with `scripts\build.ps1 -Target tray`,
+  run `scripts\update-tray.bat`. Re-open window — change visible.
+
+## Open questions
+
+- **Log stream backpressure.** If a log burst (>1000 lines/s)
+  fires, does `evaluate_js` flood the WebView2 message bus?
+  Decide between batched push (coalesce 100ms windows) vs pull
+  with a server-side bounded queue during step 4.
+- **Multiple dashboard windows.** Allow? Simplest: reject the
+  second `open_window` with a tray notification. Ship that.
+- **Dashboard ↔ daemon version skew.** When the user updates only
+  the tray bundle, new RPCs may not exist on the daemon. Surface
+  an "update daemon" banner on `Health()` mismatch. Defer.
+- **HiDPI.** Need to test on a 150% scaling monitor; WebView2
+  should handle it, but verify the 1080×680 default isn't
+  oversized on 1920×1080 scaled.
+
+## Backlog link
+
+Related entries in
+[docs/plans/drafts/phase-backlog.md](drafts/phase-backlog.md):
+
+- Tray GUI secret-update dialog — lands naturally as a new
+  Config field once `SetSecret` is wired into the dashboard
+  bridge. Track as a phase-2 follow-up, not this plan.
+
+## Out of scope
+
+- Discord / voice / LLM subsystems (R2+ phases re-introduce
+  these; Stats + Config "planned" sections light up then).
+- Dark/light theme toggle (mockup is dark-only; fine).
+- Remote dashboard (gRPC over LAN). Loopback only.
+- Telemetry export / Prometheus scrape.
+- Log file download / export button (mockup doesn't show one).
