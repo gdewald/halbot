@@ -426,3 +426,90 @@ Covered in the next section.
 ### Step 9 — validation
 
 Covered two sections down.
+
+## Build / deploy changes
+
+### Frontend build
+
+Add to `scripts\build.ps1` before the PyInstaller step, gated on
+`-Target tray` or `-Target all`:
+
+```powershell
+if (Test-Path frontend/package.json) {
+  Push-Location frontend
+  if (-not (Test-Path node_modules) -or $Clean) {
+    npm ci
+  }
+  npm run build
+  Pop-Location
+}
+```
+
+Requires Node.js on the dev box. Pin Node version in
+`frontend/.nvmrc`. Build-time only; the zip ships no Node.
+
+### PyInstaller tray spec
+
+In `build_tray.spec`:
+
+- Add `frontend/dist` as a `datas` entry → `dashboard/web/` in
+  the bundle: `('frontend/dist', 'dashboard/web')`.
+- Hidden imports: `pywebview`, `webview.platforms.edgechromium`,
+  `psutil`.
+- Add `--collect-binaries webview` via the `Analysis.binaries`
+  hook so `WebView2Loader.dll` follows. Verify post-build that
+  the DLL is present in `dist\halbot-tray\_internal\webview\`.
+- Resolve the frontend dir at runtime through a helper in
+  `dashboard/app.py`:
+
+  ```python
+  def _web_dir() -> Path:
+      if getattr(sys, "frozen", False):
+          return Path(sys._MEIPASS) / "dashboard" / "web"
+      return Path(__file__).resolve().parent.parent / "frontend" / "dist"
+  ```
+
+### Pyproject groups
+
+`pyproject.toml`:
+
+- Add `pywebview>=5.0`, `psutil` to the `tray` group.
+- Leave daemon group alone.
+
+### `-Clean` triggers
+
+Update CLAUDE.md's "When to use `-Clean`" list to add:
+
+- `frontend/package.json` or `frontend/src/**` edited (Vite build
+  only runs in source tree; PyInstaller still cache-reuses its
+  analysis for `halbot-tray.exe`, so the dev workflow tolerates
+  incremental — but a spec-datas change still forces `-Clean`).
+
+### WebView2 runtime
+
+Target is Windows 11, evergreen WebView2 ships with the OS. No
+bootstrapper needed. If a future Windows 10 box appears, add a
+one-time check in `dashboard/app.py`:
+
+```python
+try:
+    import webview
+    webview.create_window(...)
+except webview.WebViewException:
+    # surface a tray notification with a download link
+    ...
+```
+
+### Update flow
+
+`scripts\update-tray.bat` unchanged — the dashboard ships as part
+of the tray bundle, so a single tray swap delivers both icon and
+dashboard updates. Daemon updates independently as today.
+
+### Install flow
+
+`setup --install` unchanged — no new services, no new registry
+keys. The frontend is static content inside the tray install dir.
+
+Binary size delta expected: ~8-12 MB (pywebview + psutil +
+frontend assets + fonts). Acceptable.
