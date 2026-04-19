@@ -82,7 +82,9 @@ def main() -> int:
         while True:
             try:
                 state = client.get_config()
-                current_level["value"] = state.log_level.value.upper()
+                lvl = state.fields.get("log_level")
+                if lvl is not None:
+                    current_level["value"] = lvl.value.upper()
             except Exception:
                 pass
             _t.sleep(2)

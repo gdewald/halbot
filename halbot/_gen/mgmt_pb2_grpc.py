@@ -59,6 +59,41 @@ class MgmtStub(object):
                 request_serializer=mgmt__pb2.ResetConfigRequest.SerializeToString,
                 response_deserializer=mgmt__pb2.ConfigState.FromString,
                 _registered_method=True)
+        self.SetSecret = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/SetSecret',
+                request_serializer=mgmt__pb2.SetSecretRequest.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
+        self.RestartDiscord = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/RestartDiscord',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
+        self.LeaveVoice = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/LeaveVoice',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
+        self.LoadWhisper = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/LoadWhisper',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
+        self.UnloadWhisper = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/UnloadWhisper',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
+        self.LoadTTS = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/LoadTTS',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
+        self.UnloadTTS = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/UnloadTTS',
+                request_serializer=mgmt__pb2.Empty.SerializeToString,
+                response_deserializer=mgmt__pb2.StatusReply.FromString,
+                _registered_method=True)
 
 
 class MgmtServicer(object):
@@ -94,6 +129,48 @@ class MgmtServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SetSecret(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RestartDiscord(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LeaveVoice(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LoadWhisper(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UnloadWhisper(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LoadTTS(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UnloadTTS(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MgmtServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -121,6 +198,41 @@ def add_MgmtServicer_to_server(servicer, server):
                     servicer.ResetConfig,
                     request_deserializer=mgmt__pb2.ResetConfigRequest.FromString,
                     response_serializer=mgmt__pb2.ConfigState.SerializeToString,
+            ),
+            'SetSecret': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetSecret,
+                    request_deserializer=mgmt__pb2.SetSecretRequest.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'RestartDiscord': grpc.unary_unary_rpc_method_handler(
+                    servicer.RestartDiscord,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'LeaveVoice': grpc.unary_unary_rpc_method_handler(
+                    servicer.LeaveVoice,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'LoadWhisper': grpc.unary_unary_rpc_method_handler(
+                    servicer.LoadWhisper,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'UnloadWhisper': grpc.unary_unary_rpc_method_handler(
+                    servicer.UnloadWhisper,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'LoadTTS': grpc.unary_unary_rpc_method_handler(
+                    servicer.LoadTTS,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
+            ),
+            'UnloadTTS': grpc.unary_unary_rpc_method_handler(
+                    servicer.UnloadTTS,
+                    request_deserializer=mgmt__pb2.Empty.FromString,
+                    response_serializer=mgmt__pb2.StatusReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -258,6 +370,195 @@ class Mgmt(object):
             '/halbot.mgmt.Mgmt/ResetConfig',
             mgmt__pb2.ResetConfigRequest.SerializeToString,
             mgmt__pb2.ConfigState.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetSecret(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/SetSecret',
+            mgmt__pb2.SetSecretRequest.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RestartDiscord(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/RestartDiscord',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LeaveVoice(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/LeaveVoice',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LoadWhisper(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/LoadWhisper',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UnloadWhisper(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/UnloadWhisper',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LoadTTS(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/LoadTTS',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UnloadTTS(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/UnloadTTS',
+            mgmt__pb2.Empty.SerializeToString,
+            mgmt__pb2.StatusReply.FromString,
             options,
             channel_credentials,
             insecure,
