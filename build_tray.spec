@@ -3,11 +3,15 @@
 
 from PyInstaller.utils.hooks import collect_submodules
 
-hidden = collect_submodules("grpc") + [
-    "halbot._gen.mgmt_pb2",
-    "halbot._gen.mgmt_pb2_grpc",
-    "pystray._win32",
-]
+hidden = (
+    collect_submodules("grpc")
+    + collect_submodules("tray")
+    + [
+        "halbot._gen.mgmt_pb2",
+        "halbot._gen.mgmt_pb2_grpc",
+        "pystray._win32",
+    ]
+)
 
 a = Analysis(
     ["halbot_tray_entry.py"],
