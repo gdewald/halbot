@@ -94,6 +94,19 @@ scripts\build.ps1 -Target tray
 Build uses 7zip when available (`winget install 7zip.7zip`); falls back to
 `Compress-Archive` (~10x slower on daemon bundle).
 
+**When to use `-Clean`:** default incremental build reuses PyInstaller
+analysis cache. Safe for pure Python edits. Pass `-Clean` when any of:
+
+- `build_*.spec` edited (esp. hiddenimports / `collect_submodules` / datas)
+- `proto/mgmt.proto` or anything touching `halbot/_gen/`
+- `pyproject.toml` / `uv.lock` dep bumps that move import graph
+- Python interpreter upgrade
+
+Symptom of skipping `-Clean` when you should have: daemon boots with
+`ModuleNotFoundError: No module named 'halbot.<x>'` despite the module
+clearly present in source. PyInstaller cache invalidation on spec
+changes is unreliable.
+
 ## Deploy — one-time setup (first install)
 
 Run from **elevated** PowerShell:

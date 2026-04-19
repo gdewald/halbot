@@ -21,7 +21,7 @@ function Time-Stage($name, $block) {
     & $block
     $sw.Stop()
     Write-Host ("[stage] {0}: {1:N1}s" -f $name, $sw.Elapsed.TotalSeconds)
-    return $sw.Elapsed
+    $sw.Elapsed | Out-Null
 }
 
 function Find-SevenZip {
@@ -34,6 +34,16 @@ function Find-SevenZip {
         if (Test-Path $p) { return $p }
     }
     return $null
+}
+
+function Assert-NoInvalidInternalModules($warnFile, $pkgRegex) {
+    if (-not (Test-Path $warnFile)) { return }
+    $hits = Select-String -Path $warnFile -Pattern "invalid module named $pkgRegex" -SimpleMatch:$false
+    if ($hits) {
+        Write-Host "ERROR: PyInstaller flagged internal modules as invalid:" -ForegroundColor Red
+        $hits | ForEach-Object { Write-Host "  $($_.Line)" -ForegroundColor Red }
+        throw "internal package broken; bundle would crash at runtime"
+    }
 }
 
 function Zip-Dir($srcDir, $zipPath, $sevenZip) {
@@ -63,6 +73,17 @@ try {
     # Regenerate proto stubs (cheap, always).
     Time-Stage "proto" { & (Join-Path $PSScriptRoot "gen_proto.ps1") }
 
+    # Fast-fail on syntax errors in internal packages so PyInstaller doesn't
+    # silently drop a module with "invalid module named <x>" and ship a bundle
+    # that crashes at runtime with ModuleNotFoundError.
+    Time-Stage "syntax check" {
+        $pkgs = @()
+        if ($buildDaemon) { $pkgs += "halbot" }
+        if ($buildTray)   { $pkgs += "tray" }
+        uv run python -m compileall -q @pkgs
+        if ($LASTEXITCODE -ne 0) { throw "syntax errors in $($pkgs -join ',')" }
+    }
+
     if ($Clean) {
         Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "build")
         Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "dist")
@@ -88,6 +109,7 @@ try {
         Time-Stage "pyinstaller daemon" {
             uv run pyinstaller --noconfirm --distpath dist --workpath build build_daemon.spec
         }
+        Assert-NoInvalidInternalModules (Join-Path $root "build\build_daemon\warn-build_daemon.txt") "halbot\."
 
         Time-Stage "fetch nssm" {
             $nssmDest = Join-Path $root "dist\halbot-daemon\nssm.exe"
@@ -118,6 +140,7 @@ try {
         Time-Stage "pyinstaller tray" {
             uv run pyinstaller --noconfirm --distpath dist --workpath build build_tray.spec
         }
+        Assert-NoInvalidInternalModules (Join-Path $root "build\build_tray\warn-build_tray.txt") "tray\."
 
         if (-not $NoZip) {
             Time-Stage "zip tray" {
