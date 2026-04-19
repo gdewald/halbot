@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 SERVICE_NAME = "halbot"
 REG_KEY = r"SOFTWARE\Halbot\Config"
+SECRETS_KEY = r"SOFTWARE\Halbot\Secrets"
 
 
 def _is_admin() -> bool:
@@ -58,15 +59,12 @@ def _create_data_dirs() -> None:
     paths.log_dir()
 
 
-def _grant_registry(user: str) -> None:
-    """Grant user KEY_WRITE on HKLM\\SOFTWARE\\Halbot\\Config."""
+def _grant_registry(user: str, subkey: str) -> None:
+    """Grant user KEY_WRITE on HKLM\\<subkey>."""
     import winreg
 
-    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, REG_KEY, 0, winreg.KEY_ALL_ACCESS):
+    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, subkey, 0, winreg.KEY_ALL_ACCESS):
         pass
-    # Delegate ACL change to `reg.exe` since pywin32 SD API verbose.
-    # Simpler: use icacls-equivalent via `reg add` is not possible; rely on
-    # default HKLM ACL + RegSetKeySecurity below.
     try:
         import winreg
         import win32api
@@ -76,7 +74,7 @@ def _grant_registry(user: str) -> None:
         KEY_WRITE = winreg.KEY_WRITE
         key = win32api.RegOpenKeyEx(
             0x80000002,  # HKEY_LOCAL_MACHINE
-            REG_KEY, 0, KEY_ALL_ACCESS,
+            subkey, 0, KEY_ALL_ACCESS,
         )
         sd = win32api.RegGetKeySecurity(key, win32security.DACL_SECURITY_INFORMATION)
         dacl = sd.GetSecurityDescriptorDacl()
@@ -88,7 +86,7 @@ def _grant_registry(user: str) -> None:
         win32api.RegSetKeySecurity(key, win32security.DACL_SECURITY_INFORMATION, sd)
         win32api.RegCloseKey(key)
     except Exception as e:
-        log.warning("registry ACL grant skipped: %s", e)
+        log.warning("registry ACL grant for %s skipped: %s", subkey, e)
 
 
 def _grant_service_control(user: str) -> None:
@@ -139,7 +137,8 @@ def install() -> int:
     _run([nssm, "set", SERVICE_NAME, "AppStderr", log_path])
     _run([nssm, "set", SERVICE_NAME, "Start", "SERVICE_AUTO_START"])
 
-    _grant_registry(user)
+    _grant_registry(user, REG_KEY)
+    _grant_registry(user, SECRETS_KEY)
     if user:
         try:
             _grant_service_control(user)
@@ -167,10 +166,12 @@ def uninstall() -> int:
         _run(["sc", "stop", SERVICE_NAME], check=False)
         _run(["sc", "delete", SERVICE_NAME], check=False)
 
-    # Delete registry key tree.
+    # Delete registry key tree (Config + Secrets).
     try:
         import winreg
         _delete_key_tree(winreg.HKEY_LOCAL_MACHINE, REG_KEY)
+        _delete_key_tree(winreg.HKEY_LOCAL_MACHINE, SECRETS_KEY)
+        _delete_key_tree(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Halbot")
     except Exception as e:
         log.warning("registry delete skipped: %s", e)
 
