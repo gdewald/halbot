@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 import sys
 import threading
 
@@ -10,7 +12,6 @@ from halbot import paths
 
 from . import service_ctl
 from .mgmt_client import MgmtClient
-from dashboard import app as dashboard_app
 
 log = logging.getLogger(__name__)
 
@@ -57,8 +58,25 @@ def main() -> int:
     def on_restart(icon, _item):
         _bg(service_ctl.restart, icon, "service restart")
 
-    def on_open_dashboard(_icon, _item):
-        threading.Thread(target=dashboard_app.open_window, daemon=True).start()
+    _dashboard_proc = {"p": None}
+
+    def on_open_dashboard(icon, _item):
+        p = _dashboard_proc["p"]
+        if p is not None and p.poll() is None:
+            return  # already running
+        try:
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--dashboard"]
+            else:
+                cmd = [sys.executable, "-m", "dashboard.app"]
+            flags = 0
+            if os.name == "nt":
+                flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+            _dashboard_proc["p"] = subprocess.Popen(
+                cmd, close_fds=True, creationflags=flags,
+            )
+        except Exception as e:
+            _notify(icon, "Halbot", f"dashboard spawn failed: {e}")
 
     def make_level_handler(level: str):
         def _h(icon, _item):
