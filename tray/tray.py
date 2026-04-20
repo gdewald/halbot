@@ -1,17 +1,16 @@
-"""pystray tray app: service control, log viewer, log-level toggle."""
+"""pystray tray app: service control, log-level toggle, dashboard."""
 
 from __future__ import annotations
 
 import logging
 import sys
 import threading
-from pathlib import Path
 
 from halbot import paths
 
 from . import service_ctl
-from .log_viewer import LogViewer
 from .mgmt_client import MgmtClient
+from dashboard import app as dashboard_app
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +38,6 @@ def main() -> int:
     from pystray import MenuItem as Item, Menu
 
     client = MgmtClient()
-    log_path = paths.log_file()
-    viewer = LogViewer(log_path)
 
     def _bg(target, icon, label: str):
         def _run():
@@ -60,8 +57,8 @@ def main() -> int:
     def on_restart(icon, _item):
         _bg(service_ctl.restart, icon, "service restart")
 
-    def on_open_log(_icon, _item):
-        threading.Thread(target=viewer.open, daemon=True).start()
+    def on_open_dashboard(_icon, _item):
+        threading.Thread(target=dashboard_app.open_window, daemon=True).start()
 
     def make_level_handler(level: str):
         def _h(icon, _item):
@@ -114,8 +111,8 @@ def main() -> int:
     )
 
     menu = Menu(
+        Item("Open dashboard", on_open_dashboard, default=True),
         Item("Service", service_menu),
-        Item("Open log viewer", on_open_log),
         Item("Log level", level_menu),
         Item("Reset overrides", on_reset),
         Menu.SEPARATOR,
