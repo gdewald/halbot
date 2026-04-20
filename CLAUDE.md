@@ -22,6 +22,9 @@ Phase 1 skeleton: daemon + tray + build/deploy. **No Discord / voice /
 LLM code in repo right now.** Original bot code wiped; features re-land
 phase-by-phase on top of new architecture.
 
+v0.7 (WIP) adds a pywebview dashboard launched from the tray —
+see docs/plans/007-gui-dashboard.md for the step-by-step plan.
+
 Single-user private-server toy. No harden for public/multi-tenant.
 
 ## Architecture (phase 1)
@@ -53,12 +56,20 @@ halbot/                 daemon package
   logging_setup.py      rotating file handler, runtime reconfigure()
   installer.py          NSSM + HKLM registry + ACL grants
   paths.py              data_dir(): %ProgramData%\Halbot (frozen) / ./_dev_data (source)
-tray/                   tray package (pystray + grpc client + tkinter log viewer)
+tray/                   tray package (pystray + grpc client)
 halbot_daemon_entry.py  PyInstaller entry shim (keeps package imports valid)
 halbot_tray_entry.py    ditto
 proto/mgmt.proto
 build_daemon.spec       PyInstaller onedir spec
 build_tray.spec
+frontend/               dashboard Vite/React app (step 3+)
+  src/                  tokens.js, panels/, components/, fonts/
+  dist/                 built output (gitignored)
+dashboard/              tray-side dashboard package (step 2+)
+  app.py                pywebview entry
+  bridge.py             js_api bridge
+  log_stream.py         StreamLogs consumer
+  paths.py              web_dir() resolver
 scripts/
   build.ps1             full build: stamp _build_info.py, gen_proto, uv sync, pyinstaller, zip
   gen_proto.ps1
@@ -101,6 +112,10 @@ analysis cache. Safe for pure Python edits. Pass `-Clean` when any of:
 - `proto/mgmt.proto` or anything touching `halbot/_gen/`
 - `pyproject.toml` / `uv.lock` dep bumps that move import graph
 - Python interpreter upgrade
+- `frontend/src` changes that require a fresh npm ci (rare — usually
+  an incremental `npm run build` is enough).
+- `dashboard/` spec/datas changes (same rule as any PyInstaller
+  datas edit: cache invalidation is unreliable).
 
 Symptom of skipping `-Clean` when you should have: daemon boots with
 `ModuleNotFoundError: No module named 'halbot.<x>'` despite the module

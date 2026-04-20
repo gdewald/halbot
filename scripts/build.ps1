@@ -134,6 +134,32 @@ try {
     }
 
     if ($buildTray) {
+        $frontendDir = Join-Path $root "frontend"
+        $hasFrontend = Test-Path (Join-Path $frontendDir "package.json")
+        $npm = Get-Command npm -ErrorAction SilentlyContinue
+        if ($hasFrontend -and $npm) {
+            Time-Stage "frontend install" {
+                Push-Location $frontendDir
+                try {
+                    if (-not (Test-Path "node_modules") -or $Clean) {
+                        npm ci
+                        if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+                    }
+                } finally { Pop-Location }
+            }
+            Time-Stage "frontend build" {
+                Push-Location $frontendDir
+                try {
+                    npm run build
+                    if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+                } finally { Pop-Location }
+            }
+        } elseif ($hasFrontend -and -not $npm) {
+            Write-Warning "frontend/ present but npm not on PATH; dashboard will be missing from the tray bundle."
+        }
+    }
+
+    if ($buildTray) {
         Time-Stage "uv sync tray" {
             uv sync --only-group tray --only-group build
         }
