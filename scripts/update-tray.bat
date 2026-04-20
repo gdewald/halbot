@@ -1,10 +1,19 @@
 @echo off
 REM Swap halbot tray onedir bundle from %~1 (extracted zip), relaunch.
-SETLOCAL
 IF "%~1"=="" (
     echo usage: update-tray.bat ^<new-tray-dir^>
     exit /b 2
 )
+
+REM Self-elevate if not already admin.
+net session >nul 2>&1
+if %errorLevel% NEQ 0 (
+    echo Elevating...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '\"%~1\"' -Verb RunAs"
+    exit /b
+)
+
+SETLOCAL
 SET NEW=%~1
 SET DEST=%ProgramFiles%\Halbot\tray
 
