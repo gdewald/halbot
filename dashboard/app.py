@@ -41,7 +41,7 @@ def open_window() -> None:
             width=1080, height=680,
             min_size=(720, 480),
             frameless=True,
-            easy_drag=False,
+            easy_drag=True,
             background_color="#0c0c0f",
         )
         api.bind_window(window)

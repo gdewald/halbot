@@ -13,7 +13,7 @@ export function SidebarWide({ active, onChange }) {
           width: 22, height: 22, borderRadius: 5,
           background: `linear-gradient(135deg,${T.blurple},${T.blurpleL})`,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 10, fontWeight: 700, color: '#fff',
+          fontSize: 10, fontWeight: 600, color: '#fff',
         }}>H</div>
         <span style={{ fontSize: 12, fontWeight: 600, color: T.text }}>halbot</span>
       </div>

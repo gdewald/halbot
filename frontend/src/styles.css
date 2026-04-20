@@ -13,31 +13,37 @@ input[type=checkbox]{accent-color:#5865F2}
 
 @font-face {
   font-family: 'DM Sans';
+  font-display: swap;
   src: url('./fonts/DMSans-Regular.woff2') format('woff2');
   font-weight: 400; font-style: normal;
 }
 @font-face {
   font-family: 'DM Sans';
+  font-display: swap;
   src: url('./fonts/DMSans-Medium.woff2') format('woff2');
   font-weight: 500; font-style: normal;
 }
 @font-face {
   font-family: 'DM Sans';
+  font-display: swap;
   src: url('./fonts/DMSans-SemiBold.woff2') format('woff2');
   font-weight: 600; font-style: normal;
 }
 @font-face {
   font-family: 'JetBrains Mono';
+  font-display: swap;
   src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
   font-weight: 400; font-style: normal;
 }
 @font-face {
   font-family: 'JetBrains Mono';
+  font-display: swap;
   src: url('./fonts/JetBrainsMono-Medium.woff2') format('woff2');
   font-weight: 500; font-style: normal;
 }
 @font-face {
   font-family: 'JetBrains Mono';
+  font-display: swap;
   src: url('./fonts/JetBrainsMono-SemiBold.woff2') format('woff2');
   font-weight: 600; font-style: normal;
 }

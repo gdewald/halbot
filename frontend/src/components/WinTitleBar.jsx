@@ -18,7 +18,7 @@ export function WinTitleBar({ title, subtitle }) {
         width: 16, height: 16, borderRadius: 4,
         background: `linear-gradient(135deg,${T.blurple},${T.blurpleL})`,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 9, fontWeight: 700, color: '#fff', marginRight: 8, flexShrink: 0,
+        fontSize: 9, fontWeight: 600, color: '#fff', marginRight: 8, flexShrink: 0,
       }}>H</div>
       <span style={{ fontSize: 12, fontWeight: 600, color: T.text, marginRight: 6 }}>{title}</span>
       {subtitle && <span style={{ fontSize: 10, color: T.dim, fontFamily: 'JetBrains Mono' }}>{subtitle}</span>}
