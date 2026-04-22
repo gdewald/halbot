@@ -4,10 +4,13 @@ import re
 import time
 
 from . import analytics
-from .db import _env_bool, db_get, db_list, voice_history_append, VOICE_HISTORY_TURNS
+from .db import (
+    _env_bool, db_get, db_list, trigger_list, trigger_mark_fired,
+    voice_history_append, VOICE_HISTORY_TURNS,
+)
 from .audio import detect_audio_format
 from .llm import (
-    check_wake_word, customize_response_async,
+    answer_voice_conversation_async, check_wake_word, customize_response_async,
     parse_voice_combined, parse_voice_intent,
 )
 
@@ -230,6 +233,73 @@ def snapshot_voice_state() -> None:
                  gid, session.vc.channel.id, sink_spec)
 
 
+async def _fire_voice_triggers(session, guild, user_id, transcript: str) -> None:
+    """Scan a voice transcript for keyword_voice triggers. Fires independently of wake word."""
+    try:
+        rows = trigger_list("keyword_voice")
+    except Exception:
+        log.exception("[trigger] list failed")
+        return
+    if not rows:
+        return
+    tl = (transcript or "").lower()
+    if not tl:
+        return
+    for r in rows:
+        mv = (r.get("match_value") or "").lower().strip()
+        if not mv or mv not in tl:
+            continue
+        at = r.get("action_type")
+        ap = r.get("action_payload") or ""
+        tid = r.get("id")
+        try:
+            analytics.record(
+                "hook_fired",
+                user_id=user_id,
+                guild_id=guild.id,
+                target=f"trigger:keyword_voice:{tid}",
+                reason=mv,
+            )
+            if at == "voice_play":
+                row = db_get(ap)
+                audio = None
+                fmt = None
+                if row:
+                    audio = row["audio"]
+                    fmt = detect_audio_format(audio)
+                else:
+                    try:
+                        sounds = list(await guild.fetch_soundboard_sounds())
+                    except Exception:
+                        sounds = []
+                    match = next((s for s in sounds if s.name == ap), None)
+                    if match:
+                        try:
+                            audio = await match.read()
+                            fmt = detect_audio_format(audio)
+                        except Exception:
+                            log.exception("[trigger #%s] live read failed", tid)
+                if audio:
+                    await session.play_sound(audio, fmt)
+                    analytics.record(
+                        "soundboard_play",
+                        user_id=user_id,
+                        guild_id=guild.id,
+                        target=ap,
+                        source="saved" if row else "live",
+                        trigger="trigger",
+                        bytes=len(audio),
+                    )
+            elif at == "reply":
+                await _voice_feedback(session, session.message_sink, ap)
+            else:
+                log.warning("[trigger #%s] unknown action_type %r", tid, at)
+                continue
+            trigger_mark_fired(tid)
+        except Exception:
+            log.exception("[trigger #%s] firing failed", tid)
+
+
 async def handle_voice_command(guild, user_id, transcript):
     """Callback from VoiceListener with a raw STT transcript.
 
@@ -239,6 +309,8 @@ async def handle_voice_command(guild, user_id, transcript):
     session = voice_listeners.get(guild.id)
     if not session:
         return
+    # Ambient reflexes: scan transcript for keyword_voice triggers regardless of wake.
+    await _fire_voice_triggers(session, guild, user_id, transcript)
     sink = session.message_sink
     history = list(session.history)
 
@@ -375,6 +447,37 @@ async def handle_voice_command(guild, user_id, transcript):
             )
             await _voice_feedback(session, sink, customized)
             _record(customized)
+
+        elif action == "conversation":
+            # Fast path didn't match a sound; user asked something
+            # conversational. Escalate to the FULL text-grade pipeline:
+            # same model, same SYSTEM_PROMPT, same persona stacking,
+            # full sound + emoji + voice-status context. Slow but
+            # thoughtful; output constrained to a single TTS-ready reply.
+            _convo_t0 = time.monotonic()
+            vc_name = None
+            try:
+                vc_name = session.vc.channel.name if session.vc and session.vc.channel else None
+            except Exception:
+                vc_name = None
+            reply = await answer_voice_conversation_async(
+                transcript,
+                sounds=sounds,
+                saved=saved,
+                history=history,
+                guild=guild,
+                voice_channel_name=vc_name,
+            )
+            analytics.record(
+                "llm_call",
+                user_id=user_id,
+                guild_id=guild.id,
+                target="voice_conversation",
+                latency_ms=int((time.monotonic() - _convo_t0) * 1000),
+                chars=len(reply or ""),
+            )
+            await _voice_feedback(session, sink, reply)
+            _record(reply)
 
         elif action == "unknown":
             msg = intent.get("message", "I didn't understand that voice command.")

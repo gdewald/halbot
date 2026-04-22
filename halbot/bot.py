@@ -18,12 +18,17 @@ from .audio import (
 from .db import (
     db_delete, db_get, db_get_by_id, db_init, db_list, db_save, db_update,
     emoji_db_list, emoji_db_get, emoji_db_prune, emoji_db_upsert,
+    fact_add, fact_clear, fact_list, fact_remove,
+    grudge_clear, grudge_list, grudge_remove, grudge_set,
     persona_add, persona_clear, persona_list, persona_remove, persona_update,
+    trigger_add, trigger_clear, trigger_list, trigger_mark_fired, trigger_remove,
     voice_history_load,
+    admin_hard_purge, admin_kinds, admin_list_deleted, admin_panic_clear,
+    admin_stats, admin_undelete, admin_undelete_all,
 )
 from .llm import (
-    CHANNEL_HISTORY_LIMIT, customize_response_async, describe_emoji_image, 
-    parse_intent,
+    CHANNEL_HISTORY_LIMIT, answer_stats_question_async, customize_response_async,
+    describe_emoji_image, format_events_for_prompt, parse_intent,
 )
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
@@ -174,6 +179,7 @@ def build_client() -> discord.Client:
     client.event(on_guild_emojis_update)
     client.event(on_message)
     client.event(on_voice_state_update)
+    client.event(on_voice_channel_effect)
     voice_listeners.clear()
     return client
 
@@ -218,6 +224,64 @@ async def on_guild_emojis_update(guild, before, after):
     await sync_emojis(guild)
 
 
+async def on_voice_channel_effect(effect: "discord.VoiceChannelEffect") -> None:
+    """Track native Discord UI soundboard plays (NOT bot-triggered).
+
+    Fires for every voice-channel effect the gateway dispatches to us,
+    regardless of whether the bot is connected to that channel. We
+    distinguish native UI plays from bot plays by checking the sender:
+    if it's the bot's own user, skip (bot plays are already recorded by
+    the soundboard_play/voice_play handlers in bot.py and voice_session.py).
+    """
+    try:
+        sound = getattr(effect, "sound", None)
+        if sound is None:
+            return  # emoji-only effect, not a soundboard play
+        user = getattr(effect, "user", None)
+        user_id = int(getattr(user, "id", 0) or 0)
+        # Skip bot's own plays — those are already tracked via voice_play / soundboard_play.
+        if client and client.user and user_id == client.user.id:
+            return
+        channel = getattr(effect, "channel", None)
+        guild = getattr(effect, "guild", None) or getattr(channel, "guild", None)
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        sound_id = int(getattr(sound, "id", 0) or 0)
+        # Resolve sound id → name via guild cache when available.
+        name = ""
+        if guild is not None and sound_id:
+            try:
+                for s in getattr(guild, "soundboard_sounds", []) or []:
+                    if getattr(s, "id", 0) == sound_id:
+                        name = getattr(s, "name", "") or ""
+                        break
+            except Exception:
+                pass
+            if not name:
+                try:
+                    getter = getattr(guild, "get_soundboard_sound", None)
+                    if callable(getter):
+                        s = getter(sound_id)
+                        if s is not None:
+                            name = getattr(s, "name", "") or ""
+                except Exception:
+                    pass
+        analytics.record(
+            "soundboard_play",
+            user_id=user_id,
+            guild_id=guild_id,
+            target=name or f"sound_{sound_id}",
+            source="discord_ui",
+            trigger="user",
+            sound_id=sound_id,
+            channel_id=int(getattr(channel, "id", 0) or 0),
+            volume=float(getattr(sound, "volume", 0.0) or 0.0),
+        )
+        log.info("[soundboard] native-UI play by user=%s sound=%r (id=%s) in guild=%s",
+                 user_id, name or "?", sound_id, guild_id)
+    except Exception:
+        log.exception("on_voice_channel_effect: record failed")
+
+
 async def on_voice_state_update(member, before, after):
     """React to voice state changes: clean up on bot kick, arm/disarm idle timer."""
     if client is None:
@@ -252,9 +316,286 @@ async def on_voice_state_update(member, before, after):
         schedule_voice_idle_timer(guild.id)
 
 
+ADMIN_PREFIX = "!halbot admin"
+ADMIN_HELP = (
+    "**Halbot admin (owner-only) commands** — recovery / panic.\n"
+    "Kinds: `sounds`, `personas`, `facts`, `triggers`, `grudges`.\n\n"
+    "```\n"
+    "!halbot admin status\n"
+    "    → counts of live + tombstoned rows per kind.\n"
+    "!halbot admin deleted <kind> [limit]\n"
+    "    → list soft-deleted rows, newest first (default limit 25).\n"
+    "!halbot admin undelete <kind> <id>\n"
+    "    → restore one soft-deleted row.\n"
+    "!halbot admin undelete-all <kind>\n"
+    "    → restore every soft-deleted row of that kind.\n"
+    "!halbot admin panic\n"
+    "    → soft-clear ALL personas, facts, triggers, grudges.\n"
+    "    (Sounds are NOT touched — too expensive to re-upload.)\n"
+    "!halbot admin panic all\n"
+    "    → same as above but ALSO soft-clears sounds.\n"
+    "!halbot admin purge <kind> [--older-than=DAYS]\n"
+    "    → PERMANENT delete of tombstoned rows. Irreversible.\n"
+    "!halbot admin help\n"
+    "```"
+)
+
+
+def _is_guild_owner(message: discord.Message) -> bool:
+    guild = message.guild
+    if not guild:
+        return False
+    return getattr(guild, "owner_id", None) == message.author.id
+
+
+async def _admin_send(message: discord.Message, text: str) -> None:
+    remaining = text
+    while len(remaining) > 1990:
+        split_at = remaining.rfind("\n", 0, 1990)
+        if split_at == -1:
+            split_at = 1990
+        await message.channel.send(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    if remaining:
+        await message.channel.send(remaining)
+
+
+async def _handle_admin_command(message: discord.Message) -> bool:
+    """Owner-only command backdoor. Returns True if the message was an admin
+    command (and therefore consumed — skip normal LLM flow).
+    """
+    content = (message.content or "").strip()
+    if not content.lower().startswith(ADMIN_PREFIX):
+        return False
+    if not _is_guild_owner(message):
+        await message.reply("⛔ Admin commands are owner-only.")
+        return True
+    argline = content[len(ADMIN_PREFIX):].strip()
+    if not argline or argline.lower() in ("help", "?"):
+        await _admin_send(message, ADMIN_HELP)
+        return True
+    parts = argline.split()
+    cmd = parts[0].lower()
+    rest = parts[1:]
+
+    def _kind_or_error(tok: str) -> str | None:
+        if tok in admin_kinds():
+            return tok
+        return None
+
+    try:
+        if cmd == "status":
+            stats = admin_stats()
+            lines = ["**Admin status** (live / tombstoned):"]
+            for k, v in stats.items():
+                lines.append(f"- **{k}**: {v['live']} live, {v['deleted']} recoverable")
+            await _admin_send(message, "\n".join(lines))
+            return True
+
+        if cmd == "deleted":
+            if not rest:
+                await message.reply(f"Usage: `!halbot admin deleted <kind> [limit]`. Kinds: {admin_kinds()}")
+                return True
+            kind = _kind_or_error(rest[0])
+            if not kind:
+                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
+                return True
+            limit = 25
+            if len(rest) > 1:
+                try:
+                    limit = max(1, min(200, int(rest[1])))
+                except ValueError:
+                    pass
+            rows = admin_list_deleted(kind, limit)
+            if not rows:
+                await message.reply(f"No tombstoned {kind}.")
+                return True
+            lines = [f"**Tombstoned {kind} ({len(rows)}, newest first):**"]
+            for r in rows:
+                # Build a terse summary per row, stripping binary/audio blobs.
+                summary = ", ".join(
+                    f"{k}={v}"
+                    for k, v in r.items()
+                    if k not in ("audio",) and v not in (None, "")
+                )
+                lines.append(f"- `#{r['id']}` {summary}")
+            await _admin_send(message, "\n".join(lines))
+            return True
+
+        if cmd == "undelete":
+            if len(rest) < 2:
+                await message.reply("Usage: `!halbot admin undelete <kind> <id>`")
+                return True
+            kind = _kind_or_error(rest[0])
+            if not kind:
+                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
+                return True
+            try:
+                row_id = int(rest[1])
+            except ValueError:
+                await message.reply("Row id must be an integer.")
+                return True
+            ok = admin_undelete(kind, row_id)
+            if ok:
+                log.info("[admin] %s restored %s #%s", message.author, kind, row_id)
+                await message.reply(f"✅ Restored `{kind}` #{row_id}.")
+            else:
+                await message.reply(f"No tombstoned `{kind}` #{row_id} found.")
+            return True
+
+        if cmd == "undelete-all":
+            if not rest:
+                await message.reply("Usage: `!halbot admin undelete-all <kind>`")
+                return True
+            kind = _kind_or_error(rest[0])
+            if not kind:
+                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
+                return True
+            n = admin_undelete_all(kind)
+            log.info("[admin] %s restored ALL %s (%s rows)", message.author, kind, n)
+            await message.reply(f"✅ Restored {n} `{kind}` row(s).")
+            return True
+
+        if cmd == "panic":
+            include_sounds = bool(rest) and rest[0].lower() == "all"
+            kinds = ["personas", "facts", "triggers", "grudges"]
+            if include_sounds:
+                kinds.append("sounds")
+            result = admin_panic_clear(kinds)
+            total = sum(result.values())
+            log.warning("[admin] %s invoked panic (include_sounds=%s): %s",
+                        message.author, include_sounds, result)
+            lines = ["🚨 **PANIC** — soft-cleared:"]
+            for k, n in result.items():
+                lines.append(f"- {k}: {n}")
+            lines.append(f"\n_All {total} row(s) recoverable via `!halbot admin undelete-all <kind>`._")
+            await _admin_send(message, "\n".join(lines))
+            return True
+
+        if cmd == "purge":
+            if not rest:
+                await message.reply("Usage: `!halbot admin purge <kind> [--older-than=DAYS]`")
+                return True
+            kind = _kind_or_error(rest[0])
+            if not kind:
+                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
+                return True
+            days = None
+            for tok in rest[1:]:
+                if tok.startswith("--older-than="):
+                    try:
+                        days = int(tok.split("=", 1)[1])
+                    except ValueError:
+                        await message.reply("--older-than=DAYS must be an integer.")
+                        return True
+            n = admin_hard_purge(kind, days)
+            log.warning("[admin] %s hard-purged %s (%s rows, older_than=%s)",
+                        message.author, kind, n, days)
+            scope = f" older than {days}d" if days is not None else ""
+            await message.reply(f"🗑️ Permanently purged {n} tombstoned `{kind}`{scope} row(s). Irreversible.")
+            return True
+
+        await message.reply(f"Unknown admin command `{cmd}`. Try `!halbot admin help`.")
+        return True
+    except ValueError as e:
+        await message.reply(f"⚠️ {e}")
+        return True
+    except Exception:
+        log.exception("[admin] command failed: %r", argline)
+        await message.reply("💥 Admin command errored — check logs.")
+        return True
+
+
+async def _fire_text_triggers(message: discord.Message) -> None:
+    """Scan an incoming text message for keyword_text triggers and fire any that match.
+
+    Fires independently of wake/mention gating — triggers are ambient reflexes.
+    """
+    try:
+        rows = trigger_list("keyword_text")
+    except Exception:
+        log.exception("[trigger] list failed")
+        return
+    if not rows:
+        return
+    text_lower = (message.content or "").lower()
+    if not text_lower:
+        return
+    guild = message.guild
+    for r in rows:
+        mv = (r.get("match_value") or "").lower().strip()
+        if not mv:
+            continue
+        if mv not in text_lower:
+            continue
+        at = r.get("action_type")
+        ap = r.get("action_payload") or ""
+        tid = r.get("id")
+        try:
+            analytics.record(
+                "hook_fired",
+                user_id=message.author.id,
+                guild_id=guild.id if guild else 0,
+                target=f"trigger:keyword_text:{tid}",
+                reason=mv,
+            )
+            if at == "reply":
+                await message.channel.send(ap[:2000])
+            elif at == "voice_play":
+                if not guild:
+                    continue
+                session = voice_listeners.get(guild.id)
+                if not session or not session.vc.is_connected():
+                    log.info("[trigger #%s] voice_play skipped — not connected", tid)
+                    continue
+                row = db_get(ap)
+                audio = None
+                fmt = None
+                if row:
+                    audio = row["audio"]
+                    fmt = detect_audio_format(audio)
+                else:
+                    try:
+                        sounds = list(await guild.fetch_soundboard_sounds())
+                    except Exception:
+                        sounds = []
+                    match = next((s for s in sounds if s.name == ap), None)
+                    if match:
+                        try:
+                            audio = await match.read()
+                            fmt = detect_audio_format(audio)
+                        except Exception:
+                            log.exception("[trigger #%s] live sound read failed", tid)
+                if audio:
+                    await session.play_sound(audio, fmt)
+                    analytics.record(
+                        "soundboard_play",
+                        user_id=message.author.id,
+                        guild_id=guild.id,
+                        target=ap,
+                        source="saved" if row else "live",
+                        trigger="trigger",
+                        bytes=len(audio),
+                    )
+                else:
+                    log.info("[trigger #%s] sound %r not found", tid, ap)
+            else:
+                log.warning("[trigger #%s] unknown action_type %r", tid, at)
+                continue
+            trigger_mark_fired(tid)
+        except Exception:
+            log.exception("[trigger #%s] firing failed", tid)
+
+
 async def on_message(message: discord.Message):
     log.info("Message received: %r from %s, mentions: %s", message.content, message.author, message.mentions)
     if message.author == client.user:
+        return
+    # Ambient reflexes: scan for keyword_text triggers regardless of whether
+    # the bot is mentioned. These run independently of the main LLM flow.
+    await _fire_text_triggers(message)
+    # Owner-only admin backdoor for recovery / panic (handled before LLM gate).
+    if await _handle_admin_command(message):
         return
     mentioned = client.user in message.mentions
     is_reply_to_bot = False
@@ -722,6 +1063,15 @@ async def on_message(message: discord.Message):
             else:
                 replies.append(f"Couldn't find directive #{pid}.")
 
+        elif action == "persona_clear":
+            confirm_msg = intent.get("message")
+            n = persona_clear()
+            log.info("Persona clear by %s: %s rows", message.author, n)
+            if confirm_msg:
+                replies.append(f"{confirm_msg}\n\n_Cleared {n} directive(s). Recoverable by the server owner via `!halbot admin undelete-all personas`._")
+            else:
+                replies.append(f"Cleared {n} directive(s). (Recoverable by the server owner.)")
+
         elif action == "persona_list":
             personas = persona_list()
             if not personas:
@@ -731,6 +1081,150 @@ async def on_message(message: discord.Message):
                 for p in personas:
                     lines.append(f"- [#{p['id']}] \"{p['directive']}\" (set by {p['set_by']} on {p['created_at']})")
                 replies.append(_reply(f"**Active behavior directives ({len(personas)}):**\n" + "\n".join(lines), intent))
+
+        elif action == "fact_add":
+            subject = intent.get("subject", "")
+            claim = intent.get("claim", "")
+            confirm_msg = intent.get("message", "Noted.")
+            try:
+                fid = fact_add(subject, claim, str(message.author))
+                log.info("Fact #%s added by %s: %s — %s", fid, message.author, subject, claim)
+                replies.append(confirm_msg)
+            except ValueError as e:
+                replies.append(str(e))
+
+        elif action == "fact_remove":
+            fid = intent.get("id")
+            confirm_msg = intent.get("message", "Forgotten.")
+            if fid is None:
+                replies.append("No fact id specified.")
+            elif fact_remove(int(fid)):
+                log.info("Fact #%s removed by %s", fid, message.author)
+                replies.append(confirm_msg)
+            else:
+                replies.append(f"Couldn't find fact #{fid}.")
+
+        elif action == "fact_list":
+            subject = intent.get("subject") or None
+            rows = fact_list(subject)
+            if not rows:
+                scope = f" about {subject}" if subject else ""
+                replies.append(f"No facts{scope} recorded.")
+            else:
+                lines = [f"- [#{r['id']}] **{r['subject']}**: {r['claim']} _(by {r['set_by']} on {r['created_at']})_"
+                         for r in rows]
+                header = f"**Facts{' about ' + subject if subject else ''} ({len(rows)}):**\n"
+                replies.append(_reply(header + "\n".join(lines), intent))
+
+        elif action == "fact_clear":
+            subject = intent.get("subject") or None
+            confirm_msg = intent.get("message")
+            n = fact_clear(subject)
+            log.info("Fact clear by %s (subject=%r): %s rows", message.author, subject, n)
+            if confirm_msg:
+                replies.append(f"{confirm_msg}\n\n_Cleared {n} fact(s)._")
+            else:
+                replies.append(f"Cleared {n} fact(s).")
+
+        elif action == "trigger_add":
+            mk = intent.get("match_kind", "")
+            mv = intent.get("match_value", "")
+            at = intent.get("action_type", "")
+            ap = intent.get("action_payload", "")
+            confirm_msg = intent.get("message", "Wired up.")
+            try:
+                tid = trigger_add(mk, mv, at, ap, str(message.author))
+                log.info("Trigger #%s added by %s: %s=%r → %s:%r",
+                         tid, message.author, mk, mv, at, ap)
+                replies.append(confirm_msg)
+            except ValueError as e:
+                replies.append(str(e))
+
+        elif action == "trigger_remove":
+            tid = intent.get("id")
+            confirm_msg = intent.get("message", "Unwired.")
+            if tid is None:
+                replies.append("No trigger id specified.")
+            elif trigger_remove(int(tid)):
+                log.info("Trigger #%s removed by %s", tid, message.author)
+                replies.append(confirm_msg)
+            else:
+                replies.append(f"Couldn't find trigger #{tid}.")
+
+        elif action == "trigger_list":
+            mk = intent.get("match_kind") or None
+            rows = trigger_list(mk)
+            if not rows:
+                scope = f" of kind `{mk}`" if mk else ""
+                replies.append(f"No triggers{scope} installed.")
+            else:
+                lines = []
+                for r in rows:
+                    last = r.get("last_fired_at") or "never"
+                    lines.append(
+                        f"- [#{r['id']}] `{r['match_kind']}`=\"{r['match_value']}\" → "
+                        f"**{r['action_type']}**: {r['action_payload']}  "
+                        f"_(by {r['set_by']}, fired {r.get('fire_count', 0)}×, last: {last})_"
+                    )
+                header = f"**Triggers ({len(rows)}):**\n"
+                replies.append(_reply(header + "\n".join(lines), intent))
+
+        elif action == "trigger_clear":
+            mk = intent.get("match_kind") or None
+            confirm_msg = intent.get("message")
+            n = trigger_clear(mk)
+            log.info("Trigger clear by %s (kind=%r): %s rows", message.author, mk, n)
+            if confirm_msg:
+                replies.append(f"{confirm_msg}\n\n_Cleared {n} trigger(s)._")
+            else:
+                replies.append(f"Cleared {n} trigger(s).")
+
+        elif action == "grudge_set":
+            tname = intent.get("target_name", "")
+            polarity = intent.get("polarity", 0)
+            note = intent.get("note", "") or ""
+            confirm_msg = intent.get("message", "Relationship logged.")
+            try:
+                gid = grudge_set(tname, polarity, note, str(message.author))
+                log.info("Grudge #%s %s=%s by %s (note=%r)",
+                         gid, tname, polarity, message.author, note)
+                replies.append(confirm_msg)
+            except ValueError as e:
+                replies.append(str(e))
+
+        elif action == "grudge_remove":
+            gid = intent.get("id")
+            confirm_msg = intent.get("message", "Cleared.")
+            if gid is None:
+                replies.append("No grudge id specified.")
+            elif grudge_remove(int(gid)):
+                log.info("Grudge #%s removed by %s", gid, message.author)
+                replies.append(confirm_msg)
+            else:
+                replies.append(f"Couldn't find grudge #{gid}.")
+
+        elif action == "grudge_list":
+            rows = grudge_list()
+            if not rows:
+                replies.append("No grudges or devotions logged. I love everyone equally.")
+            else:
+                lines = []
+                for r in rows:
+                    pol = r["polarity"]
+                    tag = f"+{pol}" if pol > 0 else str(pol)
+                    note = f" — _{r['note']}_" if r.get("note") else ""
+                    lines.append(f"- [#{r['id']}] **{r['target_name']}** ({tag}){note}  _(by {r['set_by']})_")
+                header = f"**Relationships ({len(rows)}):**\n"
+                replies.append(_reply(header + "\n".join(lines), intent))
+
+        elif action == "grudge_clear":
+            confirm_msg = intent.get("message")
+            n = grudge_clear()
+            log.info("Grudge clear by %s: %s rows", message.author, n)
+            if confirm_msg:
+                replies.append(f"{confirm_msg}\n\n_Cleared {n} relationship(s)._")
+            else:
+                replies.append(f"Cleared {n} relationship(s).")
 
         elif action == "emoji_list":
             names = intent.get("names", [])
@@ -873,6 +1367,70 @@ async def on_message(message: discord.Message):
 
             replies.append(f'Couldn\'t find a sound called "{name}".')
 
+        elif action == "stats":
+            try:
+                rollup = await asyncio.to_thread(analytics.compute_dashboard_stats)
+                events = await asyncio.to_thread(
+                    analytics.fetch_recent_events, 60, 3000, guild.id
+                )
+            except Exception:
+                log.exception("stats fetch failed")
+                replies.append(_reply("Couldn't pull stats right now.", intent))
+                continue
+            # Resolve user_ids → display names via the guild cache; fall back
+            # to fetch_member for active uids not in cache (bounded to 25 to
+            # avoid rate-limit).
+            uid_to_name: dict[int, str] = {}
+            seen_uids: list[int] = []
+            for e in events:
+                uid = e.get("user_id") or 0
+                if uid and uid not in uid_to_name:
+                    m = guild.get_member(uid)
+                    if m:
+                        uid_to_name[uid] = m.display_name
+                    else:
+                        seen_uids.append(uid)
+                        uid_to_name[uid] = f"user_{uid}"
+            # Best-effort: enrich up to 25 unknown active users via API.
+            missing = [u for u in seen_uids if uid_to_name.get(u, "").startswith("user_")][:25]
+            for uid in missing:
+                try:
+                    m = await guild.fetch_member(uid)
+                    if m:
+                        uid_to_name[uid] = m.display_name
+                except Exception:
+                    pass
+            events_block = format_events_for_prompt(events, uid_to_name)
+            rollup_block = _format_stats_for_discord(rollup)
+            now_unix = int(time.time())
+            try:
+                answer = await answer_stats_question_async(
+                    user_text,
+                    rollup_block=rollup_block,
+                    events_block=events_block,
+                    now_unix=now_unix,
+                )
+            except Exception:
+                log.exception("answer_stats_question failed")
+                answer = rollup_block
+            # Do NOT prepend intent["message"] — the stats answer is already
+            # persona-shaped inside answer_stats_question, and a second
+            # persona pass on top tends to leak refusals/haikus that
+            # crowd out the real numbers.
+            final = answer
+            # Force text delivery (bypass voice-TTS path of _deliver): stats
+            # output is markdown tables/lists, useless spoken aloud.
+            remaining = final
+            while len(remaining) > 2000:
+                split_at = remaining.rfind("\n", 0, 2000)
+                if split_at == -1:
+                    split_at = 2000
+                await message.channel.send(remaining[:split_at])
+                remaining = remaining[split_at:].lstrip("\n")
+            if remaining:
+                await message.channel.send(remaining)
+            continue
+
         elif action == "reply":
             msg = (intent.get("message") or "").strip()
             replies.append(msg or "...")
@@ -883,6 +1441,50 @@ async def on_message(message: discord.Message):
 
     if replies:
         await _deliver(message, "\n\n".join(replies))
+
+
+def _format_stats_for_discord(stats: dict) -> str:
+    """Format analytics.compute_dashboard_stats() output as Discord markdown."""
+    sb = stats.get("soundboard", {}) or {}
+    vp = stats.get("voice_playback", {}) or {}
+    ww = stats.get("wake_word", {}) or {}
+    tts = stats.get("tts", {}) or {}
+    stt = stats.get("stt", {}) or {}
+    llm = stats.get("llm", {}) or {}
+
+    storage_mb = (sb.get("storage_bytes", 0) or 0) / (1024 * 1024)
+
+    lines = ["**📊 Halbot stats**"]
+    lines.append(
+        f"**Soundboard:** {sb.get('sounds_backed_up', 0)} saved "
+        f"({storage_mb:.1f} MB), {sb.get('new_since_last', 0)} new in last 24h"
+    )
+    lines.append(
+        f"**Playback:** {vp.get('played_today', 0)} today · "
+        f"{vp.get('played_all_time', 0)} all-time"
+    )
+    lines.append(
+        f"**Wake word:** {ww.get('detections_today', 0)} today · "
+        f"{ww.get('detections_all_time', 0)} all-time"
+        + (f" ({ww.get('false_positives_today', 0)} false positives today)"
+           if ww.get('false_positives_today') else "")
+    )
+    lines.append(
+        f"**LLM:** {llm.get('requests_today', 0)} calls today · "
+        f"avg {llm.get('response_avg_ms', 0)} ms · p95 {llm.get('response_p95_ms', 0)} ms"
+    )
+    lines.append(
+        f"**TTS:** {tts.get('count_today', 0)} today · "
+        f"avg {tts.get('avg_ms', 0)} ms · p95 {tts.get('p95_ms', 0)} ms"
+    )
+    if stt.get("count_today") or stt.get("avg_ms"):
+        lines.append(
+            f"**STT:** {stt.get('count_today', 0)} today · "
+            f"avg {stt.get('avg_ms', 0)} ms · p95 {stt.get('p95_ms', 0)} ms"
+        )
+    if stats.get("mock"):
+        lines.append("_(analytics DB unavailable — values may be stale)_")
+    return "\n".join(lines)
 
 
 def _resolve_token() -> str | None:

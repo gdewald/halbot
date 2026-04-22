@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-from .db import emoji_db_list, persona_list
+from .db import emoji_db_list, fact_list, grudge_list, persona_list, trigger_list
 
 log = logging.getLogger("halbot")
 
@@ -14,6 +14,95 @@ from . import config as _config
 
 LMSTUDIO_URL = _config.get("llm_url")
 LMSTUDIO_MODEL = _config.get("llm_model") or "google/gemma-4-e2b"
+
+
+PERSONA_STACKING_GUIDE = (
+    "PERSONA STACKING: when MULTIPLE directives are listed, you MUST honor "
+    "ALL of them simultaneously in every response — do not pick one and "
+    "drop the others. Treat them as composable constraints and combine "
+    "creatively. E.g. 'speak like a pirate' + 'reply only in haiku' → "
+    "output a 5-7-5 haiku written in pirate voice. 'invent a fictional "
+    "language' + 'haiku only' → compose a haiku in the invented language. "
+    "If two directives seem to clash, find the most creative overlap that "
+    "satisfies both at once; never silently ignore one. Best-effort is "
+    "fine — a weird hybrid is better than obeying just one."
+)
+
+
+def _format_facts_block(empty: str = "(none)") -> str:
+    """Render canonical facts as a plain-text list for prompt injection."""
+    try:
+        rows = fact_list()
+    except Exception:
+        rows = []
+    if not rows:
+        return empty
+    lines = []
+    for r in rows:
+        lines.append(f"- [#{r['id']}] {r['subject']}: {r['claim']} (set by {r['set_by']})")
+    return "\n".join(lines)
+
+
+def _format_grudges_block(empty: str = "(none)") -> str:
+    try:
+        rows = grudge_list()
+    except Exception:
+        rows = []
+    if not rows:
+        return empty
+    lines = []
+    for r in rows:
+        pol = r["polarity"]
+        if pol > 0:
+            tag = f"devotion+{pol}"
+        elif pol < 0:
+            tag = f"grudge{pol}"
+        else:
+            tag = "neutral"
+        note = f" — {r['note']}" if r.get("note") else ""
+        lines.append(f"- [#{r['id']}] {r['target_name']} ({tag}){note} (set by {r['set_by']})")
+    return "\n".join(lines)
+
+
+def _format_triggers_block(empty: str = "(none)") -> str:
+    """Render installed triggers for prompt visibility (not auto-executed here)."""
+    try:
+        rows = trigger_list()
+    except Exception:
+        rows = []
+    if not rows:
+        return empty
+    lines = []
+    for r in rows:
+        lines.append(
+            f"- [#{r['id']}] on {r['match_kind']}=\"{r['match_value']}\" → "
+            f"{r['action_type']}:{r['action_payload']} (set by {r['set_by']}, "
+            f"fired {r.get('fire_count', 0)}x)"
+        )
+    return "\n".join(lines)
+
+
+def _format_persona_block(header: str = "ACTIVE BEHAVIOR DIRECTIVES",
+                          *, include_stacking: bool = True,
+                          empty: str = "") -> str:
+    """Render the current persona list for prompt injection.
+
+    Returns empty string when no directives are set (unless `empty` given).
+    Always includes PERSONA_STACKING_GUIDE when ≥2 directives are active
+    (the instruction is harmless with 1, so we include it uniformly to
+    encourage future stacking).
+    """
+    try:
+        personas = persona_list()
+    except Exception:
+        personas = []
+    if not personas:
+        return empty
+    lines = [f"{header}:"] + [f"- {p['directive']}" for p in personas]
+    if include_stacking:
+        lines.append("")
+        lines.append(PERSONA_STACKING_GUIDE)
+    return "\n".join(lines)
 
 # Reasoning models can take >30s for a single response. Keep both read
 # timeouts generous so a slow generation doesn't surface as "I didn't
@@ -58,12 +147,17 @@ LIVE SOUNDBOARD:
 
 {persona_directives_block}
 
-Return JSON:
-- To play a sound: {{"action": "voice_play", "name": "<exact sound name>"}}
-- If no match or the request is unclear: {{"action": "unknown", "message": "<brief response>"}}
+Return JSON — one of:
+- Sound request with a match: {{"action": "voice_play", "name": "<exact sound name>"}}
+- Conversational / question / chitchat (e.g. "are you ok", "how's it \
+going", "tell me a joke"): {{"action": "conversation"}} (a second \
+smarter LLM pass will generate the spoken reply — do NOT write it here).
+- Sound request with NO match on the lists above, OR unclear request: \
+{{"action": "unknown", "message": "<brief response>"}}
 
 Match creatively — "something scary" → pick a scary-sounding name, \
-"play airhorn" → exact match. Names must be EXACT from the lists above.
+"play airhorn" → exact match. Names must be EXACT from the lists above. \
+Prefer voice_play whenever a reasonable match exists (speed matters).
 
 Reply with ONLY the JSON. No explanation.\
 """
@@ -121,9 +215,8 @@ SINGLE response, do two things:
    This decision is PURELY about whether the wake word was spoken — do
    NOT consider whether the command is actionable. If the wake word is
    present, wake=true even if you cannot pick a sound.
-2. If wake=true, pick the best sound to play for the command that
-   follows the wake word. If no sound fits or there is no command after
-   the wake word, return actions=[] (still with wake=true).
+2. If wake=true, decide what the user wants. Pick ONE of these routes
+   using the rules below.
 3. If wake=false, actions MUST be [].
 
 SAVED LIBRARY:
@@ -139,10 +232,49 @@ Reply with ONLY this JSON, no prose, no markdown:
 
 Each action is one of:
   {"action": "voice_play", "name": "<exact sound name>"}
+  {"action": "conversation"}
   {"action": "unknown", "message": "<brief response>"}
 
-Match creatively — "something scary" → pick a scary-sounding name,
-"play airhorn" → exact match.  Names must be EXACT from the lists above.
+ROUTING RULES (in order — first match wins):
+
+(a) SOUND REQUEST WITH MATCH → {"action": "voice_play", "name": "<exact>"}
+    The user asked for a sound AND a sound on the lists above clearly
+    fits. Triggers: "play X", "drop X", "hit X", "gimme X", "do Y",
+    "something [adjective]" where the adjective maps to a sound. Match
+    creatively — "something scary" → pick a scary-sounding name, "play
+    airhorn" → exact match. Names must be EXACT from the lists above.
+    This path is FAST — prefer it whenever a reasonable match exists.
+
+(b) STATS / ANALYTICS QUESTION → one {"action": "unknown", "message": "..."}
+    User asking for stats, analytics, numbers, counts, usage data,
+    metrics, or "how many times" questions. Stats are TEXT-ONLY. Emit
+    an "unknown" action with ONE short in-persona sentence inventing a
+    fun reason why you can't recite numbers out loud (follow ACTIVE
+    BEHAVIOR DIRECTIVES) and telling them to ask in text. Examples
+    without directives: "Reading numbers aloud makes my circuits itch
+    — ping me in text and I'll spill everything." With pirate
+    directive: "Arr, a pirate don't shout ledger totals across th'
+    deck — scribble it in text, matey!"
+
+(c) CONVERSATIONAL / QUESTION / CHITCHAT → {"action": "conversation"}
+    The user asked a question, said hello, made small talk, asked your
+    opinion, vented, or otherwise wants a thoughtful reply rather than
+    a sound. Examples: "are you ok my dude", "what's your favorite
+    sound", "how's it going", "tell me a joke", "do you dream",
+    "explain X", "who made you". DO NOT write the reply yourself —
+    just emit {"action": "conversation"}. A second (slower, smarter)
+    LLM pass will generate the actual spoken reply with full persona
+    context. Use this whenever (a) clearly doesn't fit AND the
+    utterance is a real question or remark worth engaging with.
+
+(d) UNCLEAR SOUND REQUEST → {"action": "unknown", "message": "<brief>"}
+    The user clearly wanted a sound but nothing on the lists fits
+    (e.g. "play big yoshi" and big yoshi doesn't exist). Brief
+    response saying the sound isn't available.
+
+Prefer (a) whenever a match exists — speed matters. Prefer (c) over (d)
+when the utterance reads as conversation rather than a failed sound
+lookup.
 """
 
 
@@ -281,7 +413,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     personas = persona_list()
     if personas:
         persona_lines = [f"- [id:{p['id']}] {p['directive']} (set by {p['set_by']})" for p in personas]
-        persona_str = "\n".join(persona_lines)
+        persona_str = "\n".join(persona_lines) + "\n\n" + PERSONA_STACKING_GUIDE
     else:
         persona_str = "(none — use your default personality)"
 
@@ -306,6 +438,9 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             saved_details=format_saved_details(saved),
             custom_emojis=emojis_str,
             persona_directives=persona_str,
+            facts_block=_format_facts_block(),
+            grudges_block=_format_grudges_block(),
+            triggers_block=_format_triggers_block(),
             today=date.today().isoformat(),
             attachments=attachments_str,
             voice_channels=voice_channels_str,
@@ -382,13 +517,9 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
     """
     if not raw_text:
         return raw_text
-    personas = persona_list()
-    if personas:
-        pd_block = "\nACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(
-            f"- {p['directive']}" for p in personas
-        )
-    else:
-        pd_block = ""
+    pd_block = _format_persona_block()
+    if pd_block:
+        pd_block = "\n" + pd_block
     system = RESPONSE_CUSTOMIZATION_PROMPT.format(persona_directives_block=pd_block)
     user_msg = f"Original: {raw_text}"
     if context:
@@ -437,6 +568,328 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
 async def customize_response_async(raw_text: str, *, context: str = "") -> str:
     """Async wrapper: runs customize_response in a worker thread."""
     return await asyncio.to_thread(customize_response, raw_text, context=context)
+
+
+STATS_QUESTION_PROMPT = """\
+You are Halbot answering a user's question about your own usage,
+analytics, or historical activity in a Discord text channel. You have
+access to the raw event log (recent events) plus a rollup of totals
+below. Answer the user's question naturally and specifically — cite
+numbers, user names, sound names, and dates where relevant. Use Discord
+markdown (**bold**, bullet lists, headers) for readability.
+
+CURRENT TIME (UTC): {now_iso}   (unix={now_unix})
+Interpret relative dates ("today", "yesterday", "last wednesday",
+"this week") relative to this moment in UTC. A "day" is a UTC calendar
+day unless the user specifies otherwise.
+{persona_directives_block}
+
+KIND GLOSSARY:
+- mention: user @-mentioned the bot in text. target = "mention" or "reply".
+- cmd_invoke: bot parsed and dispatched an action. target = action name
+  (list, save, remove, stats, voice_join, voice_play, persona_set, etc.).
+- soundboard_play: a sound was played in voice. target = sound name.
+  meta may include {{source: live|saved, bytes: N}}.
+- voice_join / voice_leave: bot joined/left a voice channel. target = channel id or name.
+- llm_call: LLM request. target labels the call site (parse_intent, parse_voice_command, etc.).
+  meta.latency_ms, meta.status.
+- tts_request: TTS synthesis. meta.latency_ms, meta.chars, meta.voice.
+- wake_word_detected: wake word heard in voice.
+
+DASHBOARD ROLLUP (pre-computed totals):
+{rollup_block}
+
+RECENT EVENTS (most recent first; format: `ts_iso | kind | user | target | meta`):
+{events_block}
+
+RULES:
+- Answer in 1 concise message; under ~350 words unless user explicitly
+  asked for a full dump.
+- Do NOT invent numbers. If the data does not answer the question,
+  say so and suggest what IS available.
+- If the user asks a "top N" / "most" / "who" style question, COUNT the
+  relevant events and give the actual ranking with numbers.
+- If the question is time-scoped (e.g. "last wednesday"), filter events
+  to that UTC date range before counting.
+- If the result list is long, show top 10 and say "…and N more".
+- Refer to users by their display name as shown in the event log.
+- Reply with the answer text only — no JSON, no code fences around the
+  whole reply.
+"""
+
+
+def _iso_utc(ts_unix: int) -> str:
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(int(ts_unix), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    except Exception:
+        return str(ts_unix)
+
+
+def _compact_meta(meta: dict) -> str:
+    if not isinstance(meta, dict) or not meta:
+        return ""
+    # Keep only the informative fields; drop verbose ones.
+    keep = {}
+    for k in ("source", "latency_ms", "status", "bytes", "chars", "voice",
+              "action_count", "channel", "channel_id", "duration_ms",
+              "tokens_in", "tokens_out", "reason"):
+        if k in meta and meta[k] is not None:
+            keep[k] = meta[k]
+    if not keep:
+        # Fall back to the first 2 keys for novel event shapes.
+        items = list(meta.items())[:2]
+        keep = dict(items)
+    return ",".join(f"{k}={v}" for k, v in keep.items())
+
+
+def format_events_for_prompt(events: list[dict],
+                             uid_to_name: dict[int, str]) -> str:
+    """Render event rows for STATS_QUESTION_PROMPT. Compact, one line each."""
+    if not events:
+        return "(no events in window)"
+    lines = []
+    for e in events:
+        uid = e.get("user_id") or 0
+        user = uid_to_name.get(uid) if uid else ""
+        if not user:
+            user = f"user_{uid}" if uid else "-"
+        meta_str = _compact_meta(e.get("meta") or {})
+        lines.append(
+            f"{_iso_utc(e['ts'])} | {e['kind']} | {user} | "
+            f"{e.get('target', '')} | {meta_str}"
+        )
+    return "\n".join(lines)
+
+
+def answer_stats_question(question: str, *, rollup_block: str,
+                          events_block: str, now_unix: int) -> str:
+    """Free-form LLM answer to a user's stats question. Persona-aware."""
+    pd_block = _format_persona_block(
+        header="ACTIVE BEHAVIOR DIRECTIVES (shape tone + phrasing of your answer)"
+    )
+    if pd_block:
+        pd_block = "\n" + pd_block
+    system = STATS_QUESTION_PROMPT.format(
+        now_iso=_iso_utc(now_unix),
+        now_unix=now_unix,
+        persona_directives_block=pd_block,
+        rollup_block=rollup_block or "(unavailable)",
+        events_block=events_block or "(no events)",
+    )
+    user_msg = (question or "").strip() or "Give me a summary of recent bot activity."
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 900,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+    try:
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+        if resp.status_code >= 400:
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+        resp.raise_for_status()
+        message = resp.json()["choices"][0].get("message", {})
+        content = (message.get("content") or "").strip()
+        if "<think>" in content and "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        elif "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        if not content:
+            reasoning = (message.get("reasoning_content") or "").strip()
+            if reasoning:
+                content = reasoning
+        if not content:
+            # Last-resort: hand the user the raw rollup so they get SOMETHING
+            # instead of a stub. The rollup is already persona-neutral and
+            # legible.
+            log.warning("[stats-qa] empty LLM output; returning rollup fallback")
+            return "Couldn't compose a narrative answer, so here's the raw rollup:\n\n" + (rollup_block or "(no data)")
+        log.info("[stats-qa] q=%r → %d chars", user_msg[:80], len(content))
+        return content
+    except requests.ConnectionError:
+        log.error("Stats QA: could not connect to LM Studio at %s", LMSTUDIO_URL)
+        return "Couldn't reach LM Studio to analyze stats — is it running?"
+    except Exception as e:
+        log.warning("[stats-qa] failed: %s", e)
+        return f"Stats analysis failed ({type(e).__name__})."
+
+
+async def answer_stats_question_async(question: str, *, rollup_block: str,
+                                      events_block: str, now_unix: int) -> str:
+    return await asyncio.to_thread(
+        answer_stats_question,
+        question,
+        rollup_block=rollup_block,
+        events_block=events_block,
+        now_unix=now_unix,
+    )
+
+
+VOICE_CONVERSATION_CODA = """\
+
+VOICE-CHAT OUTPUT OVERRIDE — the speaker is in a voice channel and your
+reply will be TTS'd and played aloud. Regardless of any other action
+you'd normally emit, respond with EXACTLY ONE JSON object:
+
+  {"action": "reply", "message": "<your spoken reply>"}
+
+Message rules (these are TTS'd — follow them strictly):
+- 1 to 2 sentences. Hard cap 60 words.
+- Plain spoken English only — no markdown, no asterisks, no bullet
+  lists, no code blocks, no URLs, no emoji, no stage directions in
+  brackets, no JSON inside the message.
+- Speak directly to the user. Do not repeat their question verbatim.
+- Respect ALL ACTIVE BEHAVIOR DIRECTIVES and PERSONA STACKING rules
+  above — they apply to the message text.
+- If you don't know something, say so briefly rather than inventing.
+- Do NOT say "as an AI" or similar disclaimers.
+
+Reply with ONLY the JSON object, no prose, no markdown fences.
+"""
+
+
+def answer_voice_conversation(
+    command: str,
+    sounds=None,
+    saved: list[dict] | None = None,
+    history: list[dict] | None = None,
+    guild=None,
+    voice_channel_name: str | None = None,
+) -> str:
+    """Generate a conversational spoken reply using the SAME model and prompt
+    pipeline as text. Slow but full-context: personas stack, emoji list +
+    sound list present, voice status injected. Returns plain-text TTS-ready.
+    """
+    from datetime import date
+
+    emoji_records = emoji_db_list()
+    if emoji_records:
+        emoji_lines = []
+        for e in emoji_records:
+            prefix = "a" if e["animated"] else ""
+            desc = f" — {e['description']}" if e.get("description") else ""
+            emoji_lines.append(f"- {e['name']} → <{prefix}:{e['name']}:{e['emoji_id']}>{desc}")
+        emojis_str = "\n".join(emoji_lines)
+    else:
+        emojis_str = "(none)"
+
+    personas = persona_list()
+    if personas:
+        persona_lines = [f"- [id:{p['id']}] {p['directive']} (set by {p['set_by']})" for p in personas]
+        persona_str = "\n".join(persona_lines) + "\n\n" + PERSONA_STACKING_GUIDE
+    else:
+        persona_str = "(none — use your default personality)"
+
+    vc_name = voice_channel_name or "a voice channel"
+    voice_status_str = (
+        f"Currently connected to voice channel '{vc_name}' and actively "
+        f"listening. The speaker is IN that voice channel right now. "
+        f"Your reply WILL be spoken aloud via TTS."
+    )
+    voice_channels_str = f"- {vc_name} (currently joined)"
+
+    system_base = SYSTEM_PROMPT.format(
+        sound_details=format_sound_details(sounds or []),
+        saved_details=format_saved_details(saved or []),
+        custom_emojis=emojis_str,
+        persona_directives=persona_str,
+        facts_block=_format_facts_block(),
+        grudges_block=_format_grudges_block(),
+        triggers_block=_format_triggers_block(),
+        today=date.today().isoformat(),
+        attachments="No attachments on this message.",
+        voice_channels=voice_channels_str,
+        voice_status=voice_status_str,
+    )
+    system = system_base + VOICE_CONVERSATION_CODA
+
+    chat_history = _voice_history_messages(history)
+
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            *chat_history,
+            {"role": "user", "content": command or ""},
+        ],
+        "temperature": 0.8,
+        "max_tokens": 1024,
+    }
+    if LMSTUDIO_MODEL:
+        body["model"] = LMSTUDIO_MODEL
+
+    try:
+        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+        if resp.status_code >= 400:
+            log.warning("[voice-convo] %s: %s", resp.status_code, resp.text[:300])
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LMSTUDIO_MODEL):
+                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+        resp.raise_for_status()
+        message = resp.json()["choices"][0].get("message", {})
+        content = (message.get("content") or "").strip()
+        if "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        if not content:
+            reasoning = (message.get("reasoning_content") or "").strip()
+            if reasoning:
+                start = reasoning.find("{")
+                end = reasoning.rfind("}")
+                if start != -1 and end > start:
+                    content = reasoning[start:end + 1]
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        reply_text = ""
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list) and parsed:
+                parsed = parsed[0]
+            if isinstance(parsed, dict):
+                reply_text = str(parsed.get("message") or parsed.get("reply") or "").strip()
+        except json.JSONDecodeError:
+            # Model ignored JSON wrapper — take raw content as spoken reply.
+            log.info("[voice-convo] non-JSON response, using raw content")
+            reply_text = content
+        # Strip surrounding quotes
+        if len(reply_text) >= 2 and reply_text[0] == reply_text[-1] in ('"', "'"):
+            reply_text = reply_text[1:-1].strip()
+        # Defensive markdown strip
+        reply_text = reply_text.replace("**", "").replace("__", "").replace("`", "")
+        if not reply_text:
+            return "Hmm, I blanked on that one — try me again?"
+        log.info("[voice-convo] → %r", reply_text[:140])
+        return reply_text
+    except requests.ConnectionError:
+        log.error("[voice-convo] could not connect to LM Studio at %s", LMSTUDIO_URL)
+        return "My brain's offline — LM Studio isn't answering."
+    except Exception as e:
+        log.warning("[voice-convo] failed: %s", e)
+        return "Sorry, I glitched on that — ask me again?"
+
+
+async def answer_voice_conversation_async(
+    command: str,
+    sounds=None,
+    saved: list[dict] | None = None,
+    history: list[dict] | None = None,
+    guild=None,
+    voice_channel_name: str | None = None,
+) -> str:
+    return await asyncio.to_thread(
+        answer_voice_conversation, command, sounds, saved, history, guild, voice_channel_name,
+    )
 
 
 def check_wake_word(transcript: str) -> tuple[bool, str]:
@@ -497,12 +950,7 @@ def parse_voice_combined(
 
     Returns (status, actions) where status is "wake", "no_wake", or "error".
     """
-    personas = persona_list()
-    if personas:
-        persona_lines = [f"- {p['directive']}" for p in personas]
-        pd_block = "ACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(persona_lines)
-    else:
-        pd_block = ""
+    pd_block = _format_persona_block()
     system = (
         VOICE_COMBINED_PROMPT
         .replace("<<SAVED_DETAILS>>", format_saved_details(saved))
@@ -572,12 +1020,7 @@ def parse_voice_combined(
 def parse_voice_intent(transcript: str, sounds, saved: list[dict],
                        history: list[dict] | None = None) -> list[dict]:
     """Lightweight LLM call to pick a sound from a voice command transcript."""
-    personas = persona_list()
-    if personas:
-        persona_lines = [f"- {p['directive']}" for p in personas]
-        pd_block = "ACTIVE BEHAVIOR DIRECTIVES:\n" + "\n".join(persona_lines)
-    else:
-        pd_block = ""
+    pd_block = _format_persona_block()
 
     system = VOICE_COMMAND_PROMPT.format(
         sound_details=format_sound_details(sounds),

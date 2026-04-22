@@ -280,6 +280,57 @@ def query_stats(
         conn.close()
 
 
+# ── Free-form stats Q&A fetch ──────────────────────────────
+def fetch_recent_events(days: int = 60, limit: int = 3000,
+                        guild_id: int = 0) -> List[Dict[str, Any]]:
+    """Pull recent events for LLM-driven stats Q&A. Most-recent-first.
+
+    Returns list of dicts: ts, kind, guild_id, user_id, target, meta (parsed dict).
+    """
+    now = int(time.time())
+    cutoff = now - max(1, int(days)) * 86400
+    clauses = ["ts_unix >= ?"]
+    params: List[Any] = [cutoff]
+    if guild_id:
+        clauses.append("guild_id = ?")
+        params.append(int(guild_id))
+    where = " AND ".join(clauses)
+    try:
+        conn = _open_db()
+    except Exception:
+        return []
+    try:
+        cur = conn.execute(
+            f"SELECT ts_unix, kind, guild_id, user_id, target, meta_json "
+            f"FROM events WHERE {where} ORDER BY ts_unix DESC LIMIT ?",
+            params + [int(limit)],
+        )
+        out: List[Dict[str, Any]] = []
+        for ts, kind, gid, uid, target, meta_raw in cur.fetchall():
+            meta: Dict[str, Any] = {}
+            if meta_raw:
+                try:
+                    parsed = json.loads(meta_raw)
+                    if isinstance(parsed, dict):
+                        meta = parsed
+                except Exception:
+                    pass
+            out.append({
+                "ts": int(ts),
+                "kind": str(kind or ""),
+                "guild_id": int(gid or 0),
+                "user_id": int(uid or 0),
+                "target": str(target or ""),
+                "meta": meta,
+            })
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # ── Retention ──────────────────────────────────────────────
 def prune_older_than(retention_days: int) -> int:
     cutoff = int(time.time()) - max(1, int(retention_days)) * 86400
