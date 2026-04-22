@@ -84,10 +84,14 @@ dashboard/              tray-side dashboard package (step 2+)
   log_stream.py         StreamLogs consumer
   paths.py              web_dir() resolver
 scripts/
+  deploy.ps1            one-shot smart build+deploy: fingerprint stale targets,
+                        build only what changed, swap both atomically,
+                        self-elevate + stream log back
+  deploy.bat            thin wrapper around deploy.ps1
   build.ps1             full build: stamp _build_info.py, gen_proto, uv sync, pyinstaller, zip
   gen_proto.ps1
-  update-daemon.bat     swap ProgramFiles\Halbot\daemon + restart service
-  update-tray.bat       swap ProgramFiles\Halbot\tray + relaunch
+  update-daemon.bat     (legacy) swap ProgramFiles\Halbot\daemon + restart service
+  update-tray.bat       (legacy) swap ProgramFiles\Halbot\tray + relaunch
 infra/                  Terraform (unchanged, legacy GCP VM config — not used this phase)
 docs/plans/             design (002) + impl (003) plans
 ```
@@ -164,17 +168,40 @@ Launch tray (non-elevated, one-time — no autostart yet):
 
 ## Deploy — operational (update existing install)
 
-After rebuild, swap binaries without touching config/secrets/data:
+**One command, idiot-proof:**
 
 ```powershell
-# From elevated shell. Stops service, swaps bundle, restarts.
-Expand-Archive -Force -Path "<repo>\dist\halbot-daemon.zip" -DestinationPath "$env:TEMP\halbot-daemon-new"
-scripts\update-daemon.bat "$env:TEMP\halbot-daemon-new"
-
-# Tray (elevated — writes to Program Files). Kills running tray, swaps, relaunches.
-Expand-Archive -Force -Path "<repo>\dist\halbot-tray.zip" -DestinationPath "$env:TEMP\halbot-tray-new"
-scripts\update-tray.bat "$env:TEMP\halbot-tray-new"
+scripts\deploy.ps1             # build whatever changed, swap both bundles
+scripts\deploy.ps1 -Daemon     # only touch daemon
+scripts\deploy.ps1 -Tray       # only touch tray
+scripts\deploy.ps1 -DryRun     # show plan, don't run
+scripts\deploy.ps1 -Force      # rebuild + redeploy regardless of stamp
+scripts\deploy.ps1 -NoBuild    # skip build (deploy whatever is in dist\)
+scripts\deploy.ps1 -BuildOnly  # build, skip swap
 ```
+
+What it does:
+
+- Fingerprints `halbot/ proto/ build_daemon.spec halbot_daemon_entry.py
+  pyproject.toml uv.lock` for the daemon, and `tray/ dashboard/ frontend/src
+  build_tray.spec halbot_tray_entry.py pyproject.toml uv.lock` for the tray.
+  Fingerprint = SHA256 of (relpath | size | mtime) per file.
+- Stamps the last-successful build + deploy hashes in
+  `dist\.deploy-stamp.json`. Skips rebuild / redeploy of a target whose
+  fingerprint matches its stamp.
+- Refuses to deploy if a target's dist\ output is missing or its source
+  fingerprint drifted from the last build stamp (catches "edited a file
+  between build and deploy" and "build silently failed for one target").
+- Self-elevates via UAC once. The elevated child streams its log back to
+  the calling window (same output you'd see running it inline) — no more
+  blind flash-and-disappear prompt.
+- Stops service → robocopy /MIR daemon → robocopy /MIR tray → starts
+  service → relaunches tray. Service restart only happens if daemon
+  actually changed.
+
+Legacy single-target scripts (`scripts\update-daemon.bat`,
+`scripts\update-tray.bat`) are still there for manual use but
+`deploy.ps1` is the preferred path.
 
 Service start/stop/restart day-to-day: use tray menu (user has been granted
 control ACL at install time).
