@@ -23,18 +23,6 @@ def _version() -> str:
         return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z") + " (source)"
 
 
-async def _tick_info() -> None:
-    while True:
-        log.info("tick")
-        await asyncio.sleep(5)
-
-
-async def _tick_debug() -> None:
-    while True:
-        log.debug("tick")
-        await asyncio.sleep(1)
-
-
 async def _run_bot(bot_module) -> None:
     try:
         await bot_module.run()
@@ -76,8 +64,6 @@ async def _run_async() -> int:
     from . import bot as bot_module
 
     tasks = [
-        asyncio.create_task(_tick_info(), name="tick-info"),
-        asyncio.create_task(_tick_debug(), name="tick-debug"),
         asyncio.create_task(_run_bot(bot_module), name="discord-bot"),
         asyncio.create_task(analytics.prune_loop(), name="analytics-prune"),
     ]
