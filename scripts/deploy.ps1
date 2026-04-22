@@ -231,10 +231,11 @@ if ($buildDaemon -or $buildTray) {
         if     ($buildDaemon -and $buildTray) { "all" }
         elseif ($buildDaemon)                 { "daemon" }
         else                                  { "tray" }
-    # NB: do not name this $args — that collides with PS's automatic $args
-    # and makes @args splat the script's own unbound args instead.
-    $buildArgs = @("-Target", $buildTarget)
-    if ($Clean) { $buildArgs += "-Clean" }
+    # Hashtable splat (not array) — array splat treats "-Target" as a
+    # positional value, which hits build.ps1's ValidateSet on $Target and
+    # errors with "-Target does not belong to the set all,daemon,tray".
+    $buildArgs = @{ Target = $buildTarget }
+    if ($Clean) { $buildArgs.Clean = $true }
     Write-Host "[deploy] building ($buildTarget)..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot "build.ps1") @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
