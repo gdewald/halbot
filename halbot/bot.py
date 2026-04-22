@@ -4,11 +4,13 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 import discord
 import requests
 
+from . import analytics
 from .audio import (
     ALLOWED_CONTENT_TYPES, ALLOWED_EXTENSIONS, SUPPORTED_EFFECTS,
     apply_effects_chain, detect_audio_format, validate_audio,
@@ -269,6 +271,13 @@ async def on_message(message: discord.Message):
     if not mentioned and not is_reply_to_bot:
         return
 
+    analytics.record(
+        "mention",
+        user_id=message.author.id,
+        guild_id=message.guild.id if message.guild else 0,
+        target="reply" if is_reply_to_bot else "mention",
+    )
+
     user_text = message.content
     for mention_str in [f"<@{client.user.id}>", f"<@!{client.user.id}>"]:
         user_text = user_text.replace(mention_str, "")
@@ -354,6 +363,7 @@ async def on_message(message: discord.Message):
         voice_channels_str = "(unknown)"
         voice_status_str = "Not connected to any voice channel."
 
+    _llm_t0 = time.monotonic()
     actions = await asyncio.to_thread(
         parse_intent,
         user_text, sounds, saved, channel_history,
@@ -361,6 +371,14 @@ async def on_message(message: discord.Message):
         guild=guild,
         voice_channels_str=voice_channels_str,
         voice_status_str=voice_status_str,
+    )
+    analytics.record(
+        "llm_call",
+        user_id=message.author.id,
+        guild_id=guild.id,
+        target="parse_intent",
+        latency_ms=int((time.monotonic() - _llm_t0) * 1000),
+        action_count=len(actions) if isinstance(actions, list) else 0,
     )
     replies = []
 
@@ -372,6 +390,12 @@ async def on_message(message: discord.Message):
 
     for intent in actions:
         action = intent.get("action")
+        analytics.record(
+            "cmd_invoke",
+            user_id=message.author.id,
+            guild_id=guild.id,
+            target=str(action or "unknown"),
+        )
 
         if action == "error":
             raw = intent.get("message", "Something went wrong.")
@@ -773,6 +797,13 @@ async def on_message(message: discord.Message):
                 listener.start()
                 if not _channel_has_humans(vc_channel):
                     schedule_voice_idle_timer(guild.id)
+                analytics.record(
+                    "voice_join",
+                    user_id=message.author.id,
+                    guild_id=guild.id,
+                    target=vc_channel.name,
+                    channel_id=vc_channel.id,
+                )
                 replies.append(
                     _reply(f'Joined **{vc_channel.name}**. Say "Halbot" followed by a command!', intent)
                 )
@@ -805,6 +836,14 @@ async def on_message(message: discord.Message):
             if row:
                 fmt = detect_audio_format(row["audio"])
                 await session.play_sound(row["audio"], fmt)
+                analytics.record(
+                    "soundboard_play",
+                    user_id=message.author.id,
+                    guild_id=guild.id,
+                    target=name,
+                    source="saved",
+                    bytes=len(row["audio"]) if row.get("audio") else 0,
+                )
                 llm_msg = (intent or {}).get("message")
                 if llm_msg:
                     replies.append(llm_msg)
@@ -816,6 +855,14 @@ async def on_message(message: discord.Message):
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
                     await session.play_sound(audio, fmt)
+                    analytics.record(
+                        "soundboard_play",
+                        user_id=message.author.id,
+                        guild_id=guild.id,
+                        target=name,
+                        source="live",
+                        bytes=len(audio) if audio else 0,
+                    )
                     llm_msg = (intent or {}).get("message")
                     if llm_msg:
                         replies.append(llm_msg)

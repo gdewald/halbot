@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import re
+import time
 
+from . import analytics
 from .db import _env_bool, db_get, db_list, voice_history_append, VOICE_HISTORY_TURNS
 from .audio import detect_audio_format
 from .llm import (
@@ -94,11 +96,25 @@ async def _speak(session, text: str) -> bool:
     clean = _sanitize_for_speech(text)
     if not clean:
         return False
+    _tts_t0 = time.monotonic()
     try:
         audio, fmt = await asyncio.to_thread(engine.synth, clean)
     except Exception:
         log.exception("[tts] Synthesis failed; falling back to text")
         return False
+    _tts_latency_ms = int((time.monotonic() - _tts_t0) * 1000)
+    try:
+        gid = session.vc.channel.guild.id
+    except Exception:
+        gid = 0
+    analytics.record(
+        "tts_request",
+        guild_id=gid,
+        target=getattr(engine, "name", "unknown"),
+        latency_ms=_tts_latency_ms,
+        chars=len(clean),
+        bytes=len(audio) if audio else 0,
+    )
     try:
         await session.play_sound(audio, fmt)
     except Exception:
@@ -233,8 +249,18 @@ async def handle_voice_command(guild, user_id, transcript):
         except Exception:
             sounds = []
         saved = db_list()
+        _llm_t0 = time.monotonic()
         status, actions = await asyncio.to_thread(
             parse_voice_combined, transcript, sounds, saved, history
+        )
+        analytics.record(
+            "llm_call",
+            user_id=user_id,
+            guild_id=guild.id,
+            target="parse_voice_combined",
+            latency_ms=int((time.monotonic() - _llm_t0) * 1000),
+            status=status,
+            action_count=len(actions) if isinstance(actions, list) else 0,
         )
         if status == "no_wake":
             log.info("[voice] no wake word in: %r", transcript)
@@ -261,8 +287,17 @@ async def handle_voice_command(guild, user_id, transcript):
         except Exception:
             sounds = []
         saved = db_list()
+        _llm_t0 = time.monotonic()
         actions = await asyncio.to_thread(
             parse_voice_intent, command, sounds, saved, history
+        )
+        analytics.record(
+            "llm_call",
+            user_id=user_id,
+            guild_id=guild.id,
+            target="parse_voice_intent",
+            latency_ms=int((time.monotonic() - _llm_t0) * 1000),
+            action_count=len(actions) if isinstance(actions, list) else 0,
         )
 
     saved_map = {s["name"]: s for s in saved}
@@ -288,6 +323,12 @@ async def handle_voice_command(guild, user_id, transcript):
 
     for intent in actions:
         action = intent.get("action")
+        analytics.record(
+            "cmd_invoke",
+            user_id=user_id,
+            guild_id=guild.id,
+            target=f"voice:{action or 'unknown'}",
+        )
 
         if action == "voice_play":
             name = intent.get("name", "")
@@ -295,6 +336,15 @@ async def handle_voice_command(guild, user_id, transcript):
             if row:
                 fmt = detect_audio_format(row["audio"])
                 await session.play_sound(row["audio"], fmt)
+                analytics.record(
+                    "soundboard_play",
+                    user_id=user_id,
+                    guild_id=guild.id,
+                    target=name,
+                    source="saved",
+                    trigger="voice",
+                    bytes=len(row["audio"]) if row.get("audio") else 0,
+                )
                 _record(f"(played sound: {name})")
                 return
 
@@ -304,6 +354,15 @@ async def handle_voice_command(guild, user_id, transcript):
                     audio = await live.read()
                     fmt = detect_audio_format(audio)
                     await session.play_sound(audio, fmt)
+                    analytics.record(
+                        "soundboard_play",
+                        user_id=user_id,
+                        guild_id=guild.id,
+                        target=name,
+                        source="live",
+                        trigger="voice",
+                        bytes=len(audio) if audio else 0,
+                    )
                     _record(f"(played sound: {name})")
                 except Exception:
                     log.exception("Failed to read live sound %s for voice playback", name)
