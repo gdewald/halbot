@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { T } from '../tokens.js';
 import { b } from '../bridge.js';
 
-const WINDOW_DAYS = 30;
+const WINDOWS = [
+  { key: '24h', label: '24h', seconds: 86400 },
+  { key: '7d',  label: '7 days', seconds: 7 * 86400 },
+  { key: '30d', label: '30 days', seconds: 30 * 86400 },
+];
 const MAX_FEED = 200;
 
-// kind → color / emoji. Keep list small, fall back to blurple/🗒.
+// kind → color / emoji. Fallback blurple/•.
 const KIND_META = {
   soundboard_play: { c: T.blurple, e: '🔊' },
   cmd_invoke:      { c: T.cyan,    e: '⌨' },
@@ -15,40 +19,84 @@ const KIND_META = {
   mention:         { c: T.sub,     e: '@'  },
 };
 
+function kindColor(k) { return (KIND_META[k] || { c: T.sub }).c; }
+function kindEmoji(k) { return (KIND_META[k] || { e: '•' }).e; }
+
 function fmtRelative(unix) {
   if (!unix) return '—';
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
-  if (s < 60)   return `${s}s ago`;
+  if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s/60)}m ago`;
   if (s < 86400) return `${Math.floor(s/3600)}h ago`;
   return `${Math.floor(s/86400)}d ago`;
 }
 
 function fmtTime(ns) {
-  const d = new Date(Math.floor(ns / 1_000_000));
-  return d.toLocaleTimeString([], { hour12: false });
+  const ms = Math.floor(ns / 1_000_000);
+  return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-function Section({ title, children }) {
+function shortUser(id) {
+  if (!id) return '';
+  const s = String(id);
+  if (s.length <= 6) return s;
+  return `…${s.slice(-4)}`;
+}
+
+function parseMeta(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function metaSummary(meta, kind) {
+  if (!meta) return '';
+  const parts = [];
+  if (typeof meta.latency_ms === 'number') parts.push(`${meta.latency_ms}ms`);
+  if (typeof meta.bytes === 'number' && meta.bytes > 0) {
+    const kb = meta.bytes / 1024;
+    parts.push(kb >= 1024 ? `${(kb/1024).toFixed(1)}MB` : `${Math.round(kb)}KB`);
+  }
+  if (typeof meta.chars === 'number' && kind === 'tts_request') parts.push(`${meta.chars}ch`);
+  if (meta.trigger) parts.push(meta.trigger);
+  if (meta.source) parts.push(meta.source);
+  if (meta.status && meta.status !== 'ok') parts.push(meta.status);
+  if (typeof meta.action_count === 'number' && meta.action_count !== 1) parts.push(`×${meta.action_count}`);
+  return parts.join(' · ');
+}
+
+function Section({ title, right, children }) {
   return (
     <div style={{ marginBottom: 18 }}>
       <div style={{
-        fontSize: 10, fontWeight: 600, color: T.dim, letterSpacing: '0.1em',
-        textTransform: 'uppercase', padding: '0 2px', marginBottom: 8,
-      }}>{title}</div>
+        display: 'flex', alignItems: 'baseline', gap: 10,
+        padding: '0 2px', marginBottom: 8,
+      }}>
+        <span style={{
+          fontSize: 10, fontWeight: 600, color: T.dim, letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+        }}>{title}</span>
+        <div style={{ flex: 1, height: 1, background: T.border }} />
+        {right}
+      </div>
       {children}
     </div>
   );
 }
 
-function BarRow({ rank, label, count, max, last, accent, mono }) {
+function BarRow({ rank, label, count, max, last, accent, mono, onClick, active }) {
   const pct = max > 0 ? Math.max(4, (count / max) * 100) : 0;
   return (
-    <div style={{
-      display: 'grid', gridTemplateColumns: '26px 1fr 90px 72px',
-      alignItems: 'center', gap: 8, padding: '6px 12px',
-      borderBottom: `1px solid ${T.border}`,
-    }}>
+    <div
+      onClick={onClick}
+      style={{
+        display: 'grid', gridTemplateColumns: '26px 1fr 110px 86px',
+        alignItems: 'center', gap: 8, padding: '6px 12px',
+        borderBottom: `1px solid ${T.border}`,
+        cursor: onClick ? 'pointer' : 'default',
+        background: active ? 'rgba(88,101,242,0.12)' : 'transparent',
+        transition: 'background 0.1s',
+      }}
+    >
       <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'center' }}>#{rank}</span>
       <span style={{
         fontFamily: mono ? 'JetBrains Mono' : 'DM Sans',
@@ -61,10 +109,48 @@ function BarRow({ rank, label, count, max, last, accent, mono }) {
         }}>
           <div style={{ width: `${pct}%`, height: '100%', background: accent }} />
         </div>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text, minWidth: 32, textAlign: 'right' }}>{count}</span>
+        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text, minWidth: 36, textAlign: 'right' }}>{count}</span>
       </div>
       <span style={{ fontSize: 10, color: T.sub, textAlign: 'right' }}>{fmtRelative(last)}</span>
     </div>
+  );
+}
+
+function Summary({ label, value, accent, sub }) {
+  return (
+    <div style={{
+      background: T.surface, border: `1px solid ${T.border}`,
+      borderRadius: 9, padding: '12px 14px', position: 'relative', overflow: 'hidden',
+    }}>
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, height: 2,
+        background: `linear-gradient(90deg,${accent},${accent}44)`,
+      }} />
+      <div style={{ fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.09em', marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>
+        {typeof value === 'number' ? value.toLocaleString() : value}
+      </div>
+      {sub && <div style={{ fontSize: 9, color: T.dim, marginTop: 5 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function Pill({ active, color, onClick, children, title }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        background: active ? `${color}28` : 'transparent',
+        border: `1px solid ${active ? color : T.border}`,
+        color: active ? T.text : T.sub,
+        borderRadius: 6, padding: '3px 9px',
+        fontFamily: 'JetBrains Mono', fontSize: 10,
+        cursor: 'pointer', transition: 'all 0.1s',
+      }}
+    >{children}</button>
   );
 }
 
@@ -94,33 +180,43 @@ function EmptyOverlay({ message }) {
 }
 
 export function AnalyticsPanel() {
+  const [windowKey, setWindowKey] = useState('30d');
+  const [kindFilter, setKindFilter] = useState('');      // '' = all
+  const [userFilter, setUserFilter] = useState(0);       // 0 = all
+
   const [topSounds, setTopSounds] = useState({ total: 0, rows: [] });
   const [topUsers,  setTopUsers]  = useState({ total: 0, rows: [] });
+  const [topCmds,   setTopCmds]   = useState({ total: 0, rows: [] });
   const [kindMix,   setKindMix]   = useState({ total: 0, rows: [] });
   const [feed,      setFeed]      = useState([]);
   const [loaded,    setLoaded]    = useState(false);
 
   const feedRef = useRef([]);
-  const scrollerRef = useRef(null);
 
+  const windowSec = useMemo(
+    () => (WINDOWS.find(w => w.key === windowKey) || WINDOWS[2]).seconds,
+    [windowKey]
+  );
   const tsFrom = useMemo(
-    () => Math.floor(Date.now() / 1000) - WINDOW_DAYS * 86400,
-    []
+    () => Math.floor(Date.now() / 1000) - windowSec,
+    [windowSec]
   );
 
-  // Initial + periodic aggregate refresh.
+  // Aggregate refresh.
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
       try {
-        const [s, u, k] = await Promise.all([
-          b.queryStats('soundboard_play', 0, '', tsFrom, 0, 'target', 20),
-          b.queryStats('', 0, '', tsFrom, 0, 'user_id', 20),
-          b.queryStats('', 0, '', tsFrom, 0, 'kind', 10),
+        const [s, u, c, k] = await Promise.all([
+          b.queryStats('soundboard_play', userFilter, '', tsFrom, 0, 'target', 20),
+          b.queryStats(kindFilter,        0,          '', tsFrom, 0, 'user_id', 20),
+          b.queryStats('cmd_invoke',      userFilter, '', tsFrom, 0, 'target', 15),
+          b.queryStats(kindFilter,        userFilter, '', tsFrom, 0, 'kind',    12),
         ]);
         if (cancelled) return;
         setTopSounds({ total: s.total_count || 0, rows: s.rows || [] });
         setTopUsers( { total: u.total_count || 0, rows: u.rows || [] });
+        setTopCmds(  { total: c.total_count || 0, rows: c.rows || [] });
         setKindMix(  { total: k.total_count || 0, rows: k.rows || [] });
         setLoaded(true);
       } catch {
@@ -130,15 +226,15 @@ export function AnalyticsPanel() {
     refresh();
     const iv = setInterval(refresh, 10_000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [tsFrom]);
+  }, [tsFrom, kindFilter, userFilter]);
 
-  // Live feed: backlog once, then poll pop_event_batch.
+  // Live feed.
   useEffect(() => {
     let cancelled = false;
     let iv;
     (async () => {
       try {
-        const back = await b.backlogEvents(50);
+        const back = await b.backlogEvents(100);
         if (!cancelled && Array.isArray(back) && back.length) {
           feedRef.current = back.slice(-MAX_FEED);
           setFeed(feedRef.current.slice().reverse());
@@ -159,9 +255,29 @@ export function AnalyticsPanel() {
 
   const maxSound = Math.max(1, ...topSounds.rows.map(r => r.count));
   const maxUser  = Math.max(1, ...topUsers.rows.map(r => r.count));
+  const maxCmd   = Math.max(1, ...topCmds.rows.map(r => r.count));
   const totalEvents = kindMix.total;
 
-  const empty = loaded && totalEvents === 0;
+  const empty = loaded && totalEvents === 0 && !kindFilter && !userFilter;
+
+  const feedFiltered = useMemo(() => feed.filter(ev => {
+    if (kindFilter && ev.kind !== kindFilter) return false;
+    if (userFilter && String(ev.user_id) !== String(userFilter)) return false;
+    return true;
+  }), [feed, kindFilter, userFilter]);
+
+  const toggleKind = useCallback((k) => {
+    setKindFilter(prev => prev === k ? '' : k);
+  }, []);
+  const toggleUser = useCallback((uid) => {
+    setUserFilter(prev => String(prev) === String(uid) ? 0 : uid);
+  }, []);
+
+  const filterLabel = (kindFilter || userFilter)
+    ? `${kindFilter || ''}${kindFilter && userFilter ? ' · ' : ''}${userFilter ? `user ${shortUser(userFilter)}` : ''}`
+    : '';
+
+  const clearFilters = () => { setKindFilter(''); setUserFilter(0); };
 
   return (
     <div style={{ position: 'relative', height: '100%', animation: 'fadeIn 0.15s ease' }}>
@@ -171,47 +287,78 @@ export function AnalyticsPanel() {
         pointerEvents: empty ? 'none' : 'auto',
       }}>
 
-        {/* Summary strip */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <Summary label="Events (30d)" value={totalEvents} accent={T.blurple} />
-          <Summary label="Soundboard plays" value={topSounds.total} accent={T.blurple} />
-          <Summary label="Unique users" value={topUsers.rows.length} accent={T.cyan} />
-          <Summary label="Event types seen" value={kindMix.rows.length} accent={T.green} />
+        {/* Toolbar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14,
+          padding: '10px 12px', background: T.surface,
+          border: `1px solid ${T.border}`, borderRadius: 9,
+        }}>
+          <span style={{
+            fontSize: 9, fontWeight: 600, color: T.dim,
+            textTransform: 'uppercase', letterSpacing: '0.1em',
+          }}>Window</span>
+          {WINDOWS.map(w => (
+            <Pill key={w.key} active={windowKey === w.key} color={T.blurple}
+                  onClick={() => setWindowKey(w.key)}>
+              {w.label}
+            </Pill>
+          ))}
+          <div style={{ flex: 1 }} />
+          {filterLabel ? (
+            <>
+              <span style={{
+                fontSize: 10, color: T.yellow, fontFamily: 'JetBrains Mono',
+              }}>filter: {filterLabel}</span>
+              <Pill active color={T.yellow} onClick={clearFilters} title="Clear all filters">
+                ✕ clear
+              </Pill>
+            </>
+          ) : (
+            <span style={{ fontSize: 10, color: T.dim, fontStyle: 'italic' }}>
+              click a kind or user to filter
+            </span>
+          )}
         </div>
 
-        {/* Event type mix */}
-        <Section title="Event type mix — last 30 days">
+        {/* Summary strip */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
+          <Summary label={`Events (${windowKey})`} value={totalEvents} accent={T.blurple} sub={filterLabel ? 'filtered' : 'all events'} />
+          <Summary label="Soundboard plays" value={topSounds.total} accent={T.blurple} />
+          <Summary label="Commands invoked" value={topCmds.total} accent={T.cyan} />
+          <Summary label="Event types seen" value={kindMix.rows.length} accent={T.green} sub={`of ${Object.keys(KIND_META).length} known`} />
+        </div>
+
+        {/* Event kind mix — interactive filter */}
+        <Section title={`Event type mix — ${windowKey}`}
+                 right={<span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to filter</span>}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: 10,
+            borderRadius: 9, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: 8,
           }}>
             {kindMix.rows.length === 0 ? (
-              <span style={{ fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no events</span>
-            ) : kindMix.rows.map(r => {
-              const meta = KIND_META[r.key] || { c: T.blurple, e: '•' };
-              return (
-                <div key={r.key} style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  background: `${meta.c}18`, border: `1px solid ${meta.c}35`,
-                  borderRadius: 6, padding: '4px 10px',
-                }}>
-                  <span style={{ fontSize: 12 }}>{meta.e}</span>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text }}>{r.key}</span>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: meta.c, fontWeight: 600 }}>{r.count}</span>
-                </div>
-              );
-            })}
+              <span style={{ fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no events in window</span>
+            ) : kindMix.rows.map(r => (
+              <Pill key={r.key}
+                    active={kindFilter === r.key}
+                    color={kindColor(r.key)}
+                    onClick={() => toggleKind(r.key)}
+                    title={kindFilter === r.key ? 'Click to clear filter' : `Filter to ${r.key}`}>
+                <span>{kindEmoji(r.key)}</span>
+                <span>{r.key}</span>
+                <span style={{ color: kindColor(r.key), fontWeight: 600 }}>{r.count}</span>
+              </Pill>
+            ))}
           </div>
         </Section>
 
-        {/* Top soundboard */}
-        <Section title="Top soundboard plays — last 30 days">
+        {/* Top soundboard plays */}
+        <Section title={`Top soundboard plays — ${windowKey}`}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, overflow: 'hidden',
           }}>
             {topSounds.rows.length === 0 ? (
-              <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no soundboard plays recorded</div>
+              <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no soundboard plays in window</div>
             ) : topSounds.rows.map((r, i) => (
               <BarRow key={r.key} rank={i + 1} label={r.key || '—'}
                 count={r.count} max={maxSound} last={r.last_ts_unix}
@@ -220,49 +367,86 @@ export function AnalyticsPanel() {
           </div>
         </Section>
 
-        {/* Top users */}
-        <Section title="Top users by activity — last 30 days">
+        {/* Top commands */}
+        <Section title={`Top commands invoked — ${windowKey}`}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, overflow: 'hidden',
           }}>
-            {topUsers.rows.length === 0 ? (
-              <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity recorded</div>
-            ) : topUsers.rows.map((r, i) => (
-              <BarRow key={r.key} rank={i + 1} label={r.key || '<anonymous>'}
-                count={r.count} max={maxUser} last={r.last_ts_unix}
+            {topCmds.rows.length === 0 ? (
+              <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no commands invoked in window</div>
+            ) : topCmds.rows.map((r, i) => (
+              <BarRow key={r.key} rank={i + 1} label={r.key || 'unknown'}
+                count={r.count} max={maxCmd} last={r.last_ts_unix}
                 accent={T.cyan} mono />
             ))}
           </div>
         </Section>
 
+        {/* Top users — clickable to filter */}
+        <Section title={`Top users by activity — ${windowKey}`}
+                 right={<span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to drill down</span>}>
+          <div style={{
+            background: T.surface, border: `1px solid ${T.border}`,
+            borderRadius: 9, overflow: 'hidden',
+          }}>
+            {topUsers.rows.length === 0 ? (
+              <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity in window</div>
+            ) : topUsers.rows.map((r, i) => (
+              <BarRow key={r.key} rank={i + 1}
+                label={`user ${shortUser(r.key)}`}
+                count={r.count} max={maxUser} last={r.last_ts_unix}
+                accent={T.green} mono
+                onClick={() => toggleUser(r.key)}
+                active={String(userFilter) === String(r.key)} />
+            ))}
+          </div>
+        </Section>
+
         {/* Live feed */}
-        <Section title="Live event feed">
-          <div ref={scrollerRef} style={{
+        <Section title={`Live event feed${filterLabel ? ` (filtered: ${filterLabel})` : ''}`}
+                 right={<span style={{ fontSize: 9, color: T.dim, fontFamily: 'JetBrains Mono' }}>
+                   {feedFiltered.length}/{feed.length}
+                 </span>}>
+          <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, maxHeight: 360, overflow: 'auto',
           }}>
-            {feed.length === 0 ? (
+            {feedFiltered.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>
-                waiting for events…
+                {feed.length === 0 ? 'waiting for events…' : 'no events match current filter'}
               </div>
-            ) : feed.map((ev, i) => {
-              const meta = KIND_META[ev.kind] || { c: T.sub, e: '•' };
+            ) : feedFiltered.map((ev, i) => {
+              const meta = parseMeta(ev.meta_json);
+              const metaLine = metaSummary(meta, ev.kind);
               return (
                 <div key={`${ev.ts_ns}-${i}`} style={{
-                  display: 'grid', gridTemplateColumns: '70px 22px 140px 1fr 100px',
+                  display: 'grid', gridTemplateColumns: '68px 22px 128px 1fr 130px 80px',
                   alignItems: 'center', gap: 8, padding: '5px 12px',
-                  borderBottom: i < feed.length - 1 ? `1px solid ${T.border}` : 'none',
+                  borderBottom: i < feedFiltered.length - 1 ? `1px solid ${T.border}` : 'none',
                   fontSize: 11,
                 }}>
                   <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim }}>{fmtTime(ev.ts_ns)}</span>
-                  <span style={{ textAlign: 'center' }}>{meta.e}</span>
-                  <span style={{ fontFamily: 'JetBrains Mono', color: meta.c, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.kind}</span>
+                  <span style={{ textAlign: 'center' }}>{kindEmoji(ev.kind)}</span>
+                  <span style={{ fontFamily: 'JetBrains Mono', color: kindColor(ev.kind), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                        onClick={() => toggleKind(ev.kind)}
+                        title={`Filter to ${ev.kind}`}>
+                    {ev.kind}
+                  </span>
                   <span style={{ color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {ev.target || <span style={{ color: T.dim, fontStyle: 'italic' }}>—</span>}
                   </span>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.sub, textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {ev.user_id ? `user ${ev.user_id}` : ''}
+                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.sub, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {metaLine}
+                  </span>
+                  <span
+                    onClick={() => ev.user_id && toggleUser(ev.user_id)}
+                    title={ev.user_id ? `Filter to user ${ev.user_id}` : ''}
+                    style={{
+                      fontFamily: 'JetBrains Mono', fontSize: 10, color: T.sub,
+                      textAlign: 'right', cursor: ev.user_id ? 'pointer' : 'default',
+                    }}>
+                    {ev.user_id ? shortUser(ev.user_id) : ''}
                   </span>
                 </div>
               );
@@ -276,32 +460,13 @@ export function AnalyticsPanel() {
       {empty && (
         <EmptyOverlay message={
           <>
-            Analytics storage is live but no Discord events have been recorded yet.
-            Emitters (soundboard, commands, voice, LLM) land in phase 2
-            when the Discord client returns. Data shown here will be
-            retrievable via <code style={{ fontFamily: 'JetBrains Mono', color: T.cyan }}>QueryStats</code> RPC and the upcoming
-            <code style={{ fontFamily: 'JetBrains Mono', color: T.cyan }}> /stats</code> Discord command.
+            Analytics storage is live but no events recorded yet in this window.
+            Interact with the bot — mention it, trigger a soundboard play, join a
+            voice channel — and numbers will populate here within a second.
+            Try widening the window to <code style={{ fontFamily: 'JetBrains Mono', color: T.cyan }}>30 days</code> if recent activity is expected.
           </>
         } />
       )}
-    </div>
-  );
-}
-
-function Summary({ label, value, accent }) {
-  return (
-    <div style={{
-      background: T.surface, border: `1px solid ${T.border}`,
-      borderRadius: 9, padding: '12px 14px', position: 'relative', overflow: 'hidden',
-    }}>
-      <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, height: 2,
-        background: `linear-gradient(90deg,${accent},${accent}44)`,
-      }} />
-      <div style={{ fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.09em', marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>
-        {typeof value === 'number' ? value.toLocaleString() : value}
-      </div>
     </div>
   );
 }

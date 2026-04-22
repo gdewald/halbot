@@ -42,6 +42,13 @@ function fmtByteCol(n) {
   return `${Math.round(kb)} KB`;
 }
 
+const CUSTOM_EMOJI_RE = /^<a?:([A-Za-z0-9_]+):\d+>$/;
+function displayEmoji(raw) {
+  if (!raw) return '•';
+  if (CUSTOM_EMOJI_RE.test(raw)) return '•';
+  return raw;
+}
+
 function fmtDuration(sec) {
   if (!sec) return '—';
   const h = Math.floor(sec / 3600);
@@ -135,7 +142,7 @@ export function StatsPanel() {
               borderBottom: i < Math.min(sounds.length, 30) - 1 ? `1px solid ${T.border}` : 'none',
               background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)',
             }}>
-              <span style={{ fontSize: 14, textAlign: 'center' }}>{s.emoji || '•'}</span>
+              <span style={{ fontSize: 14, textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}>{displayEmoji(s.emoji)}</span>
               <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: T.cyan, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name || '—'}</span>
               <span style={{ fontSize: 11, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: s.metadata ? 'normal' : 'italic' }}>
                 {s.metadata || (s.saved_by === '(live)' ? 'live soundboard' : '—')}
