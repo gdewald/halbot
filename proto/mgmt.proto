@@ -17,6 +17,8 @@ service Mgmt {
   rpc UnloadTTS (Empty) returns (StatusReply);
   rpc StreamLogs (StreamLogsRequest) returns (stream LogLine);
   rpc GetStats (Empty) returns (StatsReply);
+  rpc QueryStats (QueryStatsRequest) returns (QueryStatsReply);
+  rpc StreamEvents (StreamEventsRequest) returns (stream Event);
 }
 
 enum ConfigSource {
@@ -176,4 +178,40 @@ message StatsReply {
   LatencyStats tts = 5;
   LlmStats llm = 6;
   bool mock = 99;            // true until real telemetry lands
+}
+
+message Event {
+  int64  ts_unix_nanos = 1;
+  string kind          = 2;   // soundboard_play | cmd_invoke | voice_join | llm_call | tts_request | mention
+  uint64 guild_id      = 3;
+  uint64 user_id       = 4;
+  string target        = 5;   // sound name / command / model, empty if n/a
+  string meta_json     = 6;   // free-form, may be empty
+}
+
+message QueryStatsRequest {
+  string kind     = 1;   // empty = any
+  uint64 user_id  = 2;   // 0 = any
+  string target   = 3;   // empty = any
+  int64  ts_from  = 4;   // unix seconds, 0 = epoch
+  int64  ts_to    = 5;   // unix seconds, 0 = now
+  string group_by = 6;   // "target" | "user_id" | "kind" | "" (= no grouping)
+  int32  limit    = 7;   // 0 = 100, max 1000
+}
+
+message StatsRow {
+  string key          = 1;   // grouping key (target/user_id/kind as string)
+  int64  count        = 2;
+  int64  last_ts_unix = 3;
+}
+
+message QueryStatsReply {
+  int64 total_count = 1;
+  repeated StatsRow rows = 2;
+}
+
+message StreamEventsRequest {
+  int32  backlog = 1;     // events to replay on connect; 0 = none
+  string kind    = 2;     // filter; empty = all
+  uint64 user_id = 3;     // filter; 0 = all
 }

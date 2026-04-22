@@ -9,6 +9,7 @@ from pathlib import Path
 import webview
 
 from .bridge import JsApi
+from .event_stream import EventStream
 from .log_stream import LogStream
 from .paths import web_dir
 
@@ -29,6 +30,8 @@ def open_window() -> None:
         api = JsApi()
         stream = LogStream()
         api.bind_log_stream(stream)
+        events = EventStream()
+        api.bind_event_stream(events)
 
         index = web_dir() / ("index.html" if (web_dir() / "index.html").exists() else "_stub.html")
         if not index.exists():
@@ -48,9 +51,11 @@ def open_window() -> None:
         _window = window
 
     stream.start()
+    events.start()
     try:
         webview.start(gui="edgechromium", debug=False)
     finally:
+        events.stop()
         stream.stop()
         with _window_lock:
             _window = None

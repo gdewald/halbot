@@ -7,12 +7,14 @@ import { LogsPanel } from './panels/Logs.jsx';
 import { DaemonPanel } from './panels/Daemon.jsx';
 import { ConfigPanel } from './panels/Config.jsx';
 import { StatsPanel } from './panels/Stats.jsx';
+import { AnalyticsPanel } from './panels/Analytics.jsx';
 
 const SUBTITLE = {
   logs: '· Live log stream',
   daemon: '· Service control',
   config: '· Runtime configuration',
   stats: '· Activity & stats',
+  analytics: '· Interaction analytics',
 };
 
 export function App() {
@@ -33,6 +35,7 @@ export function App() {
             {panel === 'daemon' && <DaemonPanel />}
             {panel === 'config' && <ConfigPanel />}
             {panel === 'stats'  && <StatsPanel />}
+            {panel === 'analytics' && <AnalyticsPanel />}
           </div>
         </div>
       </div>

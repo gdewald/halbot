@@ -38,12 +38,16 @@ class JsApi:
         self._client = MgmtClient()
         self._window = None  # set by app.py after window creation
         self._log_stream = None  # set by app.py
+        self._event_stream = None  # set by app.py
 
     def bind_window(self, window) -> None:
         self._window = window
 
     def bind_log_stream(self, stream) -> None:
         self._log_stream = stream
+
+    def bind_event_stream(self, stream) -> None:
+        self._event_stream = stream
 
     # ── Health ───────────────────────────────────────────────
     def health(self) -> Dict[str, Any]:
@@ -161,6 +165,37 @@ class JsApi:
         if r is None:
             return {"mock": True}
         return {"mock": bool(r.mock)}
+
+    # ── Analytics (events) ───────────────────────────────────
+    def query_stats(self, kind: str = "", user_id: int = 0, target: str = "",
+                    ts_from: int = 0, ts_to: int = 0,
+                    group_by: str = "", limit: int = 100) -> Dict[str, Any]:
+        try:
+            r = self._client.query_stats(
+                kind=kind, user_id=int(user_id or 0), target=target,
+                ts_from=int(ts_from or 0), ts_to=int(ts_to or 0),
+                group_by=group_by, limit=int(limit or 100),
+            )
+        except Exception as e:
+            log.warning("query_stats failed: %s", e)
+            return {"total_count": 0, "rows": [], "error": str(e)}
+        return {
+            "total_count": int(r.total_count),
+            "rows": [
+                {"key": x.key, "count": int(x.count), "last_ts_unix": int(x.last_ts_unix)}
+                for x in r.rows
+            ],
+        }
+
+    def backlog_events(self, n: int = 50) -> List[Dict[str, Any]]:
+        if self._event_stream is None:
+            return []
+        return self._event_stream.backlog(n)
+
+    def pop_event_batch(self, max_n: int = 100) -> List[Dict[str, Any]]:
+        if self._event_stream is None:
+            return []
+        return self._event_stream.pop_batch(max_n)
 
     # ── Window chrome ────────────────────────────────────────
     def window_minimize(self) -> None:

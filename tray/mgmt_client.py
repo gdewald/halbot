@@ -84,6 +84,22 @@ class MgmtClient:
     def get_stats(self):
         return self._call("GetStats", mgmt_pb2.Empty())
 
+    def query_stats(self, *, kind="", user_id=0, target="",
+                    ts_from=0, ts_to=0, group_by="", limit=100):
+        req = mgmt_pb2.QueryStatsRequest(
+            kind=kind, user_id=int(user_id or 0), target=target,
+            ts_from=int(ts_from or 0), ts_to=int(ts_to or 0),
+            group_by=group_by, limit=int(limit or 100),
+        )
+        return self._call("QueryStats", req, timeout=5.0)
+
+    def stream_events(self, *, backlog=0, kind="", user_id=0):
+        req = mgmt_pb2.StreamEventsRequest(
+            backlog=int(backlog or 0), kind=kind, user_id=int(user_id or 0),
+        )
+        stub = self._stub_ready()
+        return stub.StreamEvents(req)
+
     def wait_ready(self, deadline: float = 5.0) -> bool:
         end = time.time() + deadline
         while time.time() < end:

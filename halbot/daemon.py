@@ -54,6 +54,10 @@ async def _run_async() -> int:
     started = time.time()
     server = await serve(started=started, version=_version())
 
+    from . import analytics
+    analytics.init()
+    analytics.bind_loop(asyncio.get_running_loop())
+
     stop_event = asyncio.Event()
 
     def _stop(*_a) -> None:
@@ -75,11 +79,13 @@ async def _run_async() -> int:
         asyncio.create_task(_tick_info(), name="tick-info"),
         asyncio.create_task(_tick_debug(), name="tick-debug"),
         asyncio.create_task(_run_bot(bot_module), name="discord-bot"),
+        asyncio.create_task(analytics.prune_loop(), name="analytics-prune"),
     ]
 
     await stop_event.wait()
     for t in tasks:
         t.cancel()
+    analytics.shutdown()
     await server.stop(grace=2)
     log.info("halbot daemon stopped")
     return 0

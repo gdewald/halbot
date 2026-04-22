@@ -33,3 +33,7 @@ def log_dir() -> Path:
 
 def log_file() -> Path:
     return log_dir() / "halbot.log"
+
+
+def events_db() -> Path:
+    return data_dir() / "events.db"

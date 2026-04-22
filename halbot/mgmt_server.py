@@ -267,6 +267,52 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
     async def GetStats(self, request, context):
         return mgmt_pb2.StatsReply(mock=True)
 
+    async def QueryStats(self, request, context):
+        from . import analytics
+        total, rows = await asyncio.to_thread(
+            analytics.query_stats,
+            kind=request.kind,
+            user_id=request.user_id,
+            target=request.target,
+            ts_from=request.ts_from,
+            ts_to=request.ts_to,
+            group_by=request.group_by,
+            limit=request.limit,
+        )
+        reply = mgmt_pb2.QueryStatsReply(total_count=total)
+        for r in rows:
+            reply.rows.add(
+                key=r["key"], count=r["count"], last_ts_unix=r["last_ts_unix"]
+            )
+        return reply
+
+    async def StreamEvents(self, request, context):
+        from . import analytics
+        kind = request.kind or ""
+        uid = int(request.user_id or 0)
+        q = analytics.subscribe(
+            backlog=max(0, min(request.backlog, 500)),
+            kind=kind,
+            user_id=uid,
+        )
+        try:
+            while True:
+                rec = await q.get()
+                if kind and rec.kind != kind:
+                    continue
+                if uid and rec.user_id != uid:
+                    continue
+                yield mgmt_pb2.Event(
+                    ts_unix_nanos=rec.ts_ns,
+                    kind=rec.kind,
+                    guild_id=rec.guild_id,
+                    user_id=rec.user_id,
+                    target=rec.target,
+                    meta_json=rec.meta_json,
+                )
+        finally:
+            analytics.unsubscribe(q)
+
 
 async def serve(started: float, version: str) -> grpc.aio.Server:
     from . import log_ring
