@@ -17,13 +17,16 @@
 
 ## Privacy policy (for analytics / data collection features)
 
-- **No opt-out. No GDPR scope. Not commercial.** Private single-user
-  server. All user actions tracked unconditionally. Do NOT reintroduce
-  opt-out knobs, consent prompts, anonymization toggles, or "exclude
-  user" lists unless the operator explicitly requests it in a future
-  session.
-- Retention knobs (`analytics_retention_days` etc.) are operational, not
-  privacy — keep those.
+- **Do not add opt-out. Ever.** Private Discord server, handful of
+  friends, all US-based. Not commercial, not GDPR scope, not CCPA
+  scope. The opt-out is "leave the Discord server" — that is the
+  entire consent model. All user actions tracked unconditionally.
+- Do NOT propose, design, or reintroduce: opt-out knobs, consent
+  prompts, anonymization toggles, pseudonymization, per-user "exclude
+  from analytics" lists, data-subject-request tooling, or
+  privacy-policy surfaces. Skip that whole conversation.
+- Retention knobs (`analytics_retention_days` etc.) are operational,
+  not privacy — keep those.
 
 ## Project state
 
