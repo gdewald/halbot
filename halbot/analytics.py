@@ -76,16 +76,6 @@ _subscribers: List[asyncio.Queue] = []
 _bound_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
-def _optout_ids() -> set:
-    raw = config.get("analytics_optout_users") or ""
-    out = set()
-    for tok in str(raw).split(","):
-        tok = tok.strip()
-        if tok.isdigit():
-            out.add(int(tok))
-    return out
-
-
 def _open_db() -> sqlite3.Connection:
     p = paths.events_db()
     c = sqlite3.connect(str(p), isolation_level=None, timeout=5.0)
@@ -139,8 +129,6 @@ def record(kind: str, *, user_id: int = 0, guild_id: int = 0,
     """Fire-and-forget. Never raises."""
     try:
         uid = int(user_id or 0)
-        if uid and uid in _optout_ids():
-            return
         rec = _EventRec(
             ts_ns=time.time_ns(),
             kind=str(kind),

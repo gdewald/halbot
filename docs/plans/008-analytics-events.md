@@ -37,10 +37,9 @@ empty-state placeholder. No regressions to existing panels.
   Migrations at daemon startup keyed off `PRAGMA user_version`.
 - **Retention:** registry field `analytics_retention_days` (default 90).
   Nightly task deletes `WHERE ts_unix < now - retention_days * 86400`.
-- **Opt-out:** registry field `analytics_optout_users` — comma-separated
-  Discord snowflakes. `record()` drops events whose `user_id` matches.
-  Admin-settable via Config panel (later phase when Config panel gets
-  comma-list widget — for now raw string editable).
+- **No opt-out.** Private single-user server, not commercial, not GDPR
+  scope. All user actions tracked unconditionally. Do not reintroduce
+  opt-out logic without explicit operator request.
 - **Query surface:** narrow. `QueryStats` takes filter fields, grouping,
   limit. No raw-SQL passthrough. Aggregations computed server-side.
 - **Live feed:** `StreamEvents` mirrors `StreamLogs` design — ring
@@ -59,7 +58,7 @@ empty-state placeholder. No regressions to existing panels.
 - `proto/mgmt.proto`
 - `halbot/_gen/mgmt_pb2.py` (regenerated)
 - `halbot/_gen/mgmt_pb2_grpc.py` (regenerated)
-- `halbot/config.py` (DEFAULTS + SCHEMA: retention, opt-out)
+- `halbot/config.py` (DEFAULTS + SCHEMA: retention)
 - `halbot/mgmt_server.py` (QueryStats + StreamEvents + StartupHooks)
 - `halbot/daemon.py` (init analytics, start prune task)
 - `halbot/paths.py` (events_db() helper)
@@ -190,16 +189,6 @@ _subscribers: List[asyncio.Queue] = []
 _bound_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
-def _optout_ids() -> set[int]:
-    raw = config.get("analytics_optout_users") or ""
-    out: set[int] = set()
-    for tok in raw.split(","):
-        tok = tok.strip()
-        if tok.isdigit():
-            out.add(int(tok))
-    return out
-
-
 def _open_db() -> sqlite3.Connection:
     p = paths.events_db()
     c = sqlite3.connect(str(p), isolation_level=None, timeout=5.0)
@@ -247,8 +236,6 @@ def record(kind: str, *, user_id: int = 0, guild_id: int = 0,
            target: str = "", **meta: Any) -> None:
     """Fire-and-forget. Never raises."""
     try:
-        if user_id and user_id in _optout_ids():
-            return
         rec = _EventRec(
             ts_ns=time.time_ns(),
             kind=str(kind),
@@ -417,7 +404,6 @@ Append to `DEFAULTS`:
 
 ```python
     "analytics_retention_days": "90",
-    "analytics_optout_users": "",
 ```
 
 Append to `SCHEMA`:
@@ -427,11 +413,6 @@ Append to `SCHEMA`:
         "type": "NUMBER", "min": 1.0, "max": 3650.0, "step": 1.0,
         "description": "Days of analytics history retained on disk",
         "group": "general", "label": "ANALYTICS_RETENTION_DAYS",
-    },
-    "analytics_optout_users": {
-        "type": "STRING",
-        "description": "Comma-separated Discord user snowflakes excluded from analytics",
-        "group": "general", "label": "ANALYTICS_OPTOUT_USERS",
     },
 ```
 
@@ -627,9 +608,6 @@ Schema supports all without further migration.
 - **Writer thread not flushing on crash:** acceptable; events are
   best-effort. No cross-process locking — single writer process by
   design.
-- **Registry widget for opt-out list:** Config panel lacks multi-value
-  editor; user edits comma string raw this phase. Fine for single
-  operator.
 - **Clock skew:** `ts_unix` from `time.time_ns()` — system clock. Events
   survive clock jumps but ordering within ±1 minute of NTP adjust may
   be scrambled. Non-issue for private bot.

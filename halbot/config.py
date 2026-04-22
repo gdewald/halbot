@@ -29,7 +29,6 @@ DEFAULTS: Dict[str, Any] = {
     "tts_lang": "a",
     "tts_speed": "1.0",
     "analytics_retention_days": "90",
-    "analytics_optout_users": "",
 }
 
 
@@ -250,10 +249,5 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 1.0, "max": 3650.0, "step": 1.0,
         "description": "Days of analytics history retained on disk",
         "group": "general", "label": "ANALYTICS_RETENTION_DAYS",
-    },
-    "analytics_optout_users": {
-        "type": "STRING",
-        "description": "Comma-separated Discord user snowflakes excluded from analytics",
-        "group": "general", "label": "ANALYTICS_OPTOUT_USERS",
     },
 }
