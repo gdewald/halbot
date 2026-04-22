@@ -87,11 +87,8 @@ scripts/
   deploy.ps1            one-shot smart build+deploy: fingerprint stale targets,
                         build only what changed, swap both atomically,
                         self-elevate + stream log back
-  deploy.bat            thin wrapper around deploy.ps1
   build.ps1             full build: stamp _build_info.py, gen_proto, uv sync, pyinstaller, zip
-  gen_proto.ps1
-  update-daemon.bat     (legacy) swap ProgramFiles\Halbot\daemon + restart service
-  update-tray.bat       (legacy) swap ProgramFiles\Halbot\tray + relaunch
+  gen_proto.ps1         regenerate halbot/_gen/ from proto/mgmt.proto
 infra/                  Terraform (unchanged, legacy GCP VM config — not used this phase)
 docs/plans/             design (002) + impl (003) plans
 ```
@@ -198,10 +195,6 @@ What it does:
 - Stops service → robocopy /MIR daemon → robocopy /MIR tray → starts
   service → relaunches tray. Service restart only happens if daemon
   actually changed.
-
-Legacy single-target scripts (`scripts\update-daemon.bat`,
-`scripts\update-tray.bat`) are still there for manual use but
-`deploy.ps1` is the preferred path.
 
 Service start/stop/restart day-to-day: use tray menu (user has been granted
 control ACL at install time).

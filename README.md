@@ -106,21 +106,26 @@ data. Day-to-day Start / Stop / Restart: use the **tray menu** (no
 elevation needed — ACL granted at install time).
 
 ```powershell
-# Both targets:
-scripts\build.ps1
+# One command. Fingerprints sources per target; rebuilds only what
+# changed; self-elevates and streams the elevated log back.
+scripts\deploy.ps1
 
-Expand-Archive -Force -Path ".\dist\halbot-daemon.zip" -DestinationPath "$env:TEMP\halbot-daemon-new"
-scripts\update-daemon.bat "$env:TEMP\halbot-daemon-new"
+# Single target:
+scripts\deploy.ps1 -Daemon
+scripts\deploy.ps1 -Tray
 
-Expand-Archive -Force -Path ".\dist\halbot-tray.zip"   -DestinationPath "$env:TEMP\halbot-tray-new"
-scripts\update-tray.bat   "$env:TEMP\halbot-tray-new"
+# Force a full rebuild + redeploy:
+scripts\deploy.ps1 -Force -Clean
+
+# Print the plan without running anything:
+scripts\deploy.ps1 -DryRun
 ```
 
-Single target (faster — skip building the one you didn't change):
-
-```powershell
-scripts\build.ps1 -Target daemon    # or: -Target tray
-```
+Under the hood `deploy.ps1` calls `build.ps1` only for stale targets,
+then robocopy-mirrors `dist\halbot-{daemon,tray}\` into
+`%ProgramFiles%\Halbot\`, stopping/starting the service and bouncing
+the tray as needed. Run `scripts\build.ps1` directly if you want to
+build without deploying.
 
 ### When to pass `-Clean`
 
