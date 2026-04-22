@@ -1,68 +1,151 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { T } from '../tokens.js';
 import { b } from '../bridge.js';
 import { StatCard, MiniBar, SectionHeader } from './stats/StatCard.jsx';
 import { LatencyCard } from './stats/LatencyCard.jsx';
-import { SOUND_LIST, WAKE_HISTORY, MOCK_NUMBERS } from './stats/MockData.js';
+
+const REFRESH_MS = 10_000;
+const EMPTY_STATS = {
+  mock: true,
+  soundboard: { sounds_backed_up: 0, storage_bytes: 0, last_sync_unix: 0, new_since_last: 0 },
+  voice_playback: { played_today: 0, played_all_time: 0, session_seconds_today: 0, avg_response_ms: 0 },
+  wake_word: { detections_today: 0, detections_all_time: 0, false_positives_today: 0, avg_join_latency_ms: 0 },
+  stt: { avg_ms: 0, p95_ms: 0, count_today: 0 },
+  tts: { avg_ms: 0, p95_ms: 0, count_today: 0 },
+  llm: {
+    response_avg_ms: 0, response_p95_ms: 0,
+    ttft_avg_ms: 0, ttft_p95_ms: 0, tokens_per_sec: 0,
+    requests_today: 0, avg_tokens_out: 0, context_usage_pct: 0, timeouts_today: 0,
+  },
+};
+
+function fmtRelative(unix) {
+  if (!unix) return '—';
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
+function fmtBytes(n) {
+  if (!n) return '0';
+  const mb = n / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)}`;
+  return `${(n / 1024).toFixed(0)}`;
+}
+
+function fmtByteCol(n) {
+  if (!n) return '—';
+  const kb = n / 1024;
+  if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
+  return `${Math.round(kb)} KB`;
+}
+
+function fmtDuration(sec) {
+  if (!sec) return '—';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
 
 export function StatsPanel() {
-  const [mock, setMock] = useState(true);
+  const [stats, setStats] = useState(EMPTY_STATS);
+  const [sounds, setSounds] = useState([]);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+    const refresh = async () => {
       try {
-        const s = await b.getStats();
-        setMock(!!s.mock);
+        const [s, list] = await Promise.all([
+          b.getStats().catch(() => EMPTY_STATS),
+          b.soundboardList().catch(() => []),
+        ]);
+        if (cancelled) return;
+        setStats(s || EMPTY_STATS);
+        setSounds(Array.isArray(list) ? list : []);
+        setLoaded(true);
       } catch {
-        setMock(true);
+        if (!cancelled) setLoaded(true);
       }
-    })();
+    };
+    refresh();
+    const iv = setInterval(refresh, REFRESH_MS);
+    return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
-  const maxPlays = Math.max(...SOUND_LIST.map(s => s.plays));
-  const N = MOCK_NUMBERS;
+  const mock = !!stats.mock;
+  const empty = loaded && !mock
+    && stats.voice_playback.played_all_time === 0
+    && stats.llm.requests_today === 0
+    && stats.tts.count_today === 0
+    && sounds.length === 0;
+
+  const maxPlays = useMemo(
+    () => Math.max(1, ...sounds.map(s => s.plays || 0)),
+    [sounds]
+  );
+
+  const sb = stats.soundboard;
+  const vp = stats.voice_playback;
+  const ww = stats.wake_word;
+  const stt = stats.stt;
+  const tts = stats.tts;
+  const llm = stats.llm;
+
+  const falsePct = ww.detections_today > 0
+    ? `${((ww.false_positives_today / ww.detections_today) * 100).toFixed(1)}%`
+    : '—';
 
   return (
     <div style={{ position: 'relative', height: '100%', animation: 'fadeIn 0.15s ease' }}>
       <div style={{
         height: '100%', overflow: 'auto', padding: '16px',
-        filter: mock ? 'blur(2px) saturate(0.7) opacity(0.6)' : 'none',
-        pointerEvents: mock ? 'none' : 'auto',
+        filter: (mock || empty) ? 'blur(2px) saturate(0.7) opacity(0.6)' : 'none',
+        pointerEvents: (mock || empty) ? 'none' : 'auto',
       }}>
 
         {/* Soundboard */}
         <SectionHeader label="Soundboard Backup" icon="💾" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 12 }}>
-          <StatCard label="Sounds backed up"   value={N.soundboard.backedUp}  sub="across all categories"   accent={T.blurple} />
-          <StatCard label="Storage used"       value={N.soundboard.storageMb} unit="MB" sub="on disk"       accent={T.blurple} />
-          <StatCard label="Last sync"          value={N.soundboard.lastSync}         sub={N.soundboard.lastSyncTs} accent={T.cyan} />
-          <StatCard label="New since last run" value={N.soundboard.newSince}  sub="added since yesterday"   accent={T.green} />
+          <StatCard label="Sounds backed up"   value={sb.sounds_backed_up}  sub="in saved_sounds table"   accent={T.blurple} />
+          <StatCard label="Storage used"       value={fmtBytes(sb.storage_bytes)} unit="MB" sub="audio blob total"    accent={T.blurple} />
+          <StatCard label="Last saved"         value={fmtRelative(sb.last_sync_unix)} sub={sb.last_sync_unix ? new Date(sb.last_sync_unix * 1000).toLocaleString() : 'no data'} accent={T.cyan} />
+          <StatCard label="New last 24h"       value={sb.new_since_last}    sub="rows added"             accent={T.green} />
         </div>
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, overflow: 'hidden', marginBottom: 18 }}>
           <div style={{
             padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
-            display: 'grid', gridTemplateColumns: '26px 130px 1fr 90px 110px 56px', gap: 8,
+            display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px', gap: 8,
             fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.08em',
           }}>
-            <span /><span>Name</span><span>Description</span><span>Plays</span><span>Last played</span>
+            <span /><span>Name</span><span>Metadata</span><span>Plays (30d)</span><span>Last played</span>
             <span style={{ textAlign: 'right' }}>Size</span>
           </div>
-          {SOUND_LIST.map((s, i) => (
-            <div key={s.name} style={{
-              display: 'grid', gridTemplateColumns: '26px 130px 1fr 90px 110px 56px',
+          {sounds.length === 0 ? (
+            <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>
+              no soundboard rows — save some sounds first
+            </div>
+          ) : sounds.slice(0, 30).map((s, i) => (
+            <div key={s.name || i} style={{
+              display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px',
               alignItems: 'center', gap: 8, padding: '6px 14px',
-              borderBottom: i < SOUND_LIST.length - 1 ? `1px solid ${T.border}` : 'none',
+              borderBottom: i < Math.min(sounds.length, 30) - 1 ? `1px solid ${T.border}` : 'none',
               background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)',
             }}>
-              <span style={{ fontSize: 14, textAlign: 'center' }}>{s.emoji}</span>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: T.cyan, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-              <span style={{ fontSize: 11, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: s.desc ? 'normal' : 'italic' }}>{s.desc || '—'}</span>
+              <span style={{ fontSize: 14, textAlign: 'center' }}>{s.emoji || '•'}</span>
+              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: T.cyan, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name || '—'}</span>
+              <span style={{ fontSize: 11, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: s.metadata ? 'normal' : 'italic' }}>
+                {s.metadata || (s.saved_by === '(live)' ? 'live soundboard' : '—')}
+              </span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                 <MiniBar value={s.plays} max={maxPlays} color={T.blurple} />
-                <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text, minWidth: 26, textAlign: 'right' }}>{s.plays}</span>
+                <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text, minWidth: 30, textAlign: 'right' }}>{s.plays}</span>
               </div>
-              <span style={{ fontSize: 11, color: T.sub }}>{s.lastPlayed}</span>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'right' }}>{s.size}</span>
+              <span style={{ fontSize: 11, color: T.sub }}>{fmtRelative(s.last_played_unix)}</span>
+              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'right' }}>{fmtByteCol(s.size_bytes)}</span>
             </div>
           ))}
         </div>
@@ -70,67 +153,44 @@ export function StatsPanel() {
         {/* Voice playback */}
         <SectionHeader label="Voice Playback" icon="🔊" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <StatCard label="Sounds played today" value={N.voice.playedToday}    sub="across all sessions"  accent={T.cyan} />
-          <StatCard label="Total all-time"      value={N.voice.playedAllTime.toLocaleString()}  sub="since bot started"    accent={T.cyan} />
-          <StatCard label="Session time today"  value={N.voice.sessionToday}   sub="cumulative voice"     accent={T.yellow} />
-          <StatCard label="Avg response time"   value={N.voice.avgResponseMs}  unit="ms" sub="TTS + join" accent={T.green} />
+          <StatCard label="Sounds played today" value={vp.played_today}    sub="soundboard_play events"  accent={T.cyan} />
+          <StatCard label="Total all-time"      value={vp.played_all_time.toLocaleString()}  sub="since analytics start"   accent={T.cyan} />
+          <StatCard label="Session time today"  value={fmtDuration(vp.session_seconds_today)} sub="voice_join proxy × 60s"  accent={T.yellow} />
+          <StatCard label="Avg response time"   value={vp.avg_response_ms} unit="ms" sub="avg TTS latency today" accent={T.green} />
         </div>
 
         {/* Wake word */}
         <SectionHeader label="Wake Word" icon="🎙" />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 10 }}>
-          <StatCard label="Detections today" value={N.wake.detectionsToday}  sub="hey hal"        accent={T.green} />
-          <StatCard label="Total all-time"   value={N.wake.detectionsAllTime} sub="since tracking" accent={T.green} />
-          <StatCard label="False positives"  value={N.wake.falsePositivesToday} unit="today" sub={N.wake.falsePctToday} accent={T.yellow} />
-          <StatCard label="Avg join latency" value={N.wake.avgJoinMs} unit="ms" sub="wake → audio" accent={T.blurple} />
-        </div>
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, overflow: 'hidden', marginBottom: 18 }}>
-          <div style={{
-            padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
-            display: 'grid', gridTemplateColumns: '80px 90px 1fr', gap: 8,
-            fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.08em',
-          }}>
-            <span>Time</span><span>Phrase</span><span>Action</span>
-          </div>
-          {WAKE_HISTORY.map((w, i) => (
-            <div key={i} style={{
-              display: 'grid', gridTemplateColumns: '80px 90px 1fr',
-              alignItems: 'center', gap: 8, padding: '7px 14px',
-              borderBottom: i < WAKE_HISTORY.length - 1 ? `1px solid ${T.border}` : 'none',
-            }}>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim }}>{w.time}</span>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.blurpleL }}>{w.phrase}</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <div style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: w.ok ? T.green : T.yellow }} />
-                <span style={{ fontSize: 12, color: w.ok ? T.text : T.yellow }}>{w.action}</span>
-              </div>
-            </div>
-          ))}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
+          <StatCard label="Detections today" value={ww.detections_today}  sub="voice LLM parses"        accent={T.green} />
+          <StatCard label="Total all-time"   value={ww.detections_all_time} sub="since analytics start" accent={T.green} />
+          <StatCard label="False positives"  value={ww.false_positives_today} unit="today" sub={falsePct} accent={T.yellow} />
+          <StatCard label="Avg join latency" value={ww.avg_join_latency_ms} unit="ms" sub="not yet emitted" accent={T.blurple} />
         </div>
 
         {/* STT */}
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <LatencyCard label="Transcription latency" avg={N.stt.latencyAvg} p95={N.stt.latencyP95} unit="ms" color={T.cyan} sub="time from audio end → text" />
-          <LatencyCard label="Chunk processing time" avg={N.stt.chunkAvg}   p95={N.stt.chunkP95}   unit="ms" color={T.cyan} sub="per audio segment" />
-          <StatCard    label="Segments today"    value={N.stt.segmentsToday}    sub="utterances processed"      accent={T.cyan} />
-          <StatCard    label="Avg utterance len" value={N.stt.avgUtteranceSec}  unit="s" sub="mean audio length" accent={T.dim} />
+          <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub="not yet emitted" />
+          <LatencyCard label="Chunk processing time" avg={0}          p95={0}          unit="ms" color={T.cyan} sub="not yet emitted" />
+          <StatCard    label="Segments today"    value={stt.count_today}    sub="stt_segment events"      accent={T.cyan} />
+          <StatCard    label="Avg utterance len" value={0}  unit="s" sub="not yet emitted" accent={T.dim} />
         </div>
 
         {/* TTS */}
         <SectionHeader label="Text-to-Speech (TTS)" icon="🗣" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <LatencyCard label="First audio chunk" avg={N.tts.firstChunkAvg} p95={N.tts.firstChunkP95} unit="ms" color={T.yellow} sub="time to first playable chunk" />
-          <LatencyCard label="Full render time"  avg={N.tts.fullAvg}       p95={N.tts.fullP95}       unit="ms" color={T.yellow} sub="complete synthesis time" />
-          <StatCard    label="Renders today"     value={N.tts.rendersToday}    sub="TTS invocations"            accent={T.yellow} />
-          <StatCard    label="Fallback to espeak" value={N.tts.fallbacksToday} unit="today" sub="kokoro failures" accent={T.red} />
+          <LatencyCard label="Full render time"  avg={tts.avg_ms} p95={tts.p95_ms} unit="ms" color={T.yellow} sub="engine.synth latency" />
+          <LatencyCard label="First audio chunk" avg={0}          p95={0}          unit="ms" color={T.yellow} sub="not yet emitted" />
+          <StatCard    label="Renders today"     value={tts.count_today}    sub="tts_request events"         accent={T.yellow} />
+          <StatCard    label="Engine fallback"   value={0} unit="today" sub="not yet emitted" accent={T.red} />
         </div>
 
         {/* LLM */}
         <SectionHeader label="Text LLM" icon="🧠" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 10 }}>
-          <LatencyCard label="Response latency"    avg={N.llm.responseAvgMs} p95={N.llm.responseP95Ms} unit="ms" color={T.blurple} sub="full completion time" />
-          <LatencyCard label="Time to first token" avg={N.llm.ttftAvgMs}     p95={N.llm.ttftP95Ms}     unit="ms" color={T.blurple} sub="TTFT — key for streaming" />
+          <LatencyCard label="Response latency"    avg={llm.response_avg_ms} p95={llm.response_p95_ms} unit="ms" color={T.blurple} sub="full completion time" />
+          <LatencyCard label="Time to first token" avg={llm.ttft_avg_ms}     p95={llm.ttft_p95_ms}     unit="ms" color={T.blurple} sub="not yet emitted" />
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, padding: '12px 14px', position: 'relative', overflow: 'hidden',
@@ -141,22 +201,22 @@ export function StatsPanel() {
             }} />
             <div style={{ fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.09em', marginBottom: 4 }}>Throughput</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-              <span style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>{N.llm.tokPerSec}</span>
+              <span style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>{llm.tokens_per_sec}</span>
               <span style={{ fontSize: 11, color: T.sub }}>tok/s</span>
             </div>
-            <div style={{ fontSize: 9, color: T.dim, marginTop: 5 }}>avg generation speed</div>
+            <div style={{ fontSize: 9, color: T.dim, marginTop: 5 }}>not yet emitted</div>
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 }}>
-          <StatCard label="Requests today" value={N.llm.requestsToday} sub="LLM completions" accent={T.blurple} />
-          <StatCard label="Avg tokens out" value={N.llm.avgTokensOut}  sub="per completion"  accent={T.blurple} />
-          <StatCard label="Context usage"  value={N.llm.ctxUsagePct}  unit="%" sub="avg window fill" accent={T.yellow} />
-          <StatCard label="Timeouts today" value={N.llm.timeoutsToday} sub={`of ${N.llm.requestsToday} requests`} accent={T.red} />
+          <StatCard label="Requests today" value={llm.requests_today} sub="llm_call events" accent={T.blurple} />
+          <StatCard label="Avg tokens out" value={llm.avg_tokens_out}  sub="not yet emitted"  accent={T.blurple} />
+          <StatCard label="Context usage"  value={llm.context_usage_pct}  unit="%" sub="not yet emitted" accent={T.yellow} />
+          <StatCard label="Timeouts today" value={llm.timeouts_today} sub={`of ${llm.requests_today} requests`} accent={T.red} />
         </div>
         <div style={{ height: 8 }} />
       </div>
 
-      {mock && (
+      {(mock || empty) && (
         <div style={{
           position: 'absolute', inset: 0, display: 'flex',
           alignItems: 'center', justifyContent: 'center',
@@ -171,12 +231,11 @@ export function StatsPanel() {
             <div style={{
               fontSize: 10, fontWeight: 600, color: T.yellow,
               textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-            }}>Preview only</div>
+            }}>{mock ? 'Daemon unreachable' : 'No activity yet'}</div>
             <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5 }}>
-              Stats wire up in a later phase. The numbers shown are static
-              mock data from the design mockup — none of the underlying
-              subsystems (soundboard, voice, wake-word, STT, TTS, LLM) are
-              running yet.
+              {mock
+                ? 'GetStats RPC returned a mock/fallback response. Check that the halbot service is running.'
+                : 'Numbers populate as Discord users trigger sounds, commands, voice sessions, and LLM calls. Ambient bot traffic fills this view within a few interactions.'}
             </div>
           </div>
         </div>

@@ -161,10 +161,106 @@ class JsApi:
 
     # ── Stats ────────────────────────────────────────────────
     def get_stats(self) -> Dict[str, Any]:
-        r = self._client.get_stats() if hasattr(self._client, "get_stats") else None
+        try:
+            r = self._client.get_stats() if hasattr(self._client, "get_stats") else None
+        except Exception as e:
+            log.warning("get_stats rpc failed: %s", e)
+            return {"mock": True, "error": str(e)}
         if r is None:
             return {"mock": True}
-        return {"mock": bool(r.mock)}
+        return {
+            "mock": bool(r.mock),
+            "soundboard": {
+                "sounds_backed_up": int(r.soundboard.sounds_backed_up),
+                "storage_bytes": int(r.soundboard.storage_bytes),
+                "last_sync_unix": int(r.soundboard.last_sync_unix),
+                "new_since_last": int(r.soundboard.new_since_last),
+            },
+            "voice_playback": {
+                "played_today": int(r.voice_playback.played_today),
+                "played_all_time": int(r.voice_playback.played_all_time),
+                "session_seconds_today": int(r.voice_playback.session_seconds_today),
+                "avg_response_ms": int(r.voice_playback.avg_response_ms),
+            },
+            "wake_word": {
+                "detections_today": int(r.wake_word.detections_today),
+                "detections_all_time": int(r.wake_word.detections_all_time),
+                "false_positives_today": int(r.wake_word.false_positives_today),
+                "avg_join_latency_ms": int(r.wake_word.avg_join_latency_ms),
+            },
+            "stt": {
+                "avg_ms": int(r.stt.avg_ms),
+                "p95_ms": int(r.stt.p95_ms),
+                "count_today": int(r.stt.count_today),
+            },
+            "tts": {
+                "avg_ms": int(r.tts.avg_ms),
+                "p95_ms": int(r.tts.p95_ms),
+                "count_today": int(r.tts.count_today),
+            },
+            "llm": {
+                "response_avg_ms": int(r.llm.response_avg_ms),
+                "response_p95_ms": int(r.llm.response_p95_ms),
+                "ttft_avg_ms": int(r.llm.ttft_avg_ms),
+                "ttft_p95_ms": int(r.llm.ttft_p95_ms),
+                "tokens_per_sec": int(r.llm.tokens_per_sec),
+                "requests_today": int(r.llm.requests_today),
+                "avg_tokens_out": int(r.llm.avg_tokens_out),
+                "context_usage_pct": int(r.llm.context_usage_pct),
+                "timeouts_today": int(r.llm.timeouts_today),
+            },
+        }
+
+    def soundboard_list(self) -> List[Dict[str, Any]]:
+        """Saved-sound table rollup. Shape consumed by Stats panel table.
+
+        Joins analytics play counts (30d window) with sounds.db metadata.
+        Tray runs as user, has read access to %ProgramData%\\Halbot.
+        """
+        # Sounds metadata
+        try:
+            from halbot import db as sounds_db
+            rows = sounds_db.db_list()
+        except Exception as e:
+            log.warning("soundboard_list: sounds_db unavailable: %s", e)
+            rows = []
+        # Play counts (last 30d)
+        import time as _time
+        ts_from = int(_time.time()) - 30 * 86400
+        try:
+            r = self._client.query_stats(
+                kind="soundboard_play", ts_from=ts_from,
+                group_by="target", limit=1000,
+            )
+            plays = {x.key: (int(x.count), int(x.last_ts_unix)) for x in r.rows}
+        except Exception as e:
+            log.warning("soundboard_list: query_stats failed: %s", e)
+            plays = {}
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            name = row.get("name") or ""
+            count, last = plays.get(name, (0, 0))
+            out.append({
+                "name": name,
+                "emoji": row.get("emoji") or "",
+                "metadata": row.get("metadata") or "",
+                "size_bytes": int(row.get("size_bytes") or 0),
+                "saved_by": row.get("saved_by") or "",
+                "created_at": row.get("created_at") or "",
+                "plays": count,
+                "last_played_unix": last,
+            })
+        # Also surface plays for sounds NOT in saved DB (live sounds).
+        saved_names = {r.get("name") for r in rows}
+        for name, (count, last) in plays.items():
+            if name and name not in saved_names:
+                out.append({
+                    "name": name, "emoji": "", "metadata": "",
+                    "size_bytes": 0, "saved_by": "(live)",
+                    "created_at": "", "plays": count, "last_played_unix": last,
+                })
+        out.sort(key=lambda r: r["plays"], reverse=True)
+        return out
 
     # ── Analytics (events) ───────────────────────────────────
     def query_stats(self, kind: str = "", user_id: int = 0, target: str = "",

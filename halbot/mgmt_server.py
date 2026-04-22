@@ -265,7 +265,60 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             log_ring.handler().unsubscribe(q)
 
     async def GetStats(self, request, context):
-        return mgmt_pb2.StatsReply(mock=True)
+        from . import analytics
+        try:
+            data = await asyncio.to_thread(analytics.compute_dashboard_stats)
+        except Exception as e:
+            log.warning("GetStats compute failed: %s", e)
+            return mgmt_pb2.StatsReply(mock=True)
+        sb = data.get("soundboard", {})
+        vp = data.get("voice_playback", {})
+        ww = data.get("wake_word", {})
+        stt = data.get("stt", {})
+        tts = data.get("tts", {})
+        llm = data.get("llm", {})
+        return mgmt_pb2.StatsReply(
+            soundboard=mgmt_pb2.SoundboardStats(
+                sounds_backed_up=int(sb.get("sounds_backed_up", 0)),
+                storage_bytes=int(sb.get("storage_bytes", 0)),
+                last_sync_unix=int(sb.get("last_sync_unix", 0)),
+                new_since_last=int(sb.get("new_since_last", 0)),
+            ),
+            voice_playback=mgmt_pb2.VoicePlaybackStats(
+                played_today=int(vp.get("played_today", 0)),
+                played_all_time=int(vp.get("played_all_time", 0)),
+                session_seconds_today=int(vp.get("session_seconds_today", 0)),
+                avg_response_ms=int(vp.get("avg_response_ms", 0)),
+            ),
+            wake_word=mgmt_pb2.WakeWordStats(
+                detections_today=int(ww.get("detections_today", 0)),
+                detections_all_time=int(ww.get("detections_all_time", 0)),
+                false_positives_today=int(ww.get("false_positives_today", 0)),
+                avg_join_latency_ms=int(ww.get("avg_join_latency_ms", 0)),
+            ),
+            stt=mgmt_pb2.LatencyStats(
+                avg_ms=int(stt.get("avg_ms", 0)),
+                p95_ms=int(stt.get("p95_ms", 0)),
+                count_today=int(stt.get("count_today", 0)),
+            ),
+            tts=mgmt_pb2.LatencyStats(
+                avg_ms=int(tts.get("avg_ms", 0)),
+                p95_ms=int(tts.get("p95_ms", 0)),
+                count_today=int(tts.get("count_today", 0)),
+            ),
+            llm=mgmt_pb2.LlmStats(
+                response_avg_ms=int(llm.get("response_avg_ms", 0)),
+                response_p95_ms=int(llm.get("response_p95_ms", 0)),
+                ttft_avg_ms=int(llm.get("ttft_avg_ms", 0)),
+                ttft_p95_ms=int(llm.get("ttft_p95_ms", 0)),
+                tokens_per_sec=int(llm.get("tokens_per_sec", 0)),
+                requests_today=int(llm.get("requests_today", 0)),
+                avg_tokens_out=int(llm.get("avg_tokens_out", 0)),
+                context_usage_pct=int(llm.get("context_usage_pct", 0)),
+                timeouts_today=int(llm.get("timeouts_today", 0)),
+            ),
+            mock=bool(data.get("mock", False)),
+        )
 
     async def QueryStats(self, request, context):
         from . import analytics
