@@ -231,10 +231,12 @@ if ($buildDaemon -or $buildTray) {
         if     ($buildDaemon -and $buildTray) { "all" }
         elseif ($buildDaemon)                 { "daemon" }
         else                                  { "tray" }
-    $args = @("-Target", $buildTarget)
-    if ($Clean) { $args += "-Clean" }
+    # NB: do not name this $args — that collides with PS's automatic $args
+    # and makes @args splat the script's own unbound args instead.
+    $buildArgs = @("-Target", $buildTarget)
+    if ($Clean) { $buildArgs += "-Clean" }
     Write-Host "[deploy] building ($buildTarget)..." -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot "build.ps1") @args
+    & (Join-Path $PSScriptRoot "build.ps1") @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
     # Stamp only what we built. If fingerprint recomputes the same it's a
