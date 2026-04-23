@@ -379,6 +379,220 @@ class PanicModal(discord.ui.Modal, title="Panic confirmation"):
         await interaction.response.send_message(embed=emb)
 
 
+class TriggerActionsView(discord.ui.View):
+    """Controls under a trigger-fire card (flow 03).
+
+    Owner-only mute removes the trigger (soft-delete). "See triggers"
+    points at the dashboard deeplink (stubbed until phase 6 wiring).
+    """
+
+    def __init__(self, trigger_id: int) -> None:
+        super().__init__(timeout=None)
+        self.trigger_id = trigger_id
+        mute = discord.ui.Button(
+            label="Mute trigger here", style=discord.ButtonStyle.secondary,
+            emoji="🔕", custom_id=f"halbot:trigger:mute:{trigger_id}",
+        )
+        mute.callback = self._mute  # type: ignore[assignment]
+        self.add_item(mute)
+        see = discord.ui.Button(
+            label="See triggers", style=discord.ButtonStyle.secondary,
+            emoji="⚙️", custom_id=f"halbot:trigger:see:{trigger_id}",
+        )
+        see.callback = self._see  # type: ignore[assignment]
+        self.add_item(see)
+
+    async def _mute(self, interaction: discord.Interaction) -> None:
+        if not _is_guild_owner(interaction):
+            await interaction.response.send_message("Owner-only.", ephemeral=True)
+            return
+        from .db import trigger_remove
+        if trigger_remove(self.trigger_id):
+            log.info("[trigger] %s muted trigger #%s via button", interaction.user, self.trigger_id)
+            await interaction.response.send_message(
+                f"Muted trigger #{self.trigger_id}. Recover via `/halbot-admin undelete triggers {self.trigger_id}`.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"Trigger #{self.trigger_id} already gone.", ephemeral=True,
+            )
+
+    async def _see(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            "Dashboard deeplink lands in a later phase — for now use `/halbot-admin status`.",
+            ephemeral=True,
+        )
+
+
+class PersonaActionsView(discord.ui.View):
+    """Edit / Make guild-wide / Remove persona (flow 09)."""
+
+    def __init__(self, persona_id: int, scope: str) -> None:
+        super().__init__(timeout=None)
+        self.persona_id = persona_id
+        self.scope = scope
+        edit = discord.ui.Button(
+            label="Edit wording", style=discord.ButtonStyle.secondary, emoji="📝",
+            custom_id=f"halbot:persona:edit:{persona_id}",
+        )
+        edit.callback = self._edit  # type: ignore[assignment]
+        self.add_item(edit)
+
+        promote = discord.ui.Button(
+            label="Make guild-wide" if scope == "user" else "Make per-user",
+            style=discord.ButtonStyle.secondary, emoji="👥",
+            custom_id=f"halbot:persona:promote:{persona_id}",
+        )
+        promote.callback = self._promote  # type: ignore[assignment]
+        self.add_item(promote)
+
+        remove = discord.ui.Button(
+            label="Remove persona", style=discord.ButtonStyle.danger, emoji="🗑️",
+            custom_id=f"halbot:persona:remove:{persona_id}",
+        )
+        remove.callback = self._remove  # type: ignore[assignment]
+        self.add_item(remove)
+
+    async def _edit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(PersonaEditModal(self.persona_id))
+
+    async def _promote(self, interaction: discord.Interaction) -> None:
+        from .db import persona_set_scope
+        new_scope = "guild" if self.scope == "user" else "user"
+        try:
+            ok = persona_set_scope(self.persona_id, new_scope)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        if not ok:
+            await interaction.response.send_message(
+                f"Persona #{self.persona_id} not found.", ephemeral=True,
+            )
+            return
+        log.info("[persona] %s set #%s scope=%s", interaction.user, self.persona_id, new_scope)
+        await interaction.response.send_message(
+            f"Persona scope → `{new_scope}`.", ephemeral=True,
+        )
+
+    async def _remove(self, interaction: discord.Interaction) -> None:
+        from .db import persona_remove
+        if persona_remove(self.persona_id):
+            log.info("[persona] %s removed #%s via button", interaction.user, self.persona_id)
+            await interaction.response.send_message(
+                f"Persona #{self.persona_id} removed. Recover via `/halbot-admin undelete personas {self.persona_id}`.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"Persona #{self.persona_id} already gone.", ephemeral=True,
+            )
+
+
+class PersonaEditModal(discord.ui.Modal, title="Edit persona wording"):
+    directive = discord.ui.TextInput(
+        label="Directive",
+        placeholder="how should I talk?",
+        required=True, max_length=2000,
+        style=discord.TextStyle.paragraph,
+    )
+
+    def __init__(self, persona_id: int) -> None:
+        super().__init__(timeout=300)
+        self.persona_id = persona_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        from .db import persona_update
+        try:
+            ok = persona_update(self.persona_id, str(self.directive).strip())
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        if not ok:
+            await interaction.response.send_message(
+                f"Persona #{self.persona_id} not found.", ephemeral=True,
+            )
+            return
+        log.info("[persona] %s edited #%s", interaction.user, self.persona_id)
+        await interaction.response.send_message(
+            f"Persona #{self.persona_id} updated.", ephemeral=True,
+        )
+
+
+class GrudgeForgiveView(discord.ui.View):
+    """Flow 10 · grudge ledger controls.
+
+    ≤5 grudges → one Forgive button per grudge. ≥6 → a single select
+    menu (Discord caps ActionRow buttons at 5 and SelectMenu options
+    at 25).
+    """
+
+    TIMEOUT_SECONDS = 600
+
+    def __init__(self, rows: list[dict]) -> None:
+        super().__init__(timeout=self.TIMEOUT_SECONDS)
+        self.rows = rows
+        if len(rows) <= 5:
+            for i, r in enumerate(rows, start=1):
+                gid = int(r["id"])
+                btn = discord.ui.Button(
+                    label=f"Forgive #{i}", style=discord.ButtonStyle.secondary,
+                    emoji="🕊️", custom_id=f"halbot:grudge:forgive:{gid}",
+                )
+                btn.callback = self._make_forgive(gid)  # type: ignore[assignment]
+                self.add_item(btn)
+        else:
+            options = []
+            for i, r in enumerate(rows[:25], start=1):
+                gid = int(r["id"])
+                note = (r.get("note") or "")[:60]
+                options.append(discord.SelectOption(
+                    label=f"#{i} · {r['target_name']}"[:100],
+                    description=note or None,
+                    value=str(gid), emoji="🕊️",
+                ))
+            self.add_item(_GrudgeForgiveSelect(options))
+
+    def _make_forgive(self, grudge_id: int):
+        async def cb(interaction: discord.Interaction) -> None:
+            from .db import grudge_remove
+            if grudge_remove(grudge_id):
+                log.info("[grudge] %s forgave #%s", interaction.user, grudge_id)
+                await interaction.response.send_message(
+                    f"🕊️ Forgave grudge #{grudge_id}.", ephemeral=False,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Grudge #{grudge_id} already gone.", ephemeral=True,
+                )
+        return cb
+
+
+class _GrudgeForgiveSelect(discord.ui.Select):
+    def __init__(self, options: list[discord.SelectOption]) -> None:
+        super().__init__(
+            placeholder="Forgive one…",
+            min_values=1, max_values=1,
+            options=options,
+            custom_id="halbot:grudge:forgive_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        from .db import grudge_remove
+        try:
+            gid = int(self.values[0])
+        except ValueError:
+            await interaction.response.send_message("Bad grudge id.", ephemeral=True)
+            return
+        if grudge_remove(gid):
+            log.info("[grudge] %s forgave #%s via select", interaction.user, gid)
+            await interaction.response.send_message(f"🕊️ Forgave grudge #{gid}.")
+        else:
+            await interaction.response.send_message(
+                f"Grudge #{gid} already gone.", ephemeral=True,
+            )
+
+
 def register_persistent_views(client: discord.Client) -> None:
     """Attach long-lived views to the client so their buttons survive
     restart. Called from ``on_ready``; safe to call repeatedly.

@@ -159,6 +159,10 @@ def db_init():
                 continue
             if cols and "deleted_at" not in cols:
                 conn.execute(f"ALTER TABLE {tbl} ADD COLUMN deleted_at TIMESTAMP")
+        # Persona scope migration: "user" (per-user directive) or "guild" (applies to everyone).
+        persona_cols = {row[1] for row in conn.execute("PRAGMA table_info(personas)").fetchall()}
+        if persona_cols and "scope" not in persona_cols:
+            conn.execute("ALTER TABLE personas ADD COLUMN scope TEXT NOT NULL DEFAULT 'user'")
 
 
 def db_save(name: str, audio: bytes, emoji: str | None, metadata: str | None, saved_by: str,
@@ -241,24 +245,37 @@ def db_delete(name: str) -> bool:
 def persona_list() -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, directive, set_by, created_at FROM personas "
+            "SELECT id, directive, set_by, scope, created_at FROM personas "
             "WHERE deleted_at IS NULL ORDER BY created_at"
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def persona_add(directive: str, set_by: str) -> int:
+def persona_add(directive: str, set_by: str, scope: str = "user") -> int:
     if len(directive) > PERSONA_MAX_CHARS:
         raise ValueError(f"Directive too long ({len(directive)} chars). Max is {PERSONA_MAX_CHARS}.")
+    if scope not in ("user", "guild"):
+        raise ValueError(f"scope must be 'user' or 'guild', got {scope!r}")
     current = persona_list()
     if len(current) >= PERSONA_MAX_TOTAL:
         raise ValueError(f"Too many directives ({len(current)}). Max is {PERSONA_MAX_TOTAL}. Ask someone to clear some first.")
     with _db() as conn:
         cur = conn.execute(
-            "INSERT INTO personas (directive, set_by) VALUES (?, ?)",
-            (directive, set_by),
+            "INSERT INTO personas (directive, set_by, scope) VALUES (?, ?, ?)",
+            (directive, set_by, scope),
         )
         return cur.lastrowid
+
+
+def persona_set_scope(persona_id: int, scope: str) -> bool:
+    if scope not in ("user", "guild"):
+        raise ValueError(f"scope must be 'user' or 'guild', got {scope!r}")
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE personas SET scope = ? WHERE id = ? AND deleted_at IS NULL",
+            (scope, persona_id),
+        )
+        return cur.rowcount > 0
 
 
 def persona_update(persona_id: int, directive: str) -> bool:

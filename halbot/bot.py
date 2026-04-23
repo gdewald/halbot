@@ -30,7 +30,13 @@ from .llm import (
     describe_emoji_image, format_events_for_prompt, parse_intent,
 )
 from .bot_ui import EmbedField, Mode, ReplyPayload, refusal_payload, send_halbot_reply
-from .interactions import SoundboardActionsView, register_persistent_views
+from .interactions import (
+    GrudgeForgiveView,
+    PersonaActionsView,
+    SoundboardActionsView,
+    TriggerActionsView,
+    register_persistent_views,
+)
 from .slash import register_slash
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
@@ -363,7 +369,23 @@ async def _fire_text_triggers(message: discord.Message) -> None:
                 reason=mv,
             )
             if at == "reply":
-                await message.channel.send(ap[:2000])
+                fire_count = int(r.get("fire_count") or 0) + 1
+                emb = ReplyPayload(
+                    mode=Mode.TRIGGER,
+                    title=ap[:256] or "(empty reply)",
+                    description="*(configured reply — no mention needed)*",
+                    fields=(
+                        EmbedField("Matched phrase", f"`{mv}`", inline=True),
+                        EmbedField("Scope", "this guild", inline=True),
+                        EmbedField("Fire count", f"**{fire_count}**", inline=True),
+                    ),
+                    subtext=f"Text trigger fired · phrase: \"{mv}\" · action: reply · fires: {fire_count}",
+                    footer="Owner can tune triggers in the dashboard",
+                )
+                await send_halbot_reply(
+                    message.channel, payload=emb,
+                    view=TriggerActionsView(int(tid)) if tid is not None else None,
+                )
             elif at == "voice_play":
                 if not guild:
                     continue
@@ -561,6 +583,10 @@ async def on_message(message: discord.Message):
         action_count=len(actions) if isinstance(actions, list) else 0,
     )
     replies = []
+    # Dedicated embed sends queued during the action loop (persona.save,
+    # fact.add, grudge.list). Sent before the generic text embed so they
+    # show up as distinct Discord messages with their own views.
+    extra_sends: list[tuple[ReplyPayload, discord.ui.View | None]] = []
 
     def _reply(default: str, intent: dict = None) -> str:
         llm_msg = (intent or {}).get("message")
@@ -869,9 +895,22 @@ async def on_message(message: discord.Message):
             directive = intent.get("directive", "")
             confirm_msg = intent.get("message", "Got it!")
             try:
-                persona_add(directive, str(message.author))
-                log.info("Persona directive added by %s: %s", message.author, directive)
-                replies.append(confirm_msg)
+                pid = persona_add(directive, str(message.author))
+                log.info("Persona directive #%s added by %s: %s", pid, message.author, directive)
+                trigger_line = f"mentions from {message.author.display_name}"
+                persona_payload = ReplyPayload(
+                    mode=Mode.PERSONA_SAVED,
+                    title=(directive[:120] + ("…" if len(directive) > 120 else "")) or "Persona saved",
+                    description=confirm_msg,
+                    fields=(
+                        EmbedField("Trigger", trigger_line, inline=True),
+                        EmbedField("Scope", "per-user (default)", inline=True),
+                        EmbedField("Saved", "just now", inline=True),
+                    ),
+                    subtext=f"Intent: persona.save · scope: user {message.author.display_name} · kind: `personas`",
+                    footer='Edit or remove in the dashboard · or ask me "drop my persona"',
+                )
+                extra_sends.append((persona_payload, PersonaActionsView(pid, "user")))
             except ValueError as e:
                 replies.append(str(e))
 
@@ -928,7 +967,20 @@ async def on_message(message: discord.Message):
             try:
                 fid = fact_add(subject, claim, str(message.author))
                 log.info("Fact #%s added by %s: %s — %s", fid, message.author, subject, claim)
-                replies.append(confirm_msg)
+                fact_payload = ReplyPayload(
+                    mode=Mode.NOTED,
+                    title=f"Fact stored about {subject}" if subject else "Fact stored",
+                    description=confirm_msg,
+                    fields=(
+                        EmbedField("Fact", f'"{claim}"', inline=False),
+                        EmbedField("Subject", subject or "(none)", inline=True),
+                        EmbedField("Source", f"{message.author.display_name} · this msg", inline=True),
+                        EmbedField("Kind", "`facts`", inline=True),
+                    ),
+                    subtext=f"Intent resolved · `fact.add` (about {subject}) · noted with source message",
+                    footer='Facts inform future replies · forget with "halbot forget that"',
+                )
+                extra_sends.append((fact_payload, None))
             except ValueError as e:
                 replies.append(str(e))
 
@@ -1043,18 +1095,40 @@ async def on_message(message: discord.Message):
                 replies.append(f"Couldn't find grudge #{gid}.")
 
         elif action == "grudge_list":
+            subject = (intent.get("subject") or "").strip()
             rows = grudge_list()
+            if subject:
+                subj_lower = subject.lower()
+                rows = [r for r in rows if (r.get("target_name") or "").lower() == subj_lower]
             if not rows:
-                replies.append("No grudges or devotions logged. I love everyone equally.")
+                replies.append(
+                    f"No grudges logged about {subject}." if subject
+                    else "No grudges or devotions logged. I love everyone equally."
+                )
             else:
-                lines = []
-                for r in rows:
-                    pol = r["polarity"]
+                fields: list[EmbedField] = []
+                for i, r in enumerate(rows[:10], start=1):
+                    pol = r.get("polarity", 0)
+                    sev = "🔴" if pol < -1 else ("🟡" if pol < 0 else ("🟢" if pol > 0 else "⚪"))
+                    note = (r.get("note") or "").strip() or "(no note)"
                     tag = f"+{pol}" if pol > 0 else str(pol)
-                    note = f" — _{r['note']}_" if r.get("note") else ""
-                    lines.append(f"- [#{r['id']}] **{r['target_name']}** ({tag}){note}  _(by {r['set_by']})_")
-                header = f"**Relationships ({len(rows)}):**\n"
-                replies.append(_reply(header + "\n".join(lines), intent))
+                    fields.append(EmbedField(
+                        name=f"#{i} · {r['target_name']}",
+                        value=f"{note} · severity {sev} · polarity `{tag}`",
+                        inline=False,
+                    ))
+                title = (
+                    f"What I'm holding onto about {subject}" if subject
+                    else f"Ledger · {len(rows)} relationship(s)"
+                )
+                grudge_payload = ReplyPayload(
+                    mode=Mode.GRUDGE_LEDGER,
+                    title=title,
+                    fields=tuple(fields),
+                    subtext=f"Intent: grudge.list{' · subject: ' + subject if subject else ''}",
+                    footer="kind: grudges · tombstoned grudges stay recoverable until purge",
+                )
+                extra_sends.append((grudge_payload, GrudgeForgiveView(rows)))
 
         elif action == "grudge_clear":
             confirm_msg = intent.get("message")
@@ -1311,7 +1385,12 @@ async def on_message(message: discord.Message):
                 message, payload=refusal_payload(refusal_reason),
                 reply_to=message,
             )
-    elif replies:
+    else:
+        for payload, view in extra_sends:
+            await send_halbot_reply(
+                message.channel, payload=payload, view=view, reply_to=message,
+            )
+    if refusal_reason is None and replies:
         joined = "\n\n".join(replies)
         # Voice-connected path: still TTS the reply (plain text). The
         # voice-card flows land in phase 5 of plan 014.
