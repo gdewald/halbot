@@ -110,6 +110,47 @@ export function StatsPanel() {
     [sounds]
   );
 
+  // Group parent→child so effect-derived rows render as sub-bullets under
+  // their source. Live-play-only rows (id=0) and rows whose parent_id
+  // points outside the visible set fall back to root level.
+  const displayRows = useMemo(() => {
+    const visibleIds = new Set(sounds.map(s => s.id).filter(Boolean));
+    const kids = new Map();  // parent_id -> [child, ...]
+    const roots = [];
+    for (const s of sounds) {
+      const pid = s.parent_id;
+      if (pid && visibleIds.has(pid)) {
+        if (!kids.has(pid)) kids.set(pid, []);
+        kids.get(pid).push(s);
+      } else {
+        roots.push(s);
+      }
+    }
+    for (const arr of kids.values()) {
+      arr.sort((a, b) => (b.plays || 0) - (a.plays || 0));
+    }
+    roots.sort((a, b) => (b.plays || 0) - (a.plays || 0));
+    const flat = [];
+    for (const r of roots) {
+      flat.push({ row: r, depth: 0 });
+      for (const c of (kids.get(r.id) || [])) {
+        flat.push({ row: c, depth: 1 });
+      }
+    }
+    return flat;
+  }, [sounds]);
+
+  const parseEffects = (raw) => {
+    if (!raw) return '';
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length) {
+        return arr.map(e => (e && e.type) || '?').join(' + ');
+      }
+    } catch { /* swallow */ }
+    return '';
+  };
+
   const emojiIndex = useMemo(() => {
     const byId = new Map();
     const byName = new Map();
@@ -160,26 +201,39 @@ export function StatsPanel() {
             <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>
               no soundboard rows — save some sounds first
             </div>
-          ) : sounds.slice(0, 30).map((s, i) => (
-            <div key={s.name || i} style={{
-              display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px',
-              alignItems: 'center', gap: 8, padding: '6px 14px',
-              borderBottom: i < Math.min(sounds.length, 30) - 1 ? `1px solid ${T.border}` : 'none',
-              background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)',
-            }}>
-              <span style={{ fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}><EmojiCell raw={s.emoji} emojiIndex={emojiIndex} /></span>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: T.cyan, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name || '—'}</span>
-              <span style={{ fontSize: 11, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: s.metadata ? 'normal' : 'italic' }}>
-                {s.metadata || (s.saved_by === '(live)' ? 'live soundboard' : '—')}
-              </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <MiniBar value={s.plays} max={maxPlays} color={T.blurple} />
-                <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text, minWidth: 30, textAlign: 'right' }}>{s.plays}</span>
+          ) : displayRows.slice(0, 30).map(({ row: s, depth }, i, arr) => {
+            const isChild = depth > 0;
+            const effects = isChild ? parseEffects(s.effects) : '';
+            const metaDisplay = s.metadata
+              || (effects ? effects : (s.saved_by === '(live)' ? 'live soundboard' : '—'));
+            return (
+              <div key={s.id || s.name || i} style={{
+                display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px',
+                alignItems: 'center', gap: 8, padding: '6px 14px',
+                borderBottom: i < Math.min(arr.length, 30) - 1 ? `1px solid ${T.border}` : 'none',
+                background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)',
+              }}>
+                <span style={{ fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                  {isChild ? <span style={{ color: T.dim, fontFamily: 'JetBrains Mono', fontSize: 11 }}>└</span> : <EmojiCell raw={s.emoji} emojiIndex={emojiIndex} />}
+                </span>
+                <span style={{
+                  fontFamily: 'JetBrains Mono', fontSize: 12,
+                  color: isChild ? T.sub : T.cyan,
+                  paddingLeft: isChild ? 14 : 0,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{s.name || '—'}</span>
+                <span style={{ fontSize: 11, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: (s.metadata || effects) ? 'normal' : 'italic' }}>
+                  {metaDisplay}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <MiniBar value={s.plays} max={maxPlays} color={T.blurple} />
+                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: T.text, minWidth: 30, textAlign: 'right' }}>{s.plays}</span>
+                </div>
+                <span style={{ fontSize: 11, color: T.sub }}>{fmtRelative(s.last_played_unix)}</span>
+                <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'right' }}>{fmtByteCol(s.size_bytes)}</span>
               </div>
-              <span style={{ fontSize: 11, color: T.sub }}>{fmtRelative(s.last_played_unix)}</span>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'right' }}>{fmtByteCol(s.size_bytes)}</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Voice playback */}

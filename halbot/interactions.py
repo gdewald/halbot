@@ -77,7 +77,7 @@ class SoundboardActionsView(discord.ui.View):
 
     @discord.ui.button(
         label="Replay", style=discord.ButtonStyle.secondary,
-        emoji="↺", custom_id="halbot:sb:replay",
+        emoji="🔁", custom_id="halbot:sb:replay",
     )
     async def replay(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         from .db import db_get
@@ -153,7 +153,7 @@ class AdminStatusView(discord.ui.View):
 
     @discord.ui.button(
         label="Undelete…", style=discord.ButtonStyle.secondary,
-        emoji="↶", custom_id="halbot:admin:undelete_hint",
+        emoji="🔙", custom_id="halbot:admin:undelete_hint",
     )
     async def undelete_hint(self, interaction, button) -> None:  # type: ignore[no-untyped-def]
         await interaction.response.send_message(
@@ -271,7 +271,7 @@ class _UndeleteAllButton(discord.ui.Button):
         super().__init__(
             style=discord.ButtonStyle.success,
             label=f"Undelete all {kind}",
-            emoji="↶",
+            emoji="🔙",
             custom_id=f"halbot:admin:undelete_all:{kind}",
         )
         self.kind = kind
@@ -318,7 +318,7 @@ class PanicConfirmView(discord.ui.View):
         await interaction.response.send_modal(PanicModal(self.include_sounds))
 
     @discord.ui.button(
-        label="Cancel", style=discord.ButtonStyle.secondary, emoji="✕",
+        label="Cancel", style=discord.ButtonStyle.secondary, emoji="🛑",
     )
     async def cancel(self, interaction, button) -> None:  # type: ignore[no-untyped-def]
         for child in self.children:

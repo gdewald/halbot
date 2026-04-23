@@ -241,6 +241,9 @@ class JsApi:
             name = row.get("name") or ""
             count, last = plays.get(name, (0, 0))
             out.append({
+                "id": int(row.get("id") or 0),
+                "parent_id": int(row["parent_id"]) if row.get("parent_id") else None,
+                "effects": row.get("effects") or "",
                 "name": name,
                 "emoji": row.get("emoji") or "",
                 "metadata": row.get("metadata") or "",
@@ -255,6 +258,7 @@ class JsApi:
         for name, (count, last) in plays.items():
             if name and name not in saved_names:
                 out.append({
+                    "id": 0, "parent_id": None, "effects": "",
                     "name": name, "emoji": "", "metadata": "",
                     "size_bytes": 0, "saved_by": "(live)",
                     "created_at": "", "plays": count, "last_played_unix": last,
