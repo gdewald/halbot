@@ -67,17 +67,33 @@ class KokoroEngine(TTSEngine):
         with self._lock:
             if self._pipeline is not None:
                 return self._pipeline
-            log.info("[tts] Loading Kokoro-82M (lang=%s voice=%s) …", self.lang, self.voice)
+            log.info("[tts] stage=begin-load lang=%s voice=%s", self.lang, self.voice)
+            # Force CPU: Ollama already holds ~12 GiB on the GPU and loading
+            # Kokoro onto the same device has crashed the NVIDIA driver (GPU
+            # TDR, msvcp140 access violation). Kokoro-82M runs fast enough
+            # on CPU for real-time voice replies.
+            log.info("[tts] stage=import-kokoro")
             from kokoro import KPipeline  # type: ignore[import-not-found]
-            self._pipeline = KPipeline(lang_code=self.lang)
-            log.info("[tts] Kokoro loaded")
+            log.info("[tts] stage=import-torch")
+            import torch  # type: ignore[import-not-found]
+            log.info("[tts] stage=construct-pipeline")
+            self._pipeline = KPipeline(lang_code=self.lang, device="cpu")
+            log.info("[tts] stage=params-to-cpu")
+            try:
+                for p in self._pipeline.model.parameters():
+                    p.data = p.data.to("cpu")
+            except Exception:
+                pass
+            log.info("[tts] stage=loaded device=cpu")
             return self._pipeline
 
     def synth(self, text: str) -> tuple[bytes, str]:
         import numpy as np
         import soundfile as sf  # type: ignore[import-not-found]
 
+        log.info("[tts] stage=synth-begin chars=%d", len(text))
         pipeline = self._load()
+        log.info("[tts] stage=synth-generate")
         chunks: list[np.ndarray] = []
         # KPipeline yields (graphemes, phonemes, audio) per chunk.  audio is
         # a torch.Tensor or numpy array on CPU; concatenate all chunks into
@@ -89,9 +105,11 @@ class KokoroEngine(TTSEngine):
             chunks.append(arr.astype(np.float32))
         if not chunks:
             raise RuntimeError(f"Kokoro produced no audio for text: {text!r}")
+        log.info("[tts] stage=synth-encode chunks=%d", len(chunks))
         waveform = np.concatenate(chunks)
         buf = io.BytesIO()
         sf.write(buf, waveform, self.SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        log.info("[tts] stage=synth-done bytes=%d", buf.tell())
         return buf.getvalue(), "wav"
 
     def unload(self) -> None:

@@ -26,6 +26,11 @@ daemon = [
     "kokoro>=0.9",
     "soundfile>=0.12",
     "nvidia-cublas-cu12>=12.9.2.10",
+    # kokoro -> misaki -> spacy.load("en_core_web_sm"). Not a transitive dep
+    # of spacy itself; must be installed explicitly, otherwise uv sync prunes
+    # it and the frozen bundle can't phonemize English. Installed from a wheel
+    # URL because PyPI doesn't host spaCy models.
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 tray = [
     "grpcio>=1.60",

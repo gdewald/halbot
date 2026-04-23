@@ -47,12 +47,135 @@ param(
     [switch]$BuildOnly,
     [switch]$NoBuild,
     [switch]$Clean,
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Internal: set when this invocation is the self-elevated child.
+    [switch]$ElevatedChild,
+    # Internal: path the elevated child writes streamed output to.
+    [string]$ElevatedLog
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
+
+# ---- pre-elevate gate ----
+# Fire UAC at the top (not after build) so the user can walk away for the
+# whole 3-min build without watching for a prompt. The child reruns this
+# same script with -ElevatedChild, streaming its log back to the caller
+# via the same tailer pattern used for the post-build swap.
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+if (-not $isAdmin -and -not $ElevatedChild -and -not $DryRun -and -not $BuildOnly) {
+    $logFile  = Join-Path $env:TEMP ("halbot-deploy-{0}.log" -f ([Guid]::NewGuid().ToString("N").Substring(0,8)))
+    $doneFile = "$logFile.done"
+    $exitFile = "$logFile.exit"
+    Set-Content -Path $logFile -Value "" -Encoding utf8
+
+    # Rebuild original arg list for the child.
+    $childArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$PSCommandPath,"-ElevatedChild","-ElevatedLog",$logFile)
+    foreach ($sw in @("Daemon","Tray","Force","NoBuild","Clean")) {
+        if ($PSBoundParameters[$sw]) { $childArgs += "-$sw" }
+    }
+
+    Write-Host "[deploy] elevating up-front; streaming log..." -ForegroundColor Cyan
+    $proc = Start-Process powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList $childArgs
+
+    $pos = 0
+    $timeoutSec = 900  # build can take ~3 min; give headroom for -Clean rebuilds and slow disks.
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while (-not (Test-Path $doneFile)) {
+        if ((Get-Date) -gt $deadline) {
+            Write-Host "[deploy] timeout waiting for elevated child (${timeoutSec}s)." -ForegroundColor Red
+            break
+        }
+        if (Test-Path $logFile) {
+            try {
+                $fs = [System.IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
+                if ($fs.Length -gt $pos) {
+                    $fs.Seek($pos, 'Begin') | Out-Null
+                    $sr = New-Object System.IO.StreamReader($fs)
+                    $chunk = $sr.ReadToEnd()
+                    $pos = $fs.Position
+                    $sr.Close()
+                    if ($chunk) { Write-Host $chunk -NoNewline }
+                }
+                $fs.Close()
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 150
+    }
+    # Final flush.
+    if (Test-Path $logFile) {
+        try {
+            $fs = [System.IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
+            if ($fs.Length -gt $pos) {
+                $fs.Seek($pos, 'Begin') | Out-Null
+                $sr = New-Object System.IO.StreamReader($fs)
+                $chunk = $sr.ReadToEnd()
+                $sr.Close()
+                if ($chunk) { Write-Host $chunk -NoNewline }
+            }
+            $fs.Close()
+        } catch { }
+    }
+    Write-Host ""
+    $childExit = if (Test-Path $exitFile) { [int](Get-Content $exitFile -Raw).Trim() } else { 1 }
+    Remove-Item -Force -ErrorAction Ignore $logFile, $doneFile, $exitFile
+    Pop-Location
+    if ($childExit -ne 0) { throw "elevated deploy failed (exit=$childExit)" }
+    return
+}
+
+# If we are the elevated child, mirror every Write-Host/native stdout into
+# the shared log so the parent tailer sees it. PowerShell's pipeline isn't
+# redirected across Start-Process -Verb RunAs, so we intercept Write-Host
+# and wrap a Tee-like layer.
+if ($ElevatedChild -and $ElevatedLog) {
+    $script:_elevatedLog = $ElevatedLog
+    $script:_origWriteHost = Get-Command Write-Host -CommandType Cmdlet
+    function global:Write-Host {
+        [CmdletBinding()]
+        param(
+            [Parameter(Position=0,ValueFromPipeline=$true,ValueFromRemainingArguments=$true)]
+            [object[]]$Object,
+            [switch]$NoNewline,
+            [ConsoleColor]$ForegroundColor,
+            [ConsoleColor]$BackgroundColor,
+            [object]$Separator
+        )
+        $text = ($Object | ForEach-Object { "$_" }) -join ' '
+        try {
+            $fs = [System.IO.File]::Open($script:_elevatedLog, 'Append', 'Write', 'ReadWrite')
+            $sw = New-Object System.IO.StreamWriter($fs)
+            if ($NoNewline) { $sw.Write($text) } else { $sw.WriteLine($text) }
+            $sw.Flush(); $sw.Close(); $fs.Close()
+        } catch { }
+        # Local echo — invisible hidden window but harmless.
+        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+    }
+    # Wrap the whole remainder so any uncaught exception still writes an
+    # exit sentinel the parent can read.
+    trap {
+        try {
+            Write-Host ""
+            Write-Host "[elevated] ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host $_.ScriptStackTrace
+        } catch { }
+        Set-Content -Path "$script:_elevatedLog.exit" -Value 1
+        Set-Content -Path "$script:_elevatedLog.done" -Value 'done'
+        exit 1
+    }
+}
+
+function Finish-Deploy([int]$code = 0) {
+    # Normal exit. In the elevated child, hand back the exit code via the
+    # sentinel files the parent tailer is watching. In a non-elevated run
+    # it's just a Pop-Location.
+    if ($script:_elevatedLog) {
+        Set-Content -Path "$script:_elevatedLog.exit" -Value $code
+        Set-Content -Path "$script:_elevatedLog.done" -Value 'done'
+    }
+    Pop-Location
+}
 
 # ---- target selection ----
 if ($Daemon -and $Tray) { throw "-Daemon and -Tray are mutually exclusive" }
@@ -221,7 +344,7 @@ if ($DryRun) {
     Write-Host ("  last build:   daemon={0} tray={1}" -f $daemonBuildFp, $trayBuildFp) -ForegroundColor DarkGray
     Write-Host ("  last deploy:  daemon={0} tray={1}" -f $daemonDeployFp, $trayDeployFp) -ForegroundColor DarkGray
     Write-Host "[deploy] -DryRun: exiting without running anything." -ForegroundColor Cyan
-    Pop-Location
+    Finish-Deploy 0
     return
 }
 
@@ -281,13 +404,13 @@ if (-not $BuildOnly) {
 # ---- deploy ----
 if ($BuildOnly) {
     Write-Host "[deploy] -BuildOnly: skipping deploy step." -ForegroundColor Cyan
-    Pop-Location
+    Finish-Deploy 0
     return
 }
 
 if (-not $deployDaemon -and -not $deployTray) {
     Write-Host "[deploy] deploy: nothing to do." -ForegroundColor DarkGray
-    Pop-Location
+    Finish-Deploy 0
     return
 }
 
@@ -461,7 +584,7 @@ if ($isAdmin) {
 Remove-Item -Force -ErrorAction Ignore $logFile, $doneFile, $exitFile, $childPs1, "$childPs1.inner.ps1"
 
 if ($childExit -ne 0) {
-    Pop-Location
+    Finish-Deploy $childExit
     throw "elevated swap failed (exit=$childExit)"
 }
 
@@ -472,4 +595,4 @@ Write-Stamp $stamp
 
 Write-Host ""
 Write-Host "[deploy] OK." -ForegroundColor Green
-Pop-Location
+Finish-Deploy 0

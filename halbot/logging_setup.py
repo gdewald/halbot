@@ -35,3 +35,9 @@ def init(level: str = "INFO") -> None:
 def reconfigure(level: str) -> None:
     lvl = getattr(logging, str(level).upper(), logging.INFO)
     logging.getLogger().setLevel(lvl)
+    # Chatty noise loggers — clamp above DEBUG so root=DEBUG stays readable.
+    # grpc._cython.cygrpc floods hundreds of "[_cygrpc] Loaded running loop"
+    # lines per second; discord.gateway emits a heartbeat keep-alive every
+    # ~40s but also dumps entire WebSocket payload dicts at DEBUG.
+    for name in ("grpc._cython.cygrpc", "grpc", "discord.gateway", "discord.http"):
+        logging.getLogger(name).setLevel(max(lvl, logging.INFO))

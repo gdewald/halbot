@@ -4,11 +4,36 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import logging
+import os
 import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
+
+# Capture Python-level traceback on native segfault. Writes to a dedicated
+# file so it survives the process exit (stderr goes to nssm's rotating
+# service log which the user has to hunt through).
+_fault_log_path = None
+try:
+    fault_dir = Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "Halbot" / "logs"
+    fault_dir.mkdir(parents=True, exist_ok=True)
+    _fault_log_path = fault_dir / "fault.log"
+    _fault_log = open(_fault_log_path, "a", buffering=1)
+    faulthandler.enable(file=_fault_log, all_threads=True)
+except Exception:
+    faulthandler.enable()  # fall back to stderr
+
+# OpenMP runtime clash mitigation: torch/ctranslate2/numpy all ship their own
+# copy of libiomp5md.dll; when two get loaded into the same process OpenMP
+# asserts and aborts the interpreter with an access violation inside
+# msvcp140.dll (seen during `import kokoro` on voice-join). Allowing
+# duplicate lib loads trades an extra ~0.1% runtime for surviving.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Keep MKL on sequential threading so it never races with torch's OpenMP pool.
+os.environ.setdefault("MKL_THREADING_LAYER", "SEQUENTIAL")
 
 from . import config, logging_setup
 
@@ -108,11 +133,32 @@ def _cmd_setup(args) -> int:
     return 2
 
 
+def _cmd_synth_test(_args) -> int:
+    """Load the TTS engine and synthesize one line. Repros voice-join
+    crash without needing Discord. Prints which stage crashes."""
+    print(f"[synth-test] python={sys.version}", flush=True)
+    print(f"[synth-test] frozen={getattr(sys, 'frozen', False)}", flush=True)
+    print(f"[synth-test] KMP_DUPLICATE_LIB_OK={os.environ.get('KMP_DUPLICATE_LIB_OK')}", flush=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    print("[synth-test] stage=import-tts-module", flush=True)
+    from . import tts
+    print("[synth-test] stage=get-engine", flush=True)
+    engine = tts.get_engine()
+    if engine is None:
+        print("[synth-test] no engine configured", flush=True)
+        return 1
+    print(f"[synth-test] stage=synth engine={engine.name}", flush=True)
+    audio, fmt = engine.synth("Hello from the test path.")
+    print(f"[synth-test] OK bytes={len(audio)} fmt={fmt}", flush=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="halbot-daemon")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("run", help="run the daemon (foreground)")
+    sub.add_parser("synth-test", help="run one TTS synth and exit (crash repro)")
 
     sp = sub.add_parser("setup", help="install/uninstall Windows service + registry, or set-secret")
     g = sp.add_mutually_exclusive_group(required=True)
@@ -134,6 +180,8 @@ def main(argv=None) -> int:
         return _cmd_run(args)
     if args.cmd == "setup":
         return _cmd_setup(args)
+    if args.cmd == "synth-test":
+        return _cmd_synth_test(args)
     return 2
 
 
