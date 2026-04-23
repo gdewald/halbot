@@ -144,10 +144,22 @@ async def send_halbot_reply(
     if view is not None:
         send_kwargs["view"] = view
 
+    async def _reply_or_fallback(msg: discord.Message) -> discord.Message:
+        try:
+            return await msg.reply(**send_kwargs, mention_author=False)
+        except discord.errors.HTTPException as e:
+            # Original message deleted between dispatch and reply (LLM
+            # rewrite can take several seconds). 50035 "Unknown message"
+            # on message_reference — fall back to plain channel send so
+            # the response isn't lost.
+            if getattr(e, "code", None) == 50035 or "Unknown message" in str(e):
+                return await msg.channel.send(**send_kwargs)
+            raise
+
     if reply_to is not None:
-        return await reply_to.reply(**send_kwargs, mention_author=False)
+        return await _reply_or_fallback(reply_to)
     if isinstance(dest, discord.Message):
-        return await dest.reply(**send_kwargs, mention_author=False)
+        return await _reply_or_fallback(dest)
     return await dest.send(**send_kwargs)
 
 

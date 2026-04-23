@@ -8,20 +8,63 @@ import discord
 from . import analytics
 from .bot_ui import EmbedField, Mode, ReplyPayload, send_halbot_reply
 from .db import (
-    _env_bool, db_get, db_list, trigger_list, trigger_mark_fired,
+    db_get, db_list, trigger_list, trigger_mark_fired,
     voice_history_append, VOICE_HISTORY_TURNS,
 )
 from .audio import detect_audio_format
 from .llm import (
-    answer_voice_conversation_async, check_wake_word, customize_response_async,
-    parse_voice_combined, parse_voice_intent,
+    answer_voice_conversation_async, customize_response_async,
+    parse_voice_intent,
 )
 
 log = logging.getLogger("halbot")
 
 from . import config as _config
 
-VOICE_LLM_COMBINE_CALLS = _env_bool("voice_llm_combine_calls", True)
+# VOICE_LLM_COMBINE_CALLS config is retained in config.py for schema stability
+# but no longer consulted — wake detection is pure STT substring matching,
+# intent parsing is a single parse_voice_intent call.
+
+# Cheap substring prefilter: if a transcript contains NONE of these tokens we
+# skip the combined LLM call entirely and treat as no_wake. Whisper routinely
+# mis-transcribes "robot" as these variants, so we match loosely. Without
+# this prefilter every ambient utterance ("Thank you", "Oh jeez") burned a
+# 200-token ollama call each and stacked up until read-timeout (120s), which
+# cascaded into audible "Voice command processing failed" TTS feedback that
+# the bot's own mic re-captured → feedback loop.
+_WAKE_PREFILTER_TOKENS = (
+    "robot", "ro bot", "ro-bot", "roebot", "roe bot",
+    "robots", "roboto", "robo ", "row bot", "rowbot",
+)
+
+
+def _has_wake_candidate(transcript: str) -> bool:
+    """True if transcript contains a wake-word token. Substring scan only —
+    no LLM arbitration. Authoritative wake signal for the voice path."""
+    if not transcript:
+        return False
+    t = transcript.lower()
+    return any(tok in t for tok in _WAKE_PREFILTER_TOKENS)
+
+
+def _extract_command(transcript: str) -> str:
+    """Strip the first wake-word token + leading punctuation, return the
+    remainder as the command text. Called only after _has_wake_candidate
+    has returned True."""
+    tl = transcript.lower()
+    # Pick the earliest-occurring token so "robot, tell the robots" doesn't
+    # chop the wrong word.
+    best_idx = -1
+    best_tok = ""
+    for tok in _WAKE_PREFILTER_TOKENS:
+        idx = tl.find(tok)
+        if idx >= 0 and (best_idx < 0 or idx < best_idx):
+            best_idx = idx
+            best_tok = tok
+    if best_idx < 0:
+        return transcript.strip()
+    tail = transcript[best_idx + len(best_tok):]
+    return tail.lstrip(" ,.!?;:-\t\n").strip()
 
 try:
     VOICE_IDLE_TIMEOUT_SECONDS = int(_config.get("voice_idle_timeout_seconds"))
@@ -103,11 +146,13 @@ async def _speak(session, text: str) -> bool:
     if not clean:
         return False
     _tts_t0 = time.monotonic()
+    log.info("[voice-cmd] stage=tts-synth-dispatch engine=%s chars=%d", getattr(engine, "name", "?"), len(clean))
     try:
         audio, fmt = await asyncio.to_thread(engine.synth, clean)
     except Exception:
         log.exception("[tts] Synthesis failed; falling back to text")
         return False
+    log.info("[voice-cmd] stage=tts-synth-returned bytes=%d fmt=%s", len(audio) if audio else 0, fmt)
     _tts_latency_ms = int((time.monotonic() - _tts_t0) * 1000)
     try:
         gid = session.vc.channel.guild.id
@@ -391,74 +436,59 @@ async def _fire_voice_triggers(session, guild, user_id, transcript: str) -> None
 async def handle_voice_command(guild, user_id, transcript):
     """Callback from VoiceListener with a raw STT transcript.
 
-    Owns wake-word detection: single combined call or two sequential calls
-    depending on VOICE_LLM_COMBINE_CALLS.
+    Wake detection: substring match against known phonetic variants of
+    "robot" in the STT output. No LLM is consulted for wake — only for
+    intent parsing on transcripts that already passed the substring gate.
     """
+    log.info("[voice-cmd] stage=begin user=%s transcript=%r", user_id, transcript[:120])
     session = voice_listeners.get(guild.id)
     if not session:
         return
-    # Ambient reflexes: scan transcript for keyword_voice triggers regardless of wake.
+    # Ambient reflexes: keyword_voice triggers fire on every transcript,
+    # regardless of wake word. MUST stay above the wake-candidate prefilter
+    # below — triggers are explicitly designed to bypass the wake gate so
+    # users can bind reactions to any spoken phrase (e.g. slur → cough sound)
+    # without saying "robot" first. Do not move this past the prefilter.
     await _fire_voice_triggers(session, guild, user_id, transcript)
     sink = session.message_sink
     history = list(session.history)
 
-    if VOICE_LLM_COMBINE_CALLS:
-        try:
-            import discord
-            sounds = list(await guild.fetch_soundboard_sounds())
-        except Exception:
-            sounds = []
-        saved = db_list()
-        _llm_t0 = time.monotonic()
-        status, actions = await asyncio.to_thread(
-            parse_voice_combined, transcript, sounds, saved, history
-        )
-        analytics.record(
-            "llm_call",
-            user_id=user_id,
-            guild_id=guild.id,
-            target="parse_voice_combined",
-            latency_ms=int((time.monotonic() - _llm_t0) * 1000),
-            status=status,
-            action_count=len(actions) if isinstance(actions, list) else 0,
-        )
-        if status == "no_wake":
-            log.info("[voice] no wake word in: %r", transcript)
-            return
-        if status == "error":
-            log.warning("[voice] combined LLM call errored on: %r", transcript)
-            await _voice_feedback(session, sink, "Voice command processing failed.")
-            return
-        if not actions:
-            actions = [{"action": "unknown",
-                        "message": "I heard you but couldn't pick a sound for that."}]
-    else:
-        wake, command = await asyncio.to_thread(check_wake_word, transcript)
-        if not wake:
-            log.info("[voice] no wake word in: %r", transcript)
-            return
-        if not command:
-            log.info("[voice] wake word alone, no command")
-            return
-        log.info("[voice] user=%s command: %r", user_id, command)
-        try:
-            import discord
-            sounds = list(await guild.fetch_soundboard_sounds())
-        except Exception:
-            sounds = []
-        saved = db_list()
-        _llm_t0 = time.monotonic()
-        actions = await asyncio.to_thread(
-            parse_voice_intent, command, sounds, saved, history
-        )
-        analytics.record(
-            "llm_call",
-            user_id=user_id,
-            guild_id=guild.id,
-            target="parse_voice_intent",
-            latency_ms=int((time.monotonic() - _llm_t0) * 1000),
-            action_count=len(actions) if isinstance(actions, list) else 0,
-        )
+    # Wake detection is now pure STT substring matching — no LLM arbitration.
+    # Whisper already transcribes the speech; we just look for the wake token.
+    # This replaced a combined wake+intent LLM call and a separate classifier
+    # LLM call that were both unreliable under ollama load and produced
+    # feedback loops when they timed out.
+    if not _has_wake_candidate(transcript):
+        log.info("[voice] no wake word in: %r", transcript[:80])
+        return
+
+    command = _extract_command(transcript)
+    if not command:
+        log.info("[voice] wake word alone, no command in: %r", transcript[:80])
+        return
+
+    log.info("[voice] user=%s command: %r", user_id, command)
+    try:
+        import discord
+        sounds = list(await guild.fetch_soundboard_sounds())
+    except Exception:
+        sounds = []
+    saved = db_list()
+    _llm_t0 = time.monotonic()
+    actions = await asyncio.to_thread(
+        parse_voice_intent, command, sounds, saved, history
+    )
+    analytics.record(
+        "llm_call",
+        user_id=user_id,
+        guild_id=guild.id,
+        target="parse_voice_intent",
+        latency_ms=int((time.monotonic() - _llm_t0) * 1000),
+        action_count=len(actions) if isinstance(actions, list) else 0,
+    )
+    if not actions:
+        actions = [{"action": "unknown",
+                    "message": "I heard you but couldn't pick a sound for that."}]
 
     saved_map = {s["name"]: s for s in saved}
     sound_map = {s.name: s for s in sounds}

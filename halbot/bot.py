@@ -16,6 +16,7 @@ from .audio import (
     apply_effects_chain, detect_audio_format, validate_audio,
 )
 from .db import (
+    DuplicateSound,
     db_delete, db_get, db_get_by_id, db_init, db_list, db_save, db_update,
     emoji_db_list, emoji_db_get, emoji_db_prune, emoji_db_upsert,
     fact_add, fact_clear, fact_list, fact_remove,
@@ -27,7 +28,7 @@ from .db import (
 )
 from .llm import (
     CHANNEL_HISTORY_LIMIT, answer_stats_question_async, customize_response_async,
-    customize_response_rich_async,
+    customize_response_rich_async, customize_flavor_async,
     describe_emoji_image, format_events_for_prompt, parse_intent,
 )
 from .bot_ui import EmbedField, Mode, ReplyPayload, refusal_payload, send_halbot_reply
@@ -146,35 +147,6 @@ _EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
 _URL_RE = re.compile(r"https?://\S+")
 
 
-async def _deliver(message: "discord.Message", full_text: str) -> None:
-    """Send full_text to the user via TTS if bot is in voice, else text.
-
-    Handles chunked text fallback (Discord's 2000-char cap).
-    """
-    if not full_text:
-        return
-    from .voice_session import _speak
-    guild = message.guild
-    session = voice_listeners.get(guild.id) if guild else None
-    if session and session.vc.is_connected():
-        if await _speak(session, full_text):
-            return
-
-    chunks = []
-    remaining = full_text
-    while len(remaining) > 2000:
-        split_at = remaining.rfind("\n", 0, 2000)
-        if split_at == -1:
-            split_at = 2000
-        chunks.append(remaining[:split_at])
-        remaining = remaining[split_at:].lstrip("\n")
-    if remaining:
-        chunks.append(remaining)
-    for i, chunk in enumerate(chunks):
-        if i == 0:
-            await message.reply(chunk)
-        else:
-            await message.channel.send(chunk)
 
 
 def build_client() -> discord.Client:
@@ -229,8 +201,6 @@ async def on_ready():
                     history=voice_history_load(gid),
                 )
                 voice_listeners[gid] = session
-                import threading
-                threading.Thread(target=load_whisper, daemon=True).start()
                 listener.start()
                 if not _channel_has_humans(vc_channel):
                     schedule_voice_idle_timer(gid)
@@ -437,8 +407,10 @@ async def on_message(message: discord.Message):
     log.info("Message received: %r from %s, mentions: %s", message.content, message.author, message.mentions)
     if message.author == client.user:
         return
-    # Ambient reflexes: scan for keyword_text triggers regardless of whether
-    # the bot is mentioned. These run independently of the main LLM flow.
+    # Ambient reflexes: keyword_text triggers fire on every message, mention
+    # or not. MUST stay above the mention check below — triggers are designed
+    # to bypass the wake/mention gate so users can bind reactions to any text
+    # without @mentioning the bot. Do not reorder.
     await _fire_text_triggers(message)
     mentioned = client.user in message.mentions
     is_reply_to_bot = False
@@ -727,6 +699,11 @@ async def on_message(message: discord.Message):
                     try:
                         db_save(sound_name, data, None, metadata, str(message.author))
                         saved_names.append(sound_name)
+                    except DuplicateSound as e:
+                        errors.append(
+                            f"{filename}: already in library as "
+                            f"#{e.existing_id} '{e.existing_name}' (duplicate {e.kind})"
+                        )
                     except Exception as e:
                         log.error("Failed to save uploaded sound %s: %s", filename, e)
                         errors.append(f"{filename}: {e}")
@@ -751,6 +728,11 @@ async def on_message(message: discord.Message):
                             emoji_str = sound.emoji.name if sound.emoji.is_unicode_emoji() else str(sound.emoji)
                         db_save(sound.name, audio, emoji_str, metadata, str(message.author))
                         saved_names.append(sound.name)
+                    except DuplicateSound as e:
+                        errors.append(
+                            f"{sound.name} (already in library as #{e.existing_id} "
+                            f"'{e.existing_name}', duplicate {e.kind})"
+                        )
                     except Exception as e:
                         log.error("Failed to save sound %s: %s", sound.name, e)
                         errors.append(sound.name)
@@ -765,12 +747,49 @@ async def on_message(message: discord.Message):
             if not matched:
                 replies.append("No saved sounds match that.")
             else:
-                lines = []
-                for s in matched:
+                def _fmt_row(s: dict, *, indent: bool = False) -> str:
                     emoji_str = f"{s['emoji']} " if s.get("emoji") else ""
                     size_kb = round(s.get("size_bytes", 0) / 1024, 1)
                     meta_str = f" — {s['metadata']}" if s.get("metadata") else ""
-                    lines.append(f"- {emoji_str}**{s['name']}** ({size_kb}KB, saved by {s.get('saved_by', '?')}){meta_str}")
+                    effect_str = ""
+                    if indent and s.get("effects"):
+                        try:
+                            eff = json.loads(s["effects"])
+                            if isinstance(eff, list) and eff:
+                                effect_str = " · " + " + ".join(
+                                    e.get("type", "?") for e in eff if isinstance(e, dict)
+                                )
+                        except Exception:
+                            pass
+                    prefix = "  - " if indent else "- "
+                    return (
+                        f"{prefix}{emoji_str}**{s['name']}** "
+                        f"({size_kb}KB, saved by {s.get('saved_by', '?')}){effect_str}{meta_str}"
+                    )
+
+                matched_ids = {s["id"] for s in matched}
+                kids_by_parent: dict[int, list[dict]] = {}
+                roots: list[dict] = []
+                for s in matched:
+                    pid = s.get("parent_id")
+                    if pid and pid in matched_ids:
+                        kids_by_parent.setdefault(pid, []).append(s)
+                    else:
+                        # Parent not in matched set (filtered out, or orphaned
+                        # because the real parent was hard-deleted) → render
+                        # at top level with an origin pointer so the user sees
+                        # this isn't a clean root.
+                        roots.append(s)
+
+                lines: list[str] = []
+                for s in roots:
+                    line = _fmt_row(s)
+                    pid = s.get("parent_id")
+                    if pid and pid not in matched_ids:
+                        line += f" *(derived from #{pid})*"
+                    lines.append(line)
+                    for child in kids_by_parent.get(s["id"], []):
+                        lines.append(_fmt_row(child, indent=True))
                 replies.append(_reply(f"**Saved library ({len(matched)}):**\n" + "\n".join(lines), intent))
 
         elif action == "saved_update":
@@ -888,6 +907,11 @@ async def on_message(message: discord.Message):
                 )
                 replies.append(_reply(default_msg, intent))
                 saved_map[save_as] = db_get(save_as)
+            except DuplicateSound as e:
+                replies.append(
+                    f"Effect applied but not saved: already in library as "
+                    f"#{e.existing_id} '{e.existing_name}' (duplicate {e.kind})."
+                )
             except Exception as e:
                 log.error("Failed to save processed sound %s: %s", save_as, e)
                 replies.append(f"Effect applied but failed to save: {e}")
@@ -1188,7 +1212,9 @@ async def on_message(message: discord.Message):
                     pass
 
             try:
+                log.info("[voice_join] stage=connect channel=%s", vc_channel.name)
                 vc = await vc_channel.connect(cls=HalbotVoiceRecvClient)
+                log.info("[voice_join] stage=connected vc=%s", type(vc).__name__)
                 listener = VoiceListener(vc, handle_voice_command)
                 session = VoiceSession(
                     listener=listener,
@@ -1197,12 +1223,15 @@ async def on_message(message: discord.Message):
                 )
                 voice_listeners[guild.id] = session
 
-                import threading
-                threading.Thread(target=load_whisper, daemon=True).start()
-                if _preload_tts_engine is not None:
-                    _preload_tts_engine()
+                # Lazy-load whisper + Kokoro on first use: concurrent GPU
+                # initialization while Ollama is serving (~12 GiB resident
+                # on the GPU) has tripped NVIDIA's TDR watchdog and killed
+                # the daemon with a c0000005 in msvcp140.dll.  First-utterance
+                # cold-start (~2s) is the price of not crashing.
 
+                log.info("[voice_join] stage=listener-start")
                 listener.start()
+                log.info("[voice_join] stage=listener-started")
                 if not _channel_has_humans(vc_channel):
                     schedule_voice_idle_timer(guild.id)
                 analytics.record(
@@ -1334,8 +1363,6 @@ async def on_message(message: discord.Message):
             # persona pass on top tends to leak refusals/haikus that
             # crowd out the real numbers.
             final = answer
-            # Force text delivery (bypass voice-TTS path of _deliver): stats
-            # output is markdown tables/lists, useless spoken aloud.
             remaining = final
             while len(remaining) > 2000:
                 split_at = remaining.rfind("\n", 0, 2000)
@@ -1374,18 +1401,13 @@ async def on_message(message: discord.Message):
             replies.append(intent.get("message", "I didn't understand that."))
 
     if refusal_reason is not None:
-        # Persona refusal short-circuits everything: no replies list to
-        # join, no voice playback, no customize pass. Reason is already
-        # in-persona voice from the LLM.
-        session = voice_listeners.get(guild.id) if guild else None
-        voice_connected = bool(session and session.vc.is_connected())
-        if voice_connected:
-            await _deliver(message, refusal_reason)
-        else:
-            await send_halbot_reply(
-                message, payload=refusal_payload(refusal_reason),
-                reply_to=message,
-            )
+        # Persona refusal short-circuits everything. Text-channel messages
+        # always get text responses — being in voice must not hijack the
+        # text reply into TTS.
+        await send_halbot_reply(
+            message, payload=refusal_payload(refusal_reason),
+            reply_to=message,
+        )
     else:
         for payload, view in extra_sends:
             await send_halbot_reply(
@@ -1393,17 +1415,10 @@ async def on_message(message: discord.Message):
             )
     if refusal_reason is None and replies:
         joined = "\n\n".join(replies)
-        # Voice-connected path: still TTS the reply (plain text). The
-        # voice-card flows land in phase 5 of plan 014.
-        session = voice_listeners.get(guild.id) if guild else None
-        voice_connected = bool(session and session.vc.is_connected())
-        if voice_connected:
-            await _deliver(message, joined)
-        else:
-            await _dispatch_text_embed(
-                message, joined, played_sounds=played_sounds,
-                actions=actions,
-            )
+        await _dispatch_text_embed(
+            message, joined, played_sounds=played_sounds,
+            actions=actions,
+        )
 
     if _typing_entered:
         try:
@@ -1443,14 +1458,31 @@ async def _dispatch_text_embed(
         hint_parts.append("actions: " + ", ".join(action_names))
     resolution_hint = " · ".join(hint_parts)
 
-    try:
-        subtext, body = await customize_response_rich_async(
-            body_text, resolution_hint=resolution_hint,
-        )
-    except Exception:
-        log.exception("customize_response_rich_async failed; falling back")
-        subtext = resolution_hint or "Halbot handled your request"
+    # Literal-output actions (directory listings) must NOT go through the
+    # persona-rich rewrite pass — the LLM cheerfully replaces row data
+    # with haiku or "no directives active" when the persona tells it to
+    # be terse. Render the list verbatim, use the resolution hint as
+    # subtext.
+    LITERAL_ACTIONS = {
+        "list", "saved_list", "persona_list", "fact_list",
+        "trigger_list", "grudge_list", "emoji_list",
+    }
+    if any(a in LITERAL_ACTIONS for a in action_names):
         body = body_text
+        try:
+            subtext = await customize_flavor_async(resolution_hint=resolution_hint)
+        except Exception:
+            log.exception("customize_flavor_async failed; falling back to hint")
+            subtext = resolution_hint or "Halbot listing"
+    else:
+        try:
+            subtext, body = await customize_response_rich_async(
+                body_text, resolution_hint=resolution_hint,
+            )
+        except Exception:
+            log.exception("customize_response_rich_async failed; falling back")
+            subtext = resolution_hint or "Halbot handled your request"
+            body = body_text
 
     # Truncate description to Discord's 4096-char limit; overflow goes
     # as a follow-up text message to avoid dropping content silently.
@@ -1552,6 +1584,10 @@ def _resolve_token() -> str | None:
 async def run() -> None:
     """Entrypoint called from halbot.daemon. Initializes DB, builds client, runs until stopped."""
     import discord as _discord
+
+    from . import _native
+    _native.load_opus()
+    _native.ffmpeg_path()
 
     token = _resolve_token()
     if not token:

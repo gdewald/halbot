@@ -88,25 +88,51 @@ if VOICE_RECV_AVAILABLE:
                     return data[:-supp_len]
                 return data
 
+            # Well-known Discord silence Opus packet: 3 bytes, decodes to
+            # 20 ms of silence.  Safe replacement when we must emit SOMETHING
+            # but the real frame is unusable — prevents OpusError from
+            # killing the PacketRouter thread.
+            SILENCE_OPUS = b"\xf8\xff\xfe"
+
             def _dave_decrypt_rtp(packet):
-                """Transport-decrypt, then strip DAVE E2EE layer."""
-                result = original_decrypt(packet)
+                """Transport-decrypt, then strip DAVE E2EE layer.
+
+                Invariants: must return opus bytes the decoder can handle OR
+                the router thread dies on OpusError("corrupted stream") and
+                the whole receive pipeline stops until reconnect. On any
+                failure past the DAVE-ready handshake we emit the silence
+                frame instead of ciphertext.
+                """
+                try:
+                    result = original_decrypt(packet)
+                except Exception:
+                    log.debug("[dave] transport decrypt raised", exc_info=True)
+                    return SILENCE_OPUS
                 session = getattr(vc._connection, "dave_session", None)
                 if not session or not session.ready:
-                    return _strip_dave_supplemental(result)
+                    # Pre-handshake window: frames are plain opus with DAVE
+                    # supplemental tail. Strip + pass.
+                    try:
+                        return _strip_dave_supplemental(result)
+                    except Exception:
+                        return SILENCE_OPUS
                 user_id = vc._ssrc_to_id.get(packet.ssrc)
                 if user_id is None:
-                    return _strip_dave_supplemental(result)
+                    # No ssrc→user mapping yet (speaker not announced) —
+                    # frame is DAVE-encrypted and we can't decrypt without
+                    # the user id. Drop to silence rather than hand opus
+                    # ciphertext.
+                    return SILENCE_OPUS
                 try:
                     return session.decrypt(
                         user_id, _davey.MediaType.audio, result
                     )
                 except Exception:
                     log.debug(
-                        "[dave] decrypt failed ssrc=%s uid=%s, stripping supplemental",
+                        "[dave] decrypt failed ssrc=%s uid=%s, emitting silence",
                         packet.ssrc, user_id, exc_info=True,
                     )
-                    return _strip_dave_supplemental(result)
+                    return SILENCE_OPUS
 
             reader.decryptor.decrypt_rtp = _dave_decrypt_rtp
             log.info("[dave] Patched receive pipeline with DAVE decryption")
@@ -117,13 +143,12 @@ else:
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-WAKE_WORD = "halbot"
-# Biasing prompt fed to whisper's decoder — dramatically improves the chance
-# that the STT engine actually emits the literal string "Halbot" instead of
-# phonetic approximations like "Albot" / "Owlbot" / "Palbot".
+WAKE_WORD = "robot"
+# Biasing prompt fed to whisper's decoder — nudges STT toward literal "robot"
+# instead of homophones ("row bot", "roebot").
 WHISPER_INITIAL_PROMPT = (
-    "Halbot is the name of a Discord bot. "
-    "Users say 'Halbot' to address it, followed by a command."
+    "Robot is the wake word for a Discord bot. "
+    "Users say 'robot' to address it, followed by a command."
 )
 SILENCE_TIMEOUT = 1.5  # seconds of silence to end a speech segment
 MIN_SPEECH_DURATION = 0.4  # ignore segments shorter than this (seconds)
@@ -136,6 +161,10 @@ ENERGY_THRESHOLD = 0.015  # RMS on float32 [-1, 1]; tune if false-triggers
 # ---------------------------------------------------------------------------
 _whisper_model = None
 _whisper_lock = threading.Lock()
+# Serializes transcribe() calls so concurrent users can't thrash GPU
+# memory / kernels. faster-whisper's single-model throughput is higher
+# under serial calls than under parallel ones on a single GPU.
+_transcribe_lock = threading.Lock()
 
 
 def _register_nvidia_dll_dirs() -> None:
@@ -186,14 +215,16 @@ def load_whisper():
     with _whisper_lock:
         if _whisper_model is not None:
             return _whisper_model
+        log.info("[whisper] stage=register-dll-dirs")
         _register_nvidia_dll_dirs()
+        log.info("[whisper] stage=import-faster-whisper")
         from faster_whisper import WhisperModel
 
-        log.info("[whisper] Loading large-v3-turbo on CUDA …")
+        log.info("[whisper] stage=construct-model device=cuda compute=float16 model=large-v3-turbo")
         _whisper_model = WhisperModel(
             "large-v3-turbo", device="cuda", compute_type="float16"
         )
-        log.info("[whisper] Model loaded")
+        log.info("[whisper] stage=model-loaded")
         return _whisper_model
 
 
@@ -226,27 +257,33 @@ def unload_whisper() -> None:
 
 def transcribe(audio_float32: np.ndarray) -> str:
     """Transcribe 16 kHz mono float32 audio.  **Blocking** — run in executor."""
+    log.info("[stt] stage=load-whisper samples=%d", len(audio_float32))
     model = load_whisper()
-    segments, info = model.transcribe(
-        audio_float32,
-        language="en",
-        beam_size=5,
-        # vad_filter disabled — the pipeline already gates on energy VAD before
-        # sending audio here; applying whisper's VAD on top over-filters short
-        # utterances and produces empty results.
-        vad_filter=False,
-        # Bias whisper's decoder toward the wake word so it emits the literal
-        # spelling "Halbot" instead of phonetic approximations.
-        initial_prompt=WHISPER_INITIAL_PROMPT,
-    )
-    texts = []
-    for s in segments:
-        log.debug("[whisper] segment [%.2fs→%.2fs] (p=%.2f): %r", s.start, s.end, s.avg_logprob, s.text)
-        texts.append(s.text)
-    text = " ".join(texts).strip()
-    if not text:
-        log.debug("[whisper] no segments returned (lang=%s prob=%.2f)", info.language, info.language_probability)
-    return text
+    with _transcribe_lock:
+        log.info("[stt] stage=transcribe-begin")
+        segments, info = model.transcribe(
+            audio_float32,
+            language="en",
+            # beam_size=1 (greedy): ~3-5x faster than beam=5 with negligible
+            # accuracy loss on short English utterances. Turbo model already
+            # has high baseline quality.
+            beam_size=1,
+            # Skip the fallback-temperature sweep (0.0 → 0.2 → 0.4 …). On
+            # short clips the default 5-step fallback rarely improves output
+            # but often doubles latency when logprob threshold isn't met.
+            temperature=0.0,
+            vad_filter=False,
+            initial_prompt=WHISPER_INITIAL_PROMPT,
+        )
+        log.info("[stt] stage=transcribe-iterate")
+        texts = []
+        for s in segments:
+            log.debug("[whisper] segment [%.2fs→%.2fs] (p=%.2f): %r", s.start, s.end, s.avg_logprob, s.text)
+            texts.append(s.text)
+        text = " ".join(texts).strip()
+        if not text:
+            log.debug("[whisper] no segments returned (lang=%s prob=%.2f)", info.language, info.language_probability)
+        return text
 
 
 # ---------------------------------------------------------------------------
@@ -578,10 +615,9 @@ class VoiceListener:
 
         log.info("[stt] user=%s (%.1fs): %r", user_id, elapsed, text)
 
-        # Hand the full transcript to the command handler.  Wake-word
-        # detection lives in bot.handle_voice_command (either as a dedicated
-        # classifier call or folded into the combined wake+intent call,
-        # depending on VOICE_LLM_COMBINE_CALLS).
+        # Hand the full transcript to the command handler. Wake-word
+        # detection lives in voice_session.handle_voice_command as a cheap
+        # substring match over known phonetic variants of "halbot" — no LLM.
         try:
             await self.on_command(self.vc.guild, user_id, text)
         except Exception:
@@ -594,16 +630,21 @@ class VoiceListener:
         if self.vc.is_playing():
             self.vc.stop()
 
-        log.info("[play] Playing %d bytes (%s) in #%s", len(audio_bytes), fmt, self.vc.channel.name)
+        log.info("[play] stage=begin bytes=%d fmt=%s channel=#%s", len(audio_bytes), fmt, self.vc.channel.name)
 
         fd, path = tempfile.mkstemp(suffix=f".{fmt}")
         try:
             os.write(fd, audio_bytes)
             os.close(fd)
+            log.info("[play] stage=temp-written path=%s", path)
 
+            from . import _native
+            ffmpeg_exe = _native.ffmpeg_path()
+            ffmpeg_kwargs = {"executable": ffmpeg_exe} if ffmpeg_exe else {}
             source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(path), volume=0.5
+                discord.FFmpegPCMAudio(path, **ffmpeg_kwargs), volume=0.5
             )
+            log.info("[play] stage=source-built")
 
             def _after(error):
                 try:
@@ -614,6 +655,7 @@ class VoiceListener:
                     log.error("[play] Playback error: %s", error)
 
             self.vc.play(source, after=_after)
+            log.info("[play] stage=play-dispatched")
 
         except Exception:
             log.exception("[play] Failed to play sound in voice channel")

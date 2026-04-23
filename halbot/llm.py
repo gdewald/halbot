@@ -323,6 +323,7 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
+    body["reasoning_effort"] = "none"
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
@@ -665,6 +666,91 @@ async def customize_response_rich_async(raw_text: str, *, context: str = "",
     )
 
 
+FLAVOR_SUBTEXT_PROMPT = """\
+You are Halbot. Produce ONE short persona-voiced lead-in line that will
+render as italic grey subtext above a literal data listing (e.g. a sound
+library, persona list, fact list). The listing itself is rendered
+verbatim — do NOT summarize, rewrite, or replace the data. Your line
+just introduces or colors the listing in your current persona voice.
+
+Rules:
+- Exactly one line, plain text, no quotes, no markdown fences, no JSON.
+- <= 120 chars. One short sentence or fragment.
+- It may reference WHAT the listing is (e.g. "here's the library",
+  "every directive you've chained me to"), in your persona voice.
+- Do NOT fabricate entries, counts, or names. The data comes from the
+  listing below — do not restate it.
+- If a persona directive demands a specific verbal tic, honor it within
+  the one-line budget.
+- Output the line only — nothing else.
+{persona_directives_block}
+"""
+
+
+def customize_flavor(resolution_hint: str = "", *, context: str = "") -> str:
+    """One-line persona-voiced lead-in for literal listings.
+
+    Used when the body is a verbatim directory dump (library, persona_list,
+    fact_list, etc.) that MUST NOT be rewritten, but we still want persona
+    flavor in the italic subtext slot. Falls back to resolution_hint on any
+    failure.
+    """
+    fallback = (resolution_hint or "Halbot listing").strip()
+    pd_block = _format_persona_block()
+    if pd_block:
+        pd_block = "\n" + pd_block
+    system = FLAVOR_SUBTEXT_PROMPT.format(persona_directives_block=pd_block)
+    user_msg = f"Listing kind / resolution: {resolution_hint or 'listing'}"
+    if context:
+        user_msg += f"\nContext: {context}"
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.9,
+        "max_tokens": 120,
+    }
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
+    try:
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
+        if resp.status_code >= 400:
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
+        resp.raise_for_status()
+        message = resp.json()["choices"][0].get("message", {})
+        content = (message.get("content") or "").strip()
+        if "<think>" in content and "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        if content.startswith("```"):
+            content = content.strip("`").strip()
+        # Strip surrounding quotes models sometimes add.
+        if len(content) >= 2 and content[0] == content[-1] in ('"', "'"):
+            content = content[1:-1].strip()
+        # Collapse to first non-empty line; hard cap length.
+        for line in content.splitlines():
+            line = line.strip()
+            if line:
+                content = line
+                break
+        if len(content) > 200:
+            content = content[:200].rstrip()
+        if not content:
+            return fallback
+        log.info("[customize-flavor] hint=%r → %r", resolution_hint[:60], content[:100])
+        return content
+    except Exception as e:
+        log.warning("[customize-flavor] failed (%s); falling back to hint", e)
+        return fallback
+
+
+async def customize_flavor_async(resolution_hint: str = "", *, context: str = "") -> str:
+    return await asyncio.to_thread(customize_flavor, resolution_hint, context=context)
+
+
 STATS_QUESTION_PROMPT = """\
 You are Halbot answering a user's question about your own usage,
 analytics, or historical activity in a Discord text channel. You have
@@ -1002,6 +1088,7 @@ def check_wake_word(transcript: str) -> tuple[bool, str]:
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
+    body["reasoning_effort"] = "none"
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
@@ -1130,9 +1217,11 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
             {"role": "user", "content": transcript},
         ],
         "temperature": 0.1,
-        # Bumped from 256 — reasoning-capable models emit <think>…</think>
-        # tokens that eat into the budget before the JSON answer is produced.
-        "max_tokens": 4096,
+        "max_tokens": 512,
+        # Disable reasoning tokens for voice intent — we want immediate JSON,
+        # not a paragraph of <think> deliberation. Cuts parse_voice_intent
+        # latency from 5-15s to <2s on reasoning-capable backends.
+        "reasoning_effort": "none",
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
