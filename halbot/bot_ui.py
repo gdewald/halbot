@@ -151,25 +151,42 @@ async def send_halbot_reply(
     return await dest.send(**send_kwargs)
 
 
-def fenced_table(rows: Iterable[Sequence[str]], *, headers: Sequence[str] | None = None) -> str:
+EMBED_DESCRIPTION_MAX = 4000
+"""Discord caps embed descriptions at 4096 chars — leave slack for fence wrappers."""
+
+
+def fenced_table(
+    rows: Iterable[Sequence[str]], *, headers: Sequence[str] | None = None,
+    max_chars: int = EMBED_DESCRIPTION_MAX, empty_label: str = "(empty)",
+) -> str:
     """Render a fixed-width table inside a ```fenced``` code block.
 
     Used for admin/status, tombstone listings, etc. Discord renders
     monospace reliably inside fenced blocks — embed fields mangle spacing.
+    Guards:
+    - Empty input → fenced ``empty_label``.
+    - Ragged rows (short row → pad with ``""``, long row → widen widths).
+    - Cells with newlines → first-line-only so the grid doesn't explode.
+    - Output > max_chars → trim rows and append a truncation note.
     """
-    rows = [list(r) for r in rows]
-    if headers:
-        header_row = list(headers)
-        widths = [len(h) for h in header_row]
-    else:
-        header_row = None
-        widths = [0] * (len(rows[0]) if rows else 0)
-    for r in rows:
+    rows = [[_flatten_cell(c) for c in r] for r in rows]
+    if not rows and not headers:
+        return f"```\n{empty_label}\n```"
+
+    header_row = list(headers) if headers else None
+    ncols = max(
+        (len(header_row) if header_row else 0),
+        max((len(r) for r in rows), default=0),
+    )
+    # Pad ragged rows so every row has ncols cells.
+    rows = [r + [""] * (ncols - len(r)) for r in rows]
+    if header_row is not None:
+        header_row = header_row + [""] * (ncols - len(header_row))
+
+    widths = [0] * ncols
+    for r in rows + ([header_row] if header_row else []):
         for i, cell in enumerate(r):
-            if i >= len(widths):
-                widths.append(len(cell))
-            else:
-                widths[i] = max(widths[i], len(cell))
+            widths[i] = max(widths[i], len(cell))
 
     def fmt(cells: Sequence[str]) -> str:
         return " ".join(c.ljust(widths[i]) for i, c in enumerate(cells))
@@ -180,7 +197,22 @@ def fenced_table(rows: Iterable[Sequence[str]], *, headers: Sequence[str] | None
         lines.append(" ".join("─" * w for w in widths))
     for r in rows:
         lines.append(fmt(r))
-    return "```\n" + "\n".join(lines) + "\n```"
+    body = "\n".join(lines) if lines else empty_label
+
+    # Enforce max_chars across the rendered body (accounting for fence).
+    envelope = len("```\n") + len("\n```")
+    budget = max(64, max_chars - envelope)
+    if len(body) > budget:
+        trimmed = body[: budget - 32].rstrip()
+        body = trimmed + "\n… (truncated)"
+    return "```\n" + body + "\n```"
+
+
+def _flatten_cell(cell: str) -> str:
+    s = str(cell)
+    if "\n" in s:
+        s = s.splitlines()[0] + "…"
+    return s
 
 
 def refusal_payload(reason: str) -> ReplyPayload:

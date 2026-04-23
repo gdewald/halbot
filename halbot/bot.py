@@ -23,6 +23,7 @@ from .db import (
     persona_add, persona_clear, persona_list, persona_remove, persona_update,
     trigger_add, trigger_clear, trigger_list, trigger_mark_fired, trigger_remove,
     voice_history_load,
+    persona_mark_fired_all,
 )
 from .llm import (
     CHANNEL_HISTORY_LIMIT, answer_stats_question_async, customize_response_async,
@@ -1470,8 +1471,22 @@ async def _dispatch_text_embed(
         mode = Mode.ACTIONED
         view = None
 
+    footer: str | None = None
+    try:
+        active = persona_list()
+        if active:
+            persona_mark_fired_all()
+            # Re-read one row's fire_count post-bump for display.
+            top = max(active, key=lambda p: p.get("fire_count", 0) or 0)
+            directive_short = top["directive"]
+            if len(directive_short) > 40:
+                directive_short = directive_short[:39] + "…"
+            footer = f"persona: {directive_short} · fires: {int(top.get('fire_count') or 0) + 1}"
+    except Exception:
+        log.debug("persona footer failed", exc_info=True)
+
     payload = ReplyPayload(
-        mode=mode, title=title, description=body, subtext=subtext,
+        mode=mode, title=title, description=body, subtext=subtext, footer=footer,
     )
     await send_halbot_reply(message, payload=payload, view=view, reply_to=message)
 

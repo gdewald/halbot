@@ -163,6 +163,8 @@ def db_init():
         persona_cols = {row[1] for row in conn.execute("PRAGMA table_info(personas)").fetchall()}
         if persona_cols and "scope" not in persona_cols:
             conn.execute("ALTER TABLE personas ADD COLUMN scope TEXT NOT NULL DEFAULT 'user'")
+        if persona_cols and "fire_count" not in persona_cols:
+            conn.execute("ALTER TABLE personas ADD COLUMN fire_count INTEGER NOT NULL DEFAULT 0")
 
 
 def db_save(name: str, audio: bytes, emoji: str | None, metadata: str | None, saved_by: str,
@@ -245,10 +247,19 @@ def db_delete(name: str) -> bool:
 def persona_list() -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, directive, set_by, scope, created_at FROM personas "
+            "SELECT id, directive, set_by, scope, fire_count, created_at FROM personas "
             "WHERE deleted_at IS NULL ORDER BY created_at"
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def persona_mark_fired_all() -> int:
+    """Bump fire_count for every active persona (one tick per delivered reply)."""
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE personas SET fire_count = fire_count + 1 WHERE deleted_at IS NULL"
+        )
+        return cur.rowcount
 
 
 def persona_add(directive: str, set_by: str, scope: str = "user") -> int:

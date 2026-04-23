@@ -17,6 +17,22 @@ import discord
 log = logging.getLogger("halbot.interactions")
 
 
+def _dashboard_triggers_url() -> str | None:
+    """Return the deeplink to the triggers panel if configured, else None.
+
+    Used by link-style buttons which must be constructed with a URL at
+    creation time — Discord rejects link buttons with empty/None URLs.
+    """
+    try:
+        from . import config as _config
+        base = (_config.get("halbot_dashboard_url") or "").strip().rstrip("/")
+        if not base:
+            return None
+        return f"{base}/#triggers"
+    except Exception:
+        return None
+
+
 def _is_guild_owner(interaction: discord.Interaction) -> bool:
     guild = interaction.guild
     if not guild:
@@ -395,12 +411,20 @@ class TriggerActionsView(discord.ui.View):
         )
         mute.callback = self._mute  # type: ignore[assignment]
         self.add_item(mute)
-        see = discord.ui.Button(
-            label="See triggers", style=discord.ButtonStyle.secondary,
-            emoji="⚙️", custom_id=f"halbot:trigger:see:{trigger_id}",
-        )
-        see.callback = self._see  # type: ignore[assignment]
-        self.add_item(see)
+
+        dash_url = _dashboard_triggers_url()
+        if dash_url:
+            self.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.link, label="See triggers",
+                emoji="⚙️", url=dash_url,
+            ))
+        else:
+            see = discord.ui.Button(
+                label="See triggers", style=discord.ButtonStyle.secondary,
+                emoji="⚙️", custom_id=f"halbot:trigger:see:{trigger_id}",
+            )
+            see.callback = self._see  # type: ignore[assignment]
+            self.add_item(see)
 
     async def _mute(self, interaction: discord.Interaction) -> None:
         if not _is_guild_owner(interaction):

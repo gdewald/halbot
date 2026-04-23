@@ -29,6 +29,8 @@ DEFAULTS: Dict[str, Any] = {
     "tts_lang": "a",
     "tts_speed": "1.0",
     "analytics_retention_days": "90",
+    "halbot_avatar_url": "",
+    "halbot_dashboard_url": "",
 }
 
 
@@ -249,5 +251,15 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 1.0, "max": 3650.0, "step": 1.0,
         "description": "Days of analytics history retained on disk",
         "group": "general", "label": "ANALYTICS_RETENTION_DAYS",
+    },
+    "halbot_avatar_url": {
+        "type": "URL",
+        "description": "Icon shown next to Halbot's name on embed authors",
+        "group": "general", "label": "HALBOT_AVATAR_URL",
+    },
+    "halbot_dashboard_url": {
+        "type": "URL",
+        "description": "Base URL for the dashboard (used by See-triggers deeplink)",
+        "group": "general", "label": "HALBOT_DASHBOARD_URL",
     },
 }
