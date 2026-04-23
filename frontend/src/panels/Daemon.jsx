@@ -164,12 +164,11 @@ export function DaemonPanel() {
       </div>
 
       {/* Stats grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
         {[
           { label: 'Uptime', value: running ? fmtUptime(health?.uptime_seconds) : '—', mono: true },
           { label: 'Memory', value: running ? String(proc.memory_mb) : '—', unit: 'MB' },
           { label: 'CPU',    value: running ? proc.cpu_pct.toFixed(1)  : '—', unit: '%' },
-          { label: 'Guilds', value: '—', mock: true },
         ].map(s => (
           <div key={s.label} style={{
             background: T.surface, border: `1px solid ${T.border}`,

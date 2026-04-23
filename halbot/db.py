@@ -359,6 +359,15 @@ def emoji_db_list() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def emoji_db_list_full() -> list[dict]:
+    """Same as emoji_db_list but includes image bytes. For dashboard render."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT emoji_id, name, animated, image, description FROM emojis ORDER BY name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def emoji_db_get(emoji_id: int) -> dict | None:
     with _db() as conn:
         row = conn.execute("SELECT emoji_id, name, animated, image, description, description_attempted FROM emojis WHERE emoji_id = ?",

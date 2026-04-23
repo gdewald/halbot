@@ -8,6 +8,7 @@ import { DaemonPanel } from './panels/Daemon.jsx';
 import { ConfigPanel } from './panels/Config.jsx';
 import { StatsPanel } from './panels/Stats.jsx';
 import { AnalyticsPanel } from './panels/Analytics.jsx';
+import { EmojisPanel } from './panels/Emojis.jsx';
 
 const SUBTITLE = {
   logs: '· Live log stream',
@@ -15,6 +16,7 @@ const SUBTITLE = {
   config: '· Runtime configuration',
   stats: '· Activity & stats',
   analytics: '· Interaction analytics',
+  emojis: '· Custom emojis',
 };
 
 export function App() {
@@ -36,6 +38,7 @@ export function App() {
             {panel === 'config' && <ConfigPanel />}
             {panel === 'stats'  && <StatsPanel />}
             {panel === 'analytics' && <AnalyticsPanel />}
+            {panel === 'emojis' && <EmojisPanel />}
           </div>
         </div>
       </div>

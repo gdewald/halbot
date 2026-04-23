@@ -42,11 +42,23 @@ function fmtByteCol(n) {
   return `${Math.round(kb)} KB`;
 }
 
-const CUSTOM_EMOJI_RE = /^<a?:([A-Za-z0-9_]+):\d+>$/;
-function displayEmoji(raw) {
-  if (!raw) return '•';
-  if (CUSTOM_EMOJI_RE.test(raw)) return '•';
-  return raw;
+const CUSTOM_EMOJI_RE = /^<a?:([A-Za-z0-9_]+):(\d+)>$/;
+function parseCustomEmoji(raw) {
+  if (!raw) return null;
+  const m = CUSTOM_EMOJI_RE.exec(raw);
+  if (!m) return null;
+  return { name: m[1], id: m[2] };
+}
+function EmojiCell({ raw, emojiIndex }) {
+  if (!raw) return <span>•</span>;
+  const parsed = parseCustomEmoji(raw);
+  if (!parsed) return <span>{raw}</span>;  // unicode emoji: render directly
+  const hit = emojiIndex?.byId?.get(parsed.id) || emojiIndex?.byName?.get(parsed.name);
+  if (hit?.image_data_url) {
+    return <img src={hit.image_data_url} alt={parsed.name} title={parsed.name}
+                style={{ width: 16, height: 16, objectFit: 'contain', verticalAlign: 'middle' }} />;
+  }
+  return <span title={parsed.name}>•</span>;
 }
 
 function fmtDuration(sec) {
@@ -60,19 +72,22 @@ function fmtDuration(sec) {
 export function StatsPanel() {
   const [stats, setStats] = useState(EMPTY_STATS);
   const [sounds, setSounds] = useState([]);
+  const [emojis, setEmojis] = useState([]);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
       try {
-        const [s, list] = await Promise.all([
+        const [s, list, emj] = await Promise.all([
           b.getStats().catch(() => EMPTY_STATS),
           b.soundboardList().catch(() => []),
+          b.emojiList().catch(() => []),
         ]);
         if (cancelled) return;
         setStats(s || EMPTY_STATS);
         setSounds(Array.isArray(list) ? list : []);
+        setEmojis(Array.isArray(emj) ? emj : []);
         setLoaded(true);
       } catch {
         if (!cancelled) setLoaded(true);
@@ -94,6 +109,16 @@ export function StatsPanel() {
     () => Math.max(1, ...sounds.map(s => s.plays || 0)),
     [sounds]
   );
+
+  const emojiIndex = useMemo(() => {
+    const byId = new Map();
+    const byName = new Map();
+    for (const e of emojis) {
+      if (e.emoji_id) byId.set(String(e.emoji_id), e);
+      if (e.name) byName.set(e.name, e);
+    }
+    return { byId, byName };
+  }, [emojis]);
 
   const sb = stats.soundboard;
   const vp = stats.voice_playback;
@@ -142,7 +167,7 @@ export function StatsPanel() {
               borderBottom: i < Math.min(sounds.length, 30) - 1 ? `1px solid ${T.border}` : 'none',
               background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)',
             }}>
-              <span style={{ fontSize: 14, textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}>{displayEmoji(s.emoji)}</span>
+              <span style={{ fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}><EmojiCell raw={s.emoji} emojiIndex={emojiIndex} /></span>
               <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: T.cyan, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name || '—'}</span>
               <span style={{ fontSize: 11, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: s.metadata ? 'normal' : 'italic' }}>
                 {s.metadata || (s.saved_by === '(live)' ? 'live soundboard' : '—')}

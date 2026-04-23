@@ -262,6 +262,34 @@ class JsApi:
         out.sort(key=lambda r: r["plays"], reverse=True)
         return out
 
+    # ── Emojis ───────────────────────────────────────────────
+    def emoji_list(self) -> List[Dict[str, Any]]:
+        """Return all synced custom emojis with image bytes encoded as data URLs.
+
+        Tray has read access to sounds.db in %ProgramData%\\Halbot.
+        """
+        import base64
+        try:
+            from halbot import db as sounds_db
+            rows = sounds_db.emoji_db_list_full()
+        except Exception as e:
+            log.warning("emoji_list: db unavailable: %s", e)
+            return []
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            img = r.get("image") or b""
+            mime = "image/gif" if img[:4] == b"GIF8" else "image/png"
+            b64 = base64.b64encode(img).decode("ascii") if img else ""
+            out.append({
+                "emoji_id": int(r.get("emoji_id") or 0),
+                "name": r.get("name") or "",
+                "animated": bool(r.get("animated")),
+                "description": r.get("description") or "",
+                "image_data_url": f"data:{mime};base64,{b64}" if b64 else "",
+                "size_bytes": len(img),
+            })
+        return out
+
     # ── Analytics (events) ───────────────────────────────────
     def query_stats(self, kind: str = "", user_id: int = 0, target: str = "",
                     ts_from: int = 0, ts_to: int = 0,
