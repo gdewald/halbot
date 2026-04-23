@@ -457,7 +457,25 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         finish_reason = choice.get("finish_reason", "unknown")
         usage = raw_json.get("usage", {})
         log.info("Ollama finish_reason=%s, usage=%s", finish_reason, usage)
-        content = (choice["message"].get("content") or "").strip()
+        message_obj = choice.get("message", {}) or {}
+        content = (message_obj.get("content") or "").strip()
+        # Handle <think>…</think> wrappers — thinking models hide the JSON
+        # after the closing tag; take whatever follows.
+        if "<think>" in content and "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        elif "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        # Fallback: some servers surface the real JSON in reasoning_content
+        # when the visible content is empty or think-only.
+        if not content:
+            reasoning = (message_obj.get("reasoning_content") or "").strip()
+            if reasoning:
+                start = reasoning.find("{")
+                end = reasoning.rfind("}")
+                if 0 <= start < end:
+                    content = reasoning[start:end + 1]
         log.info("Ollama content: %r", content)
         if not content:
             log.error("Ollama returned empty content (finish_reason=%s)", finish_reason)
