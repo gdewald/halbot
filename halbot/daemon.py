@@ -45,6 +45,8 @@ async def _run_async() -> int:
     from . import analytics
     analytics.init()
     analytics.bind_loop(asyncio.get_running_loop())
+    import os as _os
+    analytics.record("daemon_boot", target=_version(), pid=_os.getpid())
 
     stop_event = asyncio.Event()
 
@@ -71,6 +73,7 @@ async def _run_async() -> int:
     await stop_event.wait()
     for t in tasks:
         t.cancel()
+    analytics.record("daemon_shutdown", target=_version())
     analytics.shutdown()
     await server.stop(grace=2)
     log.info("halbot daemon stopped")
