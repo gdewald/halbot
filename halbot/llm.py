@@ -530,7 +530,11 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
             {"role": "user", "content": user_msg},
         ],
         "temperature": 0.9,
-        "max_tokens": 1600,
+        # Rewrite is 1-2 sentences; ~80 tokens of real output. 384 leaves
+        # room for gemma4 to reason first in the `reasoning` channel.
+        "max_tokens": 384,
+        "think": False,
+        "reasoning_effort": "none",
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -1002,7 +1006,13 @@ def answer_voice_conversation(
             {"role": "user", "content": command or ""},
         ],
         "temperature": 0.8,
-        "max_tokens": 4096,
+        # Voice reply = 1-2 spoken sentences, ~100 tokens real output.
+        # Was 4096 which let gemma4 reason for a full minute before
+        # speaking. 512 caps total generation while still covering
+        # reasoning + answer per our ollama direct tests.
+        "max_tokens": 512,
+        "think": False,
+        "reasoning_effort": "none",
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
