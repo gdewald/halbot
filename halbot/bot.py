@@ -23,8 +23,6 @@ from .db import (
     persona_add, persona_clear, persona_list, persona_remove, persona_update,
     trigger_add, trigger_clear, trigger_list, trigger_mark_fired, trigger_remove,
     voice_history_load,
-    admin_hard_purge, admin_kinds, admin_list_deleted, admin_panic_clear,
-    admin_stats, admin_undelete, admin_undelete_all,
 )
 from .llm import (
     CHANNEL_HISTORY_LIMIT, answer_stats_question_async, customize_response_async,
@@ -33,6 +31,7 @@ from .llm import (
 )
 from .bot_ui import EmbedField, Mode, ReplyPayload, refusal_payload, send_halbot_reply
 from .interactions import SoundboardActionsView, register_persistent_views
+from .slash import register_slash
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
     VoiceSession, _channel_has_humans, _maybe_unload_whisper, _preload_tts_engine,
@@ -105,6 +104,7 @@ def configure_logging(log_path=None) -> None:
 # The discord.Client is built lazily via build_client() so the tray app can
 # recreate a fresh client on each Start (a closed Client can't be reused).
 client: "discord.Client | None" = None
+_slash_tree: "discord.app_commands.CommandTree | None" = None
 
 
 async def sync_emojis(guild: discord.Guild):
@@ -172,7 +172,7 @@ async def _deliver(message: "discord.Message", full_text: str) -> None:
 
 def build_client() -> discord.Client:
     """Create (or recreate) the module-level discord.Client with handlers wired up."""
-    global client
+    global client, _slash_tree
     intents = discord.Intents.default()
     intents.message_content = True
     intents.guilds = True
@@ -183,6 +183,7 @@ def build_client() -> discord.Client:
     client.event(on_message)
     client.event(on_voice_state_update)
     client.event(on_voice_channel_effect)
+    _slash_tree = register_slash(client)
     voice_listeners.clear()
     return client
 
@@ -191,6 +192,14 @@ async def on_ready():
     _set_discord_state("CONNECTED")
     log.info("Logged in as %s (id: %s)", client.user, client.user.id)
     register_persistent_views(client)
+    if _slash_tree is not None:
+        for guild in client.guilds:
+            try:
+                _slash_tree.copy_global_to(guild=guild)
+                synced = await _slash_tree.sync(guild=guild)
+                log.info("[slash] synced %d command(s) to guild %s", len(synced), guild.id)
+            except Exception:
+                log.exception("[slash] sync failed for guild %s", guild.id)
     for guild in client.guilds:
         await sync_emojis(guild)
 
@@ -320,196 +329,6 @@ async def on_voice_state_update(member, before, after):
         schedule_voice_idle_timer(guild.id)
 
 
-ADMIN_PREFIX = "!halbot admin"
-ADMIN_HELP = (
-    "**Halbot admin (owner-only) commands** — recovery / panic.\n"
-    "Kinds: `sounds`, `personas`, `facts`, `triggers`, `grudges`.\n\n"
-    "```\n"
-    "!halbot admin status\n"
-    "    → counts of live + tombstoned rows per kind.\n"
-    "!halbot admin deleted <kind> [limit]\n"
-    "    → list soft-deleted rows, newest first (default limit 25).\n"
-    "!halbot admin undelete <kind> <id>\n"
-    "    → restore one soft-deleted row.\n"
-    "!halbot admin undelete-all <kind>\n"
-    "    → restore every soft-deleted row of that kind.\n"
-    "!halbot admin panic\n"
-    "    → soft-clear ALL personas, facts, triggers, grudges.\n"
-    "    (Sounds are NOT touched — too expensive to re-upload.)\n"
-    "!halbot admin panic all\n"
-    "    → same as above but ALSO soft-clears sounds.\n"
-    "!halbot admin purge <kind> [--older-than=DAYS]\n"
-    "    → PERMANENT delete of tombstoned rows. Irreversible.\n"
-    "!halbot admin help\n"
-    "```"
-)
-
-
-def _is_guild_owner(message: discord.Message) -> bool:
-    guild = message.guild
-    if not guild:
-        return False
-    return getattr(guild, "owner_id", None) == message.author.id
-
-
-async def _admin_send(message: discord.Message, text: str) -> None:
-    remaining = text
-    while len(remaining) > 1990:
-        split_at = remaining.rfind("\n", 0, 1990)
-        if split_at == -1:
-            split_at = 1990
-        await message.channel.send(remaining[:split_at])
-        remaining = remaining[split_at:].lstrip("\n")
-    if remaining:
-        await message.channel.send(remaining)
-
-
-async def _handle_admin_command(message: discord.Message) -> bool:
-    """Owner-only command backdoor. Returns True if the message was an admin
-    command (and therefore consumed — skip normal LLM flow).
-    """
-    content = (message.content or "").strip()
-    if not content.lower().startswith(ADMIN_PREFIX):
-        return False
-    if not _is_guild_owner(message):
-        await message.reply("⛔ Admin commands are owner-only.")
-        return True
-    argline = content[len(ADMIN_PREFIX):].strip()
-    if not argline or argline.lower() in ("help", "?"):
-        await _admin_send(message, ADMIN_HELP)
-        return True
-    parts = argline.split()
-    cmd = parts[0].lower()
-    rest = parts[1:]
-
-    def _kind_or_error(tok: str) -> str | None:
-        if tok in admin_kinds():
-            return tok
-        return None
-
-    try:
-        if cmd == "status":
-            stats = admin_stats()
-            lines = ["**Admin status** (live / tombstoned):"]
-            for k, v in stats.items():
-                lines.append(f"- **{k}**: {v['live']} live, {v['deleted']} recoverable")
-            await _admin_send(message, "\n".join(lines))
-            return True
-
-        if cmd == "deleted":
-            if not rest:
-                await message.reply(f"Usage: `!halbot admin deleted <kind> [limit]`. Kinds: {admin_kinds()}")
-                return True
-            kind = _kind_or_error(rest[0])
-            if not kind:
-                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
-                return True
-            limit = 25
-            if len(rest) > 1:
-                try:
-                    limit = max(1, min(200, int(rest[1])))
-                except ValueError:
-                    pass
-            rows = admin_list_deleted(kind, limit)
-            if not rows:
-                await message.reply(f"No tombstoned {kind}.")
-                return True
-            lines = [f"**Tombstoned {kind} ({len(rows)}, newest first):**"]
-            for r in rows:
-                # Build a terse summary per row, stripping binary/audio blobs.
-                summary = ", ".join(
-                    f"{k}={v}"
-                    for k, v in r.items()
-                    if k not in ("audio",) and v not in (None, "")
-                )
-                lines.append(f"- `#{r['id']}` {summary}")
-            await _admin_send(message, "\n".join(lines))
-            return True
-
-        if cmd == "undelete":
-            if len(rest) < 2:
-                await message.reply("Usage: `!halbot admin undelete <kind> <id>`")
-                return True
-            kind = _kind_or_error(rest[0])
-            if not kind:
-                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
-                return True
-            try:
-                row_id = int(rest[1])
-            except ValueError:
-                await message.reply("Row id must be an integer.")
-                return True
-            ok = admin_undelete(kind, row_id)
-            if ok:
-                log.info("[admin] %s restored %s #%s", message.author, kind, row_id)
-                await message.reply(f"✅ Restored `{kind}` #{row_id}.")
-            else:
-                await message.reply(f"No tombstoned `{kind}` #{row_id} found.")
-            return True
-
-        if cmd == "undelete-all":
-            if not rest:
-                await message.reply("Usage: `!halbot admin undelete-all <kind>`")
-                return True
-            kind = _kind_or_error(rest[0])
-            if not kind:
-                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
-                return True
-            n = admin_undelete_all(kind)
-            log.info("[admin] %s restored ALL %s (%s rows)", message.author, kind, n)
-            await message.reply(f"✅ Restored {n} `{kind}` row(s).")
-            return True
-
-        if cmd == "panic":
-            include_sounds = bool(rest) and rest[0].lower() == "all"
-            kinds = ["personas", "facts", "triggers", "grudges"]
-            if include_sounds:
-                kinds.append("sounds")
-            result = admin_panic_clear(kinds)
-            total = sum(result.values())
-            log.warning("[admin] %s invoked panic (include_sounds=%s): %s",
-                        message.author, include_sounds, result)
-            lines = ["🚨 **PANIC** — soft-cleared:"]
-            for k, n in result.items():
-                lines.append(f"- {k}: {n}")
-            lines.append(f"\n_All {total} row(s) recoverable via `!halbot admin undelete-all <kind>`._")
-            await _admin_send(message, "\n".join(lines))
-            return True
-
-        if cmd == "purge":
-            if not rest:
-                await message.reply("Usage: `!halbot admin purge <kind> [--older-than=DAYS]`")
-                return True
-            kind = _kind_or_error(rest[0])
-            if not kind:
-                await message.reply(f"Unknown kind `{rest[0]}`. Allowed: {admin_kinds()}")
-                return True
-            days = None
-            for tok in rest[1:]:
-                if tok.startswith("--older-than="):
-                    try:
-                        days = int(tok.split("=", 1)[1])
-                    except ValueError:
-                        await message.reply("--older-than=DAYS must be an integer.")
-                        return True
-            n = admin_hard_purge(kind, days)
-            log.warning("[admin] %s hard-purged %s (%s rows, older_than=%s)",
-                        message.author, kind, n, days)
-            scope = f" older than {days}d" if days is not None else ""
-            await message.reply(f"🗑️ Permanently purged {n} tombstoned `{kind}`{scope} row(s). Irreversible.")
-            return True
-
-        await message.reply(f"Unknown admin command `{cmd}`. Try `!halbot admin help`.")
-        return True
-    except ValueError as e:
-        await message.reply(f"⚠️ {e}")
-        return True
-    except Exception:
-        log.exception("[admin] command failed: %r", argline)
-        await message.reply("💥 Admin command errored — check logs.")
-        return True
-
-
 async def _fire_text_triggers(message: discord.Message) -> None:
     """Scan an incoming text message for keyword_text triggers and fire any that match.
 
@@ -598,9 +417,6 @@ async def on_message(message: discord.Message):
     # Ambient reflexes: scan for keyword_text triggers regardless of whether
     # the bot is mentioned. These run independently of the main LLM flow.
     await _fire_text_triggers(message)
-    # Owner-only admin backdoor for recovery / panic (handled before LLM gate).
-    if await _handle_admin_command(message):
-        return
     mentioned = client.user in message.mentions
     is_reply_to_bot = False
     ref = message.reference
