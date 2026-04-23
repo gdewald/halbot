@@ -1217,18 +1217,23 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
             {"role": "user", "content": transcript},
         ],
         "temperature": 0.1,
-        # Hard cap — the shortest possible valid response here is
-        # `{"action":"conversation"}` (~10 tokens). Observed in prod:
-        # completion_tokens=356 for exactly that JSON, meaning the model
-        # was free-forming prose before committing. 128 stops that dead
-        # even for the longest voice_play name we'd ever emit.
-        "max_tokens": 128,
-        # Disable reasoning tokens for backends that honor the flag.
+        # gemma4:e4b reasons into the `reasoning` channel before answering
+        # (verified by hitting ollama directly with the real prompt on
+        # 2026-04-22). 128 tokens truncated reasoning + left `content`
+        # empty → parse_voice_intent returned no actions → silent failure
+        # that looked like a 2-minute hang in the live log. 256 is enough
+        # headroom for reasoning + JSON answer across every prompt we
+        # tried (~22 tokens of actual answer).
+        "max_tokens": 256,
+        # Honored by reasoning-capable openai-compat backends. gemma4
+        # ignores it but leaving it in case llm_model is swapped.
         "reasoning_effort": "none",
-        # Ollama JSON mode — grammar-constrains the sampler to valid
-        # JSON only. Prevents the prose-before-JSON failure mode and
-        # further cuts latency since the decoder rejects non-JSON
-        # branches at token 1.
+        # Ollama-native disable of the hidden thinking channel. Did cut
+        # reasoning to zero on short prompts in local testing; on bigger
+        # prompts gemma4 reasons anyway (max_tokens=256 covers that).
+        "think": False,
+        # Grammar-constrain the sampler to valid JSON. Kills the
+        # prose-before-JSON failure mode independently of reasoning.
         "response_format": {"type": "json_object"},
     }
     if LLM_MODEL:

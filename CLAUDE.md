@@ -27,6 +27,33 @@
 - "Simple" = one file, mechanical, no cross-cutting concerns: just do
   it. "Complex" = anything that would surprise the user if they saw
   the diff without context.
+- **Deploy your own fix.** After editing daemon code run
+  `scripts\deploy.ps1 -Daemon`; tray/frontend → `-Tray`; both → no
+  flag. Do NOT end a turn with "please redeploy and test". User has
+  pre-authorized this — the whole point of `deploy.ps1` is it's safe
+  to run unattended. Skip only if user explicitly said "don't deploy
+  yet" or the change is docs/plan only.
+- **Verify your own fix.** You have full local access: ollama at
+  `http://localhost:11434`, the daemon log at
+  `C:\ProgramData\Halbot\logs\halbot.log`, powershell, curl, the
+  HKLM config tree. Use them before declaring a fix done.
+  - LLM / prompt changes: hit ollama directly with the exact body
+    shape the code sends. Check `completion_tokens`, `finish_reason`,
+    the full `choices[0].message` dict (incl. `reasoning` field on
+    gemma4 — empty `content` + non-empty `reasoning` means the model
+    thought but got truncated). Read `llm_model` from
+    `reg query HKLM\SOFTWARE\Halbot\Config /v llm_model`.
+  - Log-visible changes: deploy, then grep halbot.log for the new log
+    line. If the line isn't there, the change didn't land.
+  - Voice-path changes that need real Discord: this is the one case
+    you cannot fully verify without the user. Say so explicitly, and
+    still do every other verification first.
+- Never tell the user to "test this and report back" without having
+  exhausted your own verification channels first.
+- **Commit as you go.** Topic-scoped commits per finished chunk —
+  don't let the work tree accumulate 15+ modified files across
+  unrelated features. Style: `feat(scope): …` / `fix(scope): …`,
+  ~1-sentence why in the body.
 
 ## Privacy policy (for analytics / data collection features)
 
