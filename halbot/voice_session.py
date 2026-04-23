@@ -1,7 +1,15 @@
 import asyncio
+import contextvars
 import logging
 import re
 import time
+
+# Propagates the VAD-capture time of the current wake utterance through
+# the async call chain so _speak() can refuse to play a late reply.
+# Per-task — each guild's handle_voice_command invocation sees its own.
+_wake_captured_at: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "wake_captured_at", default=None,
+)
 
 import discord
 
@@ -145,6 +153,22 @@ async def _speak(session, text: str) -> bool:
     clean = _sanitize_for_speech(text)
     if not clean:
         return False
+
+    # Third staleness gate — right before synthesis. If the user's wake
+    # utterance was captured too long ago, don't bother speaking the
+    # reply. By this point the conversation has moved on; a late TTS is
+    # jarring and indistinguishable from a hallucination.
+    captured_at = _wake_captured_at.get()
+    if captured_at is not None:
+        from .voice import STALE_PRE_PLAY_SECONDS
+        age = time.monotonic() - captured_at
+        if age > STALE_PRE_PLAY_SECONDS:
+            log.warning(
+                "[tts] dropping stale reply (age=%.1fs > %.1fs): %r",
+                age, STALE_PRE_PLAY_SECONDS, clean[:80],
+            )
+            return False
+
     _tts_t0 = time.monotonic()
     log.info("[voice-cmd] stage=tts-synth-dispatch engine=%s chars=%d", getattr(engine, "name", "?"), len(clean))
     try:
@@ -433,14 +457,22 @@ async def _fire_voice_triggers(session, guild, user_id, transcript: str) -> None
             log.exception("[trigger #%s] firing failed", tid)
 
 
-async def handle_voice_command(guild, user_id, transcript):
+async def handle_voice_command(guild, user_id, transcript, captured_at: float | None = None):
     """Callback from VoiceListener with a raw STT transcript.
+
+    ``captured_at`` is ``time.monotonic()`` at the moment the VAD
+    finalized the speech segment. We gate on the audio's wall age to
+    refuse stale work — see STALE_PRE_INTENT_SECONDS in voice.py. A
+    reply that lands 2 minutes after the user said the wake word is
+    worse than no reply.
 
     Wake detection: substring match against known phonetic variants of
     "robot" in the STT output. No LLM is consulted for wake — only for
     intent parsing on transcripts that already passed the substring gate.
     """
     log.info("[voice-cmd] stage=begin user=%s transcript=%r", user_id, transcript[:120])
+    if captured_at is not None:
+        _wake_captured_at.set(captured_at)
     session = voice_listeners.get(guild.id)
     if not session:
         return
@@ -466,6 +498,19 @@ async def handle_voice_command(guild, user_id, transcript):
     if not command:
         log.info("[voice] wake word alone, no command in: %r", transcript[:80])
         return
+
+    # Second staleness gate — between STT and LLM. If audio has been
+    # sitting more than STALE_PRE_INTENT_SECONDS, spending another LLM
+    # call on it is wasted. Better to silently drop than reply late.
+    if captured_at is not None:
+        from .voice import STALE_PRE_INTENT_SECONDS
+        age = time.monotonic() - captured_at
+        if age > STALE_PRE_INTENT_SECONDS:
+            log.warning(
+                "[voice] dropping stale wake (age=%.1fs > %.1fs) user=%s cmd=%r",
+                age, STALE_PRE_INTENT_SECONDS, user_id, command[:60],
+            )
+            return
 
     log.info("[voice] user=%s command: %r", user_id, command)
     try:

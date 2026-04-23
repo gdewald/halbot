@@ -1217,11 +1217,19 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
             {"role": "user", "content": transcript},
         ],
         "temperature": 0.1,
-        "max_tokens": 512,
-        # Disable reasoning tokens for voice intent — we want immediate JSON,
-        # not a paragraph of <think> deliberation. Cuts parse_voice_intent
-        # latency from 5-15s to <2s on reasoning-capable backends.
+        # Hard cap — the shortest possible valid response here is
+        # `{"action":"conversation"}` (~10 tokens). Observed in prod:
+        # completion_tokens=356 for exactly that JSON, meaning the model
+        # was free-forming prose before committing. 128 stops that dead
+        # even for the longest voice_play name we'd ever emit.
+        "max_tokens": 128,
+        # Disable reasoning tokens for backends that honor the flag.
         "reasoning_effort": "none",
+        # Ollama JSON mode — grammar-constrains the sampler to valid
+        # JSON only. Prevents the prose-before-JSON failure mode and
+        # further cuts latency since the decoder rejects non-JSON
+        # branches at token 1.
+        "response_format": {"type": "json_object"},
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL

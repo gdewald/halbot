@@ -155,6 +155,13 @@ MIN_SPEECH_DURATION = 0.4  # ignore segments shorter than this (seconds)
 MAX_SPEECH_DURATION = 15.0  # force-complete after this (seconds)
 ENERGY_THRESHOLD = 0.015  # RMS on float32 [-1, 1]; tune if false-triggers
 
+# Stale-response guards. When whisper/ollama backs up, audio can wait
+# minutes before it's processed — a 2-minute-late response to a wake
+# utterance is worse than no response at all. Drop at three gates.
+STALE_PRE_STT_SECONDS = 12.0    # audio waiting in asyncio queue for this long → skip whisper
+STALE_PRE_INTENT_SECONDS = 15.0  # transcript older than this at handle_voice_command entry → skip LLM
+STALE_PRE_PLAY_SECONDS = 25.0   # response composed but audio older than this → drop TTS, don't play
+
 
 # ---------------------------------------------------------------------------
 # Whisper model (lazy, thread-safe singleton)
@@ -536,8 +543,9 @@ class VoiceListener:
                 state = listener._users[user.id]
                 segment = state.feed(user.id, audio_16k)
                 if segment is not None:
+                    captured_at = time.monotonic()
                     asyncio.run_coroutine_threadsafe(
-                        listener._process_segment(user.id, segment),
+                        listener._process_segment(user.id, segment, captured_at),
                         listener._loop,
                     )
 
@@ -595,10 +603,26 @@ class VoiceListener:
 
     # -- transcription -------------------------------------------------------
 
-    async def _process_segment(self, user_id: int, audio: np.ndarray):
-        """Transcribe a speech segment, check for wake word."""
+    async def _process_segment(self, user_id: int, audio: np.ndarray, captured_at: float):
+        """Transcribe a speech segment, check for wake word.
+
+        ``captured_at`` is ``time.monotonic()`` at the instant VAD
+        finalized the segment. We use it to drop stale audio: if the
+        asyncio task queue was backed up and we got here long after the
+        user actually stopped speaking, the eventual response would land
+        minutes late — worse than nothing.
+        """
+        queue_wait = time.monotonic() - captured_at
+        if queue_wait > STALE_PRE_STT_SECONDS:
+            log.warning(
+                "[stt] dropping stale segment (queued %.1fs > %.1fs) user=%s",
+                queue_wait, STALE_PRE_STT_SECONDS, user_id,
+            )
+            return
+
         duration = len(audio) / 16000
-        log.info("[stt] Transcribing %.1fs from user %s …", duration, user_id)
+        log.info("[stt] Transcribing %.1fs from user %s (queue_wait=%.1fs) …",
+                 duration, user_id, queue_wait)
         t0 = time.monotonic()
 
         try:
@@ -613,13 +637,13 @@ class VoiceListener:
             log.info("[stt] (empty result, %.1fs)", elapsed)
             return
 
-        log.info("[stt] user=%s (%.1fs): %r", user_id, elapsed, text)
+        age = time.monotonic() - captured_at
+        log.info("[stt] user=%s (stt=%.1fs age=%.1fs): %r", user_id, elapsed, age, text)
 
-        # Hand the full transcript to the command handler. Wake-word
-        # detection lives in voice_session.handle_voice_command as a cheap
-        # substring match over known phonetic variants of "halbot" — no LLM.
+        # Hand the full transcript + capture time to the command handler.
+        # It applies a second staleness gate before spending an LLM call.
         try:
-            await self.on_command(self.vc.guild, user_id, text)
+            await self.on_command(self.vc.guild, user_id, text, captured_at)
         except Exception:
             log.exception("[voice] Command callback failed")
 
