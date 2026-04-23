@@ -14,8 +14,8 @@ REG_PATH = r"SOFTWARE\Halbot\Config"
 
 DEFAULTS: Dict[str, Any] = {
     "log_level": "INFO",
-    "llm_backend": "lmstudio",
-    "llm_url": "http://localhost:1234/v1/chat/completions",
+    "llm_backend": "ollama",
+    "llm_url": "http://localhost:11434/v1/chat/completions",
     "llm_model": "",
     "llm_max_tokens_text": "512",
     "llm_max_tokens_voice": "256",
@@ -176,7 +176,7 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "group": "general", "label": "LOG_LEVEL",
     },
     "llm_backend": {
-        "type": "SELECT", "options": ["lmstudio", "ollama"],
+        "type": "SELECT", "options": ["ollama", "lmstudio"],
         "description": "LLM backend driver",
         "group": "llm", "label": "LLM_BACKEND",
     },

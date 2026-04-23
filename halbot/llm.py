@@ -12,8 +12,8 @@ log = logging.getLogger("halbot")
 
 from . import config as _config
 
-LMSTUDIO_URL = _config.get("llm_url")
-LMSTUDIO_MODEL = _config.get("llm_model") or "google/gemma-4-e2b"
+LLM_URL = _config.get("llm_url")
+LLM_MODEL = _config.get("llm_model") or "gemma4:e4b"
 
 
 PERSONA_STACKING_GUIDE = (
@@ -124,7 +124,7 @@ def is_reachable_cached() -> bool:
         return _REACH_CACHE["ok"]
     ok = False
     try:
-        base = LMSTUDIO_URL.split("/v1/")[0]
+        base = LLM_URL.split("/v1/")[0]
         r = requests.get(base + "/v1/models", timeout=0.5)
         ok = r.status_code == 200
     except Exception:
@@ -278,53 +278,34 @@ lookup.
 """
 
 
-def _lmstudio_base() -> str:
-    """Strip the OpenAI path suffix to get the LM Studio server root."""
+def _llm_base() -> str:
+    """Strip the OpenAI path suffix to get the Ollama server root."""
     for marker in ("/v1/", "/api/"):
-        idx = LMSTUDIO_URL.find(marker)
+        idx = LLM_URL.find(marker)
         if idx != -1:
-            return LMSTUDIO_URL[:idx]
-    return LMSTUDIO_URL.rstrip("/")
+            return LLM_URL[:idx]
+    return LLM_URL.rstrip("/")
 
 
-def ensure_model_loaded(model: str = LMSTUDIO_MODEL, timeout: int = 180) -> bool:
-    """Make sure model is loaded in LM Studio, triggering a JIT load if not."""
-    base = _lmstudio_base()
+def ensure_model_loaded(model: str = LLM_MODEL, timeout: int = 180) -> bool:
+    """Check model is available in Ollama. Ollama auto-loads on inference — this
+    is a connectivity + existence check only, not a JIT trigger."""
+    base = _llm_base()
     try:
-        resp = requests.get(f"{base}/api/v0/models", timeout=5)
+        resp = requests.get(f"{base}/api/tags", timeout=5)
         resp.raise_for_status()
-        entries = resp.json().get("data", []) or []
-        match = next(
-            (m for m in entries if model in (m.get("id"), m.get("model_key"))),
-            None,
-        )
-        if match and match.get("state") == "loaded":
-            return True
-        state = match.get("state") if match else "unknown"
-        log.info("Model %r not loaded (state=%s) — triggering JIT load", model, state)
+        names = [m.get("name", "") for m in resp.json().get("models", [])]
+        available = any(n == model or n.startswith(model + ":") for n in names)
+        if not available:
+            log.warning("Model %r not in Ollama /api/tags. Available: %s", model, names)
+        return True  # let inference call surface the real error if model missing
     except requests.RequestException as e:
-        log.warning("Could not query LM Studio model state: %s — will try a direct load", e)
-
-    try:
-        resp = requests.post(
-            LMSTUDIO_URL,
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1,
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        log.info("JIT load completed for %r", model)
-        return True
-    except requests.RequestException as e:
-        log.error("Failed to load model %r: %s", model, e)
+        log.warning("Could not query Ollama model list: %s", e)
         return False
 
 
 def describe_emoji_image(image_bytes: bytes, name: str) -> str:
-    """Send an emoji image to LM Studio vision and get a short description."""
+    """Send an emoji image to Ollama vision and get a short description."""
     b64 = base64.b64encode(image_bytes).decode()
     mime = "image/gif" if image_bytes[:4] == b"GIF8" else "image/png"
     body = {
@@ -340,10 +321,10 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
         "temperature": 0.3,
         "max_tokens": 60,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -352,7 +333,7 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
 
 
 def format_sound_details(sounds) -> str:
-    """Build a detailed listing of live sounds for the LM Studio prompt."""
+    """Build a detailed listing of live sounds for the Ollama prompt."""
     if not sounds:
         return "(none)"
     lines = []
@@ -364,7 +345,7 @@ def format_sound_details(sounds) -> str:
 
 
 def format_saved_details(saved: list[dict]) -> str:
-    """Build a detailed listing of saved sounds for the LM Studio prompt."""
+    """Build a detailed listing of saved sounds for the Ollama prompt."""
     if not saved:
         return "(none)"
     lines = []
@@ -396,7 +377,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
                   guild=None,
                   voice_channels_str: str = "(unknown)",
                   voice_status_str: str = "Not connected to any voice channel.") -> list[dict]:
-    """Send user text + context to LM Studio, return a list of actions to execute."""
+    """Send user text + context to Ollama, return a list of actions to execute."""
     from datetime import date
 
     emoji_records = emoji_db_list()
@@ -455,32 +436,32 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         "temperature": 0.1,
         "max_tokens": 1536,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
 
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
-            log.warning("LM Studio %s response: %s", resp.status_code, resp.text[:500])
+            log.warning("Ollama %s response: %s", resp.status_code, resp.text[:500])
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
+                if ensure_model_loaded(LLM_MODEL):
                     log.info("Retrying chat completion after model load")
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
                     if resp.status_code >= 400:
-                        log.warning("LM Studio retry %s response: %s",
+                        log.warning("Ollama retry %s response: %s",
                                     resp.status_code, resp.text[:500])
         resp.raise_for_status()
         raw_json = resp.json()
-        log.debug("LM Studio raw response: %s", json.dumps(raw_json, indent=2))
+        log.debug("Ollama raw response: %s", json.dumps(raw_json, indent=2))
         choice = raw_json["choices"][0]
         finish_reason = choice.get("finish_reason", "unknown")
         usage = raw_json.get("usage", {})
-        log.info("LM Studio finish_reason=%s, usage=%s", finish_reason, usage)
+        log.info("Ollama finish_reason=%s, usage=%s", finish_reason, usage)
         content = (choice["message"].get("content") or "").strip()
-        log.info("LM Studio content: %r", content)
+        log.info("Ollama content: %r", content)
         if not content:
-            log.error("LM Studio returned empty content (finish_reason=%s)", finish_reason)
-            return [{"action": "error", "message": "LM Studio returned an empty response — the prompt may be too long for the model's context window."}]
+            log.error("Ollama returned empty content (finish_reason=%s)", finish_reason)
+            return [{"action": "error", "message": "Ollama returned an empty response — the prompt may be too long for the model's context window."}]
         # Strip markdown code fences if the model wraps its response
         if content.startswith("```"):
             content = content.split("\n", 1)[1] if "\n" in content else content[3:]
@@ -492,9 +473,9 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             parsed = json.loads(content)
         except json.JSONDecodeError:
             if content.lstrip().startswith("[BOT REPLY"):
-                log.warning("LM Studio mimicked BOT REPLY prefix, dropping: %s", content[:200])
+                log.warning("Ollama mimicked BOT REPLY prefix, dropping: %s", content[:200])
                 return [{"action": "error", "message": "LLM returned a mimicked prior reply instead of a JSON action. Try again."}]
-            log.warning("LM Studio returned non-JSON, treating as unknown: %s", content[:200])
+            log.warning("Ollama returned non-JSON, treating as unknown: %s", content[:200])
             return [{"action": "unknown", "message": content}]
         log.info("Parsed actions: %s", json.dumps(parsed, indent=2))
         if isinstance(parsed, dict):
@@ -503,15 +484,15 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
             return parsed
         return [{"action": "unknown", "message": str(parsed)}]
     except requests.ConnectionError:
-        log.error("Could not connect to LM Studio at %s", LMSTUDIO_URL)
-        return [{"action": "error", "message": "I'm having trouble thinking right now — is LM Studio running?"}]
+        log.error("Could not connect to Ollama at %s", LLM_URL)
+        return [{"action": "error", "message": "I'm having trouble thinking right now — is Ollama running?"}]
     except (requests.RequestException, KeyError, IndexError) as e:
         log.error("Failed to parse intent: %s", e)
-        return [{"action": "error", "message": f"LM Studio call failed ({type(e).__name__}: {e}). Check LM Studio server."}]
+        return [{"action": "error", "message": f"Ollama call failed ({type(e).__name__}: {e}). Check Ollama server."}]
 
 
 def customize_response(raw_text: str, *, context: str = "") -> str:
-    """Rewrite a plain-text response via LM Studio so it matches the active persona.
+    """Rewrite a plain-text response via Ollama so it matches the active persona.
 
     Falls back to raw_text on any failure.
     """
@@ -532,14 +513,14 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
         "temperature": 0.9,
         "max_tokens": 400,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
         message = resp.json()["choices"][0].get("message", {})
         content = (message.get("content") or "").strip()
@@ -686,14 +667,14 @@ def answer_stats_question(question: str, *, rollup_block: str,
         "temperature": 0.7,
         "max_tokens": 900,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         if resp.status_code >= 400:
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
         message = resp.json()["choices"][0].get("message", {})
         content = (message.get("content") or "").strip()
@@ -716,8 +697,8 @@ def answer_stats_question(question: str, *, rollup_block: str,
         log.info("[stats-qa] q=%r → %d chars", user_msg[:80], len(content))
         return content
     except requests.ConnectionError:
-        log.error("Stats QA: could not connect to LM Studio at %s", LMSTUDIO_URL)
-        return "Couldn't reach LM Studio to analyze stats — is it running?"
+        log.error("Stats QA: could not connect to Ollama at %s", LLM_URL)
+        return "Couldn't reach Ollama to analyze stats — is it running?"
     except Exception as e:
         log.warning("[stats-qa] failed: %s", e)
         return f"Stats analysis failed ({type(e).__name__})."
@@ -823,16 +804,16 @@ def answer_voice_conversation(
         "temperature": 0.8,
         "max_tokens": 1024,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
 
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("[voice-convo] %s: %s", resp.status_code, resp.text[:300])
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
         message = resp.json()["choices"][0].get("message", {})
         content = (message.get("content") or "").strip()
@@ -872,8 +853,8 @@ def answer_voice_conversation(
         log.info("[voice-convo] → %r", reply_text[:140])
         return reply_text
     except requests.ConnectionError:
-        log.error("[voice-convo] could not connect to LM Studio at %s", LMSTUDIO_URL)
-        return "My brain's offline — LM Studio isn't answering."
+        log.error("[voice-convo] could not connect to Ollama at %s", LLM_URL)
+        return "My brain's offline — Ollama isn't answering."
     except Exception as e:
         log.warning("[voice-convo] failed: %s", e)
         return "Sorry, I glitched on that — ask me again?"
@@ -905,14 +886,14 @@ def check_wake_word(transcript: str) -> tuple[bool, str]:
         "temperature": 0.0,
         "max_tokens": 128,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
         content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
         if content.startswith("```"):
@@ -966,17 +947,17 @@ def parse_voice_combined(
         "temperature": 0.1,
         "max_tokens": 1024,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
 
     content = ""
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("Voice combined LLM %s: %s", resp.status_code, resp.text[:300])
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
         raw_json = resp.json()
         choice = raw_json["choices"][0]
@@ -1039,17 +1020,17 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         # tokens that eat into the budget before the JSON answer is produced.
         "max_tokens": 1024,
     }
-    if LMSTUDIO_MODEL:
-        body["model"] = LMSTUDIO_MODEL
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
 
     content = ""
     try:
-        resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_TIMEOUT)
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("Voice LLM %s: %s", resp.status_code, resp.text[:300])
             if resp.status_code in (400, 404, 409, 503):
-                if ensure_model_loaded(LMSTUDIO_MODEL):
-                    resp = requests.post(LMSTUDIO_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
         raw_json = resp.json()
         choice = raw_json["choices"][0]

@@ -202,7 +202,7 @@ def unload_whisper() -> None:
 
     Safe to call when nothing is loaded (no-op).  The next transcribe() call
     will lazily reload.  Called when the bot leaves voice so the ~5-6 GB
-    faster-whisper footprint doesn't sit on the GPU while LM Studio wants it.
+    faster-whisper footprint doesn't sit on the GPU while Ollama wants it.
     """
     global _whisper_model
     with _whisper_lock:
