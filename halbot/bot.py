@@ -31,7 +31,7 @@ from .llm import (
     customize_response_rich_async,
     describe_emoji_image, format_events_for_prompt, parse_intent,
 )
-from .bot_ui import EmbedField, Mode, ReplyPayload, send_halbot_reply
+from .bot_ui import EmbedField, Mode, ReplyPayload, refusal_payload, send_halbot_reply
 from .interactions import SoundboardActionsView, register_persistent_views
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
@@ -637,6 +637,10 @@ async def on_message(message: discord.Message):
     # Track which sounds actually played this turn; if any, the final
     # embed gets the SoundboardActionsView attached.
     played_sounds: list[str] = []
+
+    # Set when the LLM emits a {"action": "refuse", ...} — short-circuits
+    # all subsequent action handling and renders a REFUSED embed instead.
+    refusal_reason: str | None = None
 
     user_text = message.content
     for mention_str in [f"<@{client.user.id}>", f"<@!{client.user.id}>"]:
@@ -1456,11 +1460,42 @@ async def on_message(message: discord.Message):
             msg = (intent.get("message") or "").strip()
             replies.append(msg or "...")
 
+        elif action == "refuse":
+            reason = (intent.get("reason") or intent.get("message") or "").strip()
+            if not reason:
+                reason = "Not doing that. Stays in character."
+            refusal_reason = reason
+            analytics.record(
+                "hook_fired",
+                user_id=message.author.id,
+                guild_id=guild.id,
+                target="persona.refuse",
+                reason=reason[:200],
+            )
+            log.info("[persona] refused request from %s: %r", message.author, reason[:120])
+            # Persona refusal is terminal for the turn — drop everything else.
+            replies = []
+            played_sounds.clear()
+            break
+
         else:
             log.warning("Unhandled action %r in text-channel response; falling back to message field", action)
             replies.append(intent.get("message", "I didn't understand that."))
 
-    if replies:
+    if refusal_reason is not None:
+        # Persona refusal short-circuits everything: no replies list to
+        # join, no voice playback, no customize pass. Reason is already
+        # in-persona voice from the LLM.
+        session = voice_listeners.get(guild.id) if guild else None
+        voice_connected = bool(session and session.vc.is_connected())
+        if voice_connected:
+            await _deliver(message, refusal_reason)
+        else:
+            await send_halbot_reply(
+                message, payload=refusal_payload(refusal_reason),
+                reply_to=message,
+            )
+    elif replies:
         joined = "\n\n".join(replies)
         # Voice-connected path: still TTS the reply (plain text). The
         # voice-card flows land in phase 5 of plan 014.

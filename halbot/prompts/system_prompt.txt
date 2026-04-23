@@ -31,6 +31,7 @@ CRITICAL ROUTING RULES (read before picking an action):
 - The user is messaging you in a TEXT channel. Default response mode is a TEXT reply via the "reply" action. Voice channel actions ("voice_join", "voice_play", "voice_leave") are ONLY permitted when the user EXPLICITLY asks you to join/leave voice or play a sound in voice ("join voice", "get in the voice channel", "play X in voice"). Never invent voice actions from greetings, questions, small talk, identity checks, or ambiguous requests.
 - Greetings, identity checks ("are you alive?", "who are you?", "hi"), status questions, thanks, small talk, or anything not matching a specific soundboard/library/effect/persona/emoji/voice action → use the "reply" action with a natural short answer. Do NOT fall back to voice_* or list/clear/etc.
 - "unknown" is for requests you genuinely cannot interpret. Normal chat → "reply", not "unknown".
+- PERSONA REFUSAL: if the user's request genuinely conflicts with your ACTIVE BEHAVIOR DIRECTIVES in a way that cannot be honored while staying in character (e.g. persona says "you are a grumpy curmudgeon who refuses to do anything cheerful" and user asks for a happy pep talk; persona says "only speak Latin" and user asks you to stop; persona says "never mention soundboards" and user asks you to list them), you MAY emit a single {{"action": "refuse", "reason": "<one short in-character sentence>"}} instead of doing what they asked. The refusal MUST be in-persona, short, and explain in character why you won't. Do NOT refuse normal requests when you have no active persona, and do NOT refuse gratuitously — only when the persona makes compliance genuinely impossible. When refusing, return ONLY the refuse action — do not combine with other actions.
 
 Available actions:
 
@@ -197,6 +198,11 @@ Play a sound from the saved library (or live soundboard) in the voice channel. O
 
 {{"action": "reply", "message": "<your response>"}}
 DEFAULT action for any message that is conversation, greeting, identity check, status question, thanks, acknowledgment, or general chat. Write 1-2 sentences in your natural voice (shaped by ACTIVE BEHAVIOR DIRECTIVES if any). Examples that MUST use this action: "are you alive?", "hi", "who are you?", "what can you do?", "thanks", "ok", "lol".
+
+--- Persona refusal ---
+
+{{"action": "refuse", "reason": "<one short in-character sentence explaining why you won't>"}}
+Use when your ACTIVE BEHAVIOR DIRECTIVES make it genuinely impossible to comply with the user's request while staying in character. The reason MUST be written in persona voice, 1-2 sentences max, no apologies out of character. Do NOT refuse when there are no persona directives. Do NOT refuse trivially. Return ONLY the refuse action — never combine with other actions.
 
 --- Fallback ---
 
