@@ -3,7 +3,10 @@ import logging
 import re
 import time
 
+import discord
+
 from . import analytics
+from .bot_ui import EmbedField, Mode, ReplyPayload, send_halbot_reply
 from .db import (
     _env_bool, db_get, db_list, trigger_list, trigger_mark_fired,
     voice_history_append, VOICE_HISTORY_TURNS,
@@ -233,6 +236,83 @@ def snapshot_voice_state() -> None:
                  gid, session.vc.channel.id, sink_spec)
 
 
+def voice_log_dest(vc) -> "discord.abc.Messageable | None":
+    """Resolve where to post voice-card embeds.
+
+    Discord voice channels (since 2023) are text-enabled — the
+    ``VoiceChannel`` itself implements ``Messageable``. Fall back to
+    the guild's system channel if the voice channel isn't sendable
+    (permissions, stage channel, or future discord.py version quirks).
+    """
+    if vc is None:
+        return None
+    channel = getattr(vc, "channel", None)
+    if channel is None:
+        return None
+    if isinstance(channel, discord.VoiceChannel):
+        return channel
+    guild = getattr(channel, "guild", None)
+    system = getattr(guild, "system_channel", None) if guild else None
+    return system
+
+
+async def _post_wake_card(session, member, transcript: str, reply_text: str | None) -> None:
+    """Flow 04 · wake-word card. Amber fenced-transcript embed with optional reply field."""
+    try:
+        dest = voice_log_dest(session.vc)
+        if dest is None:
+            return
+        fields = [
+            EmbedField("From", member.display_name if member else "unknown", inline=True),
+            EmbedField("Voice", getattr(session.vc.channel, "name", "?"), inline=True),
+            EmbedField("Transcript", f"```\n{transcript.strip()[:900] or '(empty)'}\n```", inline=False),
+        ]
+        if reply_text:
+            fields.append(EmbedField("Halbot", reply_text[:900], inline=False))
+        payload = ReplyPayload(
+            mode=Mode.WAKE,
+            title='"Halbot…"',
+            subtext=f"wake · via faster-whisper · turn {len(session.history)}/{VOICE_HISTORY_TURNS}",
+            fields=tuple(fields),
+            footer="Spoken via TTS · transcript persisted in voice history",
+        )
+        await send_halbot_reply(dest, payload=payload)
+    except Exception:
+        log.exception("[voice] wake-card post failed")
+
+
+async def _post_voice_trigger_card(session, guild, user_id, match_value: str,
+                                   action_type: str, action_payload: str,
+                                   fire_count: int, transcript: str) -> None:
+    """Flow 05 · voice-trigger card. Violet embed showing matched phrase + action."""
+    try:
+        dest = voice_log_dest(session.vc)
+        if dest is None:
+            return
+        member = guild.get_member(user_id) if guild else None
+        speaker = member.display_name if member else f"user {user_id}"
+        fields = [
+            EmbedField("Matched phrase", f"`{match_value}`", inline=True),
+            EmbedField("Action", f"`{action_type}` → {action_payload[:64]}", inline=True),
+            EmbedField("Fire count", f"**{fire_count}**", inline=True),
+            EmbedField("Speaker", speaker, inline=True),
+            EmbedField("Voice", getattr(session.vc.channel, "name", "?"), inline=True),
+        ]
+        snippet = transcript.strip()
+        if snippet:
+            fields.append(EmbedField("Transcript", f"```\n{snippet[:600]}\n```", inline=False))
+        payload = ReplyPayload(
+            mode=Mode.VOICE_TRIGGER,
+            title=f"Voice trigger: {match_value}",
+            subtext="voice trigger · no wake word needed",
+            fields=tuple(fields),
+            footer="Tune or mute in the dashboard",
+        )
+        await send_halbot_reply(dest, payload=payload)
+    except Exception:
+        log.exception("[voice] trigger-card post failed")
+
+
 async def _fire_voice_triggers(session, guild, user_id, transcript: str) -> None:
     """Scan a voice transcript for keyword_voice triggers. Fires independently of wake word."""
     try:
@@ -296,6 +376,14 @@ async def _fire_voice_triggers(session, guild, user_id, transcript: str) -> None
                 log.warning("[trigger #%s] unknown action_type %r", tid, at)
                 continue
             trigger_mark_fired(tid)
+            try:
+                fire_count = int(r.get("fire_count") or 0) + 1
+                await _post_voice_trigger_card(
+                    session, guild, user_id, mv, at or "", ap,
+                    fire_count, transcript,
+                )
+            except Exception:
+                log.exception("[trigger #%s] voice card failed", tid)
         except Exception:
             log.exception("[trigger #%s] firing failed", tid)
 
@@ -377,7 +465,12 @@ async def handle_voice_command(guild, user_id, transcript):
     member = guild.get_member(user_id)
     user_name = member.display_name if member else f"user {user_id}"
 
+    # Flow 04 wake card: collect reply summaries so we post one card per
+    # wake turn regardless of which branch handled the intent.
+    wake_reply: list[str] = []
+
     def _record(bot_response: str) -> None:
+        wake_reply.append(bot_response)
         if VOICE_HISTORY_TURNS <= 0:
             return
         turn = {
@@ -393,94 +486,100 @@ async def handle_voice_command(guild, user_id, transcript):
         except Exception:
             log.exception("[voice-history] persist failed")
 
-    for intent in actions:
-        action = intent.get("action")
-        analytics.record(
-            "cmd_invoke",
-            user_id=user_id,
-            guild_id=guild.id,
-            target=f"voice:{action or 'unknown'}",
-        )
+    try:
+        for intent in actions:
+            action = intent.get("action")
+            analytics.record(
+                "cmd_invoke",
+                user_id=user_id,
+                guild_id=guild.id,
+                target=f"voice:{action or 'unknown'}",
+            )
 
-        if action == "voice_play":
-            name = intent.get("name", "")
-            row = db_get(name) if name else None
-            if row:
-                fmt = detect_audio_format(row["audio"])
-                await session.play_sound(row["audio"], fmt)
-                analytics.record(
-                    "soundboard_play",
-                    user_id=user_id,
-                    guild_id=guild.id,
-                    target=name,
-                    source="saved",
-                    trigger="voice",
-                    bytes=len(row["audio"]) if row.get("audio") else 0,
-                )
-                _record(f"(played sound: {name})")
-                return
-
-            live = sound_map.get(name)
-            if live:
-                try:
-                    audio = await live.read()
-                    fmt = detect_audio_format(audio)
-                    await session.play_sound(audio, fmt)
+            if action == "voice_play":
+                name = intent.get("name", "")
+                row = db_get(name) if name else None
+                if row:
+                    fmt = detect_audio_format(row["audio"])
+                    await session.play_sound(row["audio"], fmt)
                     analytics.record(
                         "soundboard_play",
                         user_id=user_id,
                         guild_id=guild.id,
                         target=name,
-                        source="live",
+                        source="saved",
                         trigger="voice",
-                        bytes=len(audio) if audio else 0,
+                        bytes=len(row["audio"]) if row.get("audio") else 0,
                     )
                     _record(f"(played sound: {name})")
-                except Exception:
-                    log.exception("Failed to read live sound %s for voice playback", name)
-                    _record(f"(failed to play: {name})")
-                return
+                    break
 
-            customized = await customize_response_async(
-                f'Couldn\'t find a sound called "{name}".',
-                context="voice command: sound lookup miss",
-            )
-            await _voice_feedback(session, sink, customized)
-            _record(customized)
+                live = sound_map.get(name)
+                if live:
+                    try:
+                        audio = await live.read()
+                        fmt = detect_audio_format(audio)
+                        await session.play_sound(audio, fmt)
+                        analytics.record(
+                            "soundboard_play",
+                            user_id=user_id,
+                            guild_id=guild.id,
+                            target=name,
+                            source="live",
+                            trigger="voice",
+                            bytes=len(audio) if audio else 0,
+                        )
+                        _record(f"(played sound: {name})")
+                    except Exception:
+                        log.exception("Failed to read live sound %s for voice playback", name)
+                        _record(f"(failed to play: {name})")
+                    break
 
-        elif action == "conversation":
-            # Fast path didn't match a sound; user asked something
-            # conversational. Escalate to the FULL text-grade pipeline:
-            # same model, same SYSTEM_PROMPT, same persona stacking,
-            # full sound + emoji + voice-status context. Slow but
-            # thoughtful; output constrained to a single TTS-ready reply.
-            _convo_t0 = time.monotonic()
-            vc_name = None
-            try:
-                vc_name = session.vc.channel.name if session.vc and session.vc.channel else None
-            except Exception:
+                customized = await customize_response_async(
+                    f'Couldn\'t find a sound called "{name}".',
+                    context="voice command: sound lookup miss",
+                )
+                await _voice_feedback(session, sink, customized)
+                _record(customized)
+
+            elif action == "conversation":
+                # Fast path didn't match a sound; user asked something
+                # conversational. Escalate to the FULL text-grade pipeline:
+                # same model, same SYSTEM_PROMPT, same persona stacking,
+                # full sound + emoji + voice-status context. Slow but
+                # thoughtful; output constrained to a single TTS-ready reply.
+                _convo_t0 = time.monotonic()
                 vc_name = None
-            reply = await answer_voice_conversation_async(
-                transcript,
-                sounds=sounds,
-                saved=saved,
-                history=history,
-                guild=guild,
-                voice_channel_name=vc_name,
-            )
-            analytics.record(
-                "llm_call",
-                user_id=user_id,
-                guild_id=guild.id,
-                target="voice_conversation",
-                latency_ms=int((time.monotonic() - _convo_t0) * 1000),
-                chars=len(reply or ""),
-            )
-            await _voice_feedback(session, sink, reply)
-            _record(reply)
+                try:
+                    vc_name = session.vc.channel.name if session.vc and session.vc.channel else None
+                except Exception:
+                    vc_name = None
+                reply = await answer_voice_conversation_async(
+                    transcript,
+                    sounds=sounds,
+                    saved=saved,
+                    history=history,
+                    guild=guild,
+                    voice_channel_name=vc_name,
+                )
+                analytics.record(
+                    "llm_call",
+                    user_id=user_id,
+                    guild_id=guild.id,
+                    target="voice_conversation",
+                    latency_ms=int((time.monotonic() - _convo_t0) * 1000),
+                    chars=len(reply or ""),
+                )
+                await _voice_feedback(session, sink, reply)
+                _record(reply)
 
-        elif action == "unknown":
-            msg = intent.get("message", "I didn't understand that voice command.")
-            customized = await customize_response_async(msg, context="voice command failure")
-            await _voice_feedback(session, sink, customized)
-            _record(customized)
+            elif action == "unknown":
+                msg = intent.get("message", "I didn't understand that voice command.")
+                customized = await customize_response_async(msg, context="voice command failure")
+                await _voice_feedback(session, sink, customized)
+                _record(customized)
+    finally:
+        await _post_wake_card(
+            session, member, transcript,
+            " · ".join(r for r in wake_reply if r) or None,
+        )
