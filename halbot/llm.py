@@ -551,6 +551,99 @@ async def customize_response_async(raw_text: str, *, context: str = "") -> str:
     return await asyncio.to_thread(customize_response, raw_text, context=context)
 
 
+RICH_CUSTOMIZATION_PROMPT = """\
+You are Halbot.  Produce a persona-voiced Discord reply for the user, shaped
+by the active persona directives.  Return STRICT JSON with exactly these
+two fields:
+
+  {{"subtext": "<one short italic resolution line, plain text, no quotes>",
+   "body": "<1-2 sentence reply in your voice>"}}
+
+Rules:
+- "subtext" is the italic lead-in that appears above the embed.  State
+  briefly how you resolved the request (e.g. "Intent: soundboard.play ·
+  target: taco-bell--screwed").  No opinions here.
+- "body" is your persona-voiced reply — the same 1-2 sentences the old
+  customize call would have produced.  Plain text, no markdown fences,
+  no JSON inside.
+- Preserve the original meaning — do not invent new facts or change the
+  user-facing outcome.
+- Output JSON only — no prose before or after, no code fences.
+{persona_directives_block}
+"""
+
+
+def customize_response_rich(raw_text: str, *, context: str = "",
+                            resolution_hint: str = "") -> tuple[str, str]:
+    """Return (subtext, body) — piggybacks one LLM call.
+
+    ``subtext`` is the italic one-liner shown above Halbot's embed, stating
+    how the request was resolved.  ``body`` is the persona-voiced reply
+    that goes in the embed description.
+
+    Falls back to a templated subtext + the raw text on any failure.
+    """
+    fallback_subtext = (resolution_hint or "Halbot resolved your request").strip()
+    if not raw_text:
+        return fallback_subtext, raw_text
+    pd_block = _format_persona_block()
+    if pd_block:
+        pd_block = "\n" + pd_block
+    system = RICH_CUSTOMIZATION_PROMPT.format(persona_directives_block=pd_block)
+    user_msg = f"Original: {raw_text}"
+    if resolution_hint:
+        user_msg += f"\nResolution: {resolution_hint}"
+    if context:
+        user_msg += f"\nContext: {context}"
+    body = {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.9,
+        "max_tokens": 500,
+        "response_format": {"type": "json_object"},
+    }
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
+    try:
+        resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
+        if resp.status_code >= 400:
+            if resp.status_code in (400, 404, 409, 503):
+                if ensure_model_loaded(LLM_MODEL):
+                    resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
+        resp.raise_for_status()
+        message = resp.json()["choices"][0].get("message", {})
+        content = (message.get("content") or "").strip()
+        if "<think>" in content and "</think>" in content:
+            _, _, rest = content.partition("</think>")
+            content = rest.strip()
+        # Tolerate models that wrap JSON in fences.
+        if content.startswith("```"):
+            content = content.strip("`")
+            if content.lower().startswith("json"):
+                content = content[4:].lstrip()
+        parsed = json.loads(content)
+        subtext = (parsed.get("subtext") or fallback_subtext).strip()
+        out_body = (parsed.get("body") or raw_text).strip()
+        log.info("[customize-rich] %r → subtext=%r body=%r",
+                 raw_text[:60], subtext[:80], out_body[:120])
+        return subtext, out_body
+    except Exception as e:
+        log.warning("[customize-rich] failed (%s); falling back to single-pass customize", e)
+        plain = customize_response(raw_text, context=context)
+        return fallback_subtext, plain
+
+
+async def customize_response_rich_async(raw_text: str, *, context: str = "",
+                                        resolution_hint: str = "") -> tuple[str, str]:
+    """Async wrapper: runs customize_response_rich in a worker thread."""
+    return await asyncio.to_thread(
+        customize_response_rich, raw_text,
+        context=context, resolution_hint=resolution_hint,
+    )
+
+
 STATS_QUESTION_PROMPT = """\
 You are Halbot answering a user's question about your own usage,
 analytics, or historical activity in a Discord text channel. You have

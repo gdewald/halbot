@@ -28,8 +28,11 @@ from .db import (
 )
 from .llm import (
     CHANNEL_HISTORY_LIMIT, answer_stats_question_async, customize_response_async,
+    customize_response_rich_async,
     describe_emoji_image, format_events_for_prompt, parse_intent,
 )
+from .bot_ui import EmbedField, Mode, ReplyPayload, send_halbot_reply
+from .interactions import SoundboardActionsView, register_persistent_views
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
     VoiceSession, _channel_has_humans, _maybe_unload_whisper, _preload_tts_engine,
@@ -187,6 +190,7 @@ def build_client() -> discord.Client:
 async def on_ready():
     _set_discord_state("CONNECTED")
     log.info("Logged in as %s (id: %s)", client.user, client.user.id)
+    register_persistent_views(client)
     for guild in client.guilds:
         await sync_emojis(guild)
 
@@ -618,6 +622,21 @@ async def on_message(message: discord.Message):
         guild_id=message.guild.id if message.guild else 0,
         target="reply" if is_reply_to_bot else "mention",
     )
+
+    # Show Discord's "Halbot is typing…" indicator while the LLM churns.
+    # Manual enter/exit so we don't have to reindent the entire mention
+    # body; typing() also auto-disappears when we send a message.
+    _typing_ctx = message.channel.typing()
+    _typing_entered = False
+    try:
+        await _typing_ctx.__aenter__()
+        _typing_entered = True
+    except Exception:
+        log.debug("typing() enter failed", exc_info=True)
+
+    # Track which sounds actually played this turn; if any, the final
+    # embed gets the SoundboardActionsView attached.
+    played_sounds: list[str] = []
 
     user_text = message.content
     for mention_str in [f"<@{client.user.id}>", f"<@!{client.user.id}>"]:
@@ -1338,6 +1357,7 @@ async def on_message(message: discord.Message):
                     source="saved",
                     bytes=len(row["audio"]) if row.get("audio") else 0,
                 )
+                played_sounds.append(name)
                 llm_msg = (intent or {}).get("message")
                 if llm_msg:
                     replies.append(llm_msg)
@@ -1357,6 +1377,7 @@ async def on_message(message: discord.Message):
                         source="live",
                         bytes=len(audio) if audio else 0,
                     )
+                    played_sounds.append(name)
                     llm_msg = (intent or {}).get("message")
                     if llm_msg:
                         replies.append(llm_msg)
@@ -1440,7 +1461,101 @@ async def on_message(message: discord.Message):
             replies.append(intent.get("message", "I didn't understand that."))
 
     if replies:
-        await _deliver(message, "\n\n".join(replies))
+        joined = "\n\n".join(replies)
+        # Voice-connected path: still TTS the reply (plain text). The
+        # voice-card flows land in phase 5 of plan 014.
+        session = voice_listeners.get(guild.id) if guild else None
+        voice_connected = bool(session and session.vc.is_connected())
+        if voice_connected:
+            await _deliver(message, joined)
+        else:
+            await _dispatch_text_embed(
+                message, joined, played_sounds=played_sounds,
+                actions=actions,
+            )
+
+    if _typing_entered:
+        try:
+            await _typing_ctx.__aexit__(None, None, None)
+        except Exception:
+            log.debug("typing() exit failed", exc_info=True)
+
+
+async def _dispatch_text_embed(
+    message: discord.Message,
+    body_text: str,
+    *,
+    played_sounds: list[str],
+    actions: list[dict],
+) -> None:
+    """Render the joined reply string as a Halbot embed.
+
+    Runs one LLM pass to split the plaintext into (subtext, body); falls
+    back to a templated subtext if the model errors out. Soundboard-play
+    turns get the Stop/Replay/Louder view attached.
+
+    Phase 1 scope — more per-action polish (structured fields like
+    From/Voice/Requested, upload flow's Slot/Size/Length/Emoji grid,
+    etc.) lands in later phases of plan 014.
+    """
+    # Short-circuit empty body — shouldn't happen, but defensive.
+    if not body_text.strip():
+        return
+
+    # Build a resolution hint from the actual intent actions so the LLM
+    # can produce an accurate subtext without re-guessing.
+    action_names = [a.get("action") for a in actions if isinstance(a, dict) and a.get("action")]
+    hint_parts: list[str] = []
+    if played_sounds:
+        hint_parts.append(f"played {', '.join(played_sounds)}")
+    if action_names:
+        hint_parts.append("actions: " + ", ".join(action_names))
+    resolution_hint = " · ".join(hint_parts)
+
+    try:
+        subtext, body = await customize_response_rich_async(
+            body_text, resolution_hint=resolution_hint,
+        )
+    except Exception:
+        log.exception("customize_response_rich_async failed; falling back")
+        subtext = resolution_hint or "Halbot handled your request"
+        body = body_text
+
+    # Truncate description to Discord's 4096-char limit; overflow goes
+    # as a follow-up text message to avoid dropping content silently.
+    EMBED_DESC_MAX = 4000
+    overflow: str | None = None
+    if len(body) > EMBED_DESC_MAX:
+        overflow = body[EMBED_DESC_MAX:]
+        body = body[:EMBED_DESC_MAX] + "…"
+
+    if played_sounds:
+        title = f"▶ Playing {played_sounds[0]}"
+        if len(played_sounds) > 1:
+            title += f" (+{len(played_sounds) - 1} more)"
+        mode = Mode.SOUNDBOARD
+        view: discord.ui.View | None = SoundboardActionsView()
+    else:
+        title = "Halbot"
+        mode = Mode.ACTIONED
+        view = None
+
+    payload = ReplyPayload(
+        mode=mode, title=title, description=body, subtext=subtext,
+    )
+    await send_halbot_reply(message, payload=payload, view=view, reply_to=message)
+
+    if overflow:
+        # Chunk overflow at 2000-char boundaries (Discord content limit).
+        remaining = overflow
+        while len(remaining) > 2000:
+            split_at = remaining.rfind("\n", 0, 2000)
+            if split_at == -1:
+                split_at = 2000
+            await message.channel.send(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip("\n")
+        if remaining:
+            await message.channel.send(remaining)
 
 
 def _format_stats_for_discord(stats: dict) -> str:
