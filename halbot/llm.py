@@ -434,7 +434,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     body = {
         "messages": messages,
         "temperature": 0.1,
-        "max_tokens": 1536,
+        "max_tokens": 6144,
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -470,7 +470,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         # Fallback: some servers surface the real JSON in reasoning_content
         # when the visible content is empty or think-only.
         if not content:
-            reasoning = (message_obj.get("reasoning_content") or "").strip()
+            reasoning = (message_obj.get("reasoning_content") or message_obj.get("reasoning") or "").strip()
             if reasoning:
                 start = reasoning.find("{")
                 end = reasoning.rfind("}")
@@ -529,7 +529,7 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
             {"role": "user", "content": user_msg},
         ],
         "temperature": 0.9,
-        "max_tokens": 400,
+        "max_tokens": 1600,
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -548,7 +548,7 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
             content = rest.strip()
         # Fall back to reasoning_content tail if content got truncated
         if not content:
-            reasoning = (message.get("reasoning_content") or "").strip()
+            reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
             if reasoning:
                 content = reasoning.splitlines()[-1].strip()
         # Strip surrounding quotes the model sometimes adds
@@ -581,11 +581,14 @@ Rules:
 - "subtext" is the italic lead-in that appears above the embed.  State
   briefly how you resolved the request (e.g. "Intent: soundboard.play ·
   target: taco-bell--screwed").  No opinions here.
-- "body" is your persona-voiced reply — the same 1-2 sentences the old
-  customize call would have produced.  Plain text, no markdown fences,
-  no JSON inside.
-- Preserve the original meaning — do not invent new facts or change the
-  user-facing outcome.
+- "body" is your persona-voiced reply. Plain text, no markdown fences,
+  no JSON inside.  Keep it short (1-3 sentences) UNLESS the active persona
+  demands structure (haiku = 3 lines 5-7-5, poem, list, ASCII art, etc.) —
+  then preserve that structure using real newlines (\n) inside the JSON
+  string so Discord renders them as line breaks.
+- Preserve the original meaning AND the original line-break structure:
+  if the Original text contains newlines, keep them in "body" unless a
+  persona directive explicitly overrides format.
 - Output JSON only — no prose before or after, no code fences.
 {persona_directives_block}
 """
@@ -619,7 +622,7 @@ def customize_response_rich(raw_text: str, *, context: str = "",
             {"role": "user", "content": user_msg},
         ],
         "temperature": 0.9,
-        "max_tokens": 500,
+        "max_tokens": 2000,
         "response_format": {"type": "json_object"},
     }
     if LLM_MODEL:
@@ -776,7 +779,7 @@ def answer_stats_question(question: str, *, rollup_block: str,
             {"role": "user", "content": user_msg},
         ],
         "temperature": 0.7,
-        "max_tokens": 900,
+        "max_tokens": 3600,
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -796,7 +799,7 @@ def answer_stats_question(question: str, *, rollup_block: str,
             _, _, rest = content.partition("</think>")
             content = rest.strip()
         if not content:
-            reasoning = (message.get("reasoning_content") or "").strip()
+            reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
             if reasoning:
                 content = reasoning
         if not content:
@@ -913,7 +916,7 @@ def answer_voice_conversation(
             {"role": "user", "content": command or ""},
         ],
         "temperature": 0.8,
-        "max_tokens": 1024,
+        "max_tokens": 4096,
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -932,7 +935,7 @@ def answer_voice_conversation(
             _, _, rest = content.partition("</think>")
             content = rest.strip()
         if not content:
-            reasoning = (message.get("reasoning_content") or "").strip()
+            reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
             if reasoning:
                 start = reasoning.find("{")
                 end = reasoning.rfind("}")
@@ -1056,7 +1059,7 @@ def parse_voice_combined(
             {"role": "user", "content": transcript},
         ],
         "temperature": 0.1,
-        "max_tokens": 1024,
+        "max_tokens": 4096,
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -1076,7 +1079,7 @@ def parse_voice_combined(
         finish_reason = choice.get("finish_reason", "unknown")
         usage = raw_json.get("usage", {})
         content = (message.get("content") or "").strip()
-        reasoning = (message.get("reasoning_content") or "").strip()
+        reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
         # Some servers leak only the closing </think> even when thinking is disabled mid-stream
         if "</think>" in content:
             _, _, rest = content.partition("</think>")
@@ -1129,7 +1132,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         "temperature": 0.1,
         # Bumped from 256 — reasoning-capable models emit <think>…</think>
         # tokens that eat into the budget before the JSON answer is produced.
-        "max_tokens": 1024,
+        "max_tokens": 4096,
     }
     if LLM_MODEL:
         body["model"] = LLM_MODEL
@@ -1149,7 +1152,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         finish_reason = choice.get("finish_reason", "unknown")
         usage = raw_json.get("usage", {})
         content = (message.get("content") or "").strip()
-        reasoning = (message.get("reasoning_content") or "").strip()
+        reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
         if "</think>" in content:
             before, _, rest = content.partition("</think>")
             content = rest.strip()

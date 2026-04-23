@@ -1476,12 +1476,8 @@ async def _dispatch_text_embed(
         active = persona_list()
         if active:
             persona_mark_fired_all()
-            # Re-read one row's fire_count post-bump for display.
-            top = max(active, key=lambda p: p.get("fire_count", 0) or 0)
-            directive_short = top["directive"]
-            if len(directive_short) > 40:
-                directive_short = directive_short[:39] + "…"
-            footer = f"persona: {directive_short} · fires: {int(top.get('fire_count') or 0) + 1}"
+            n = len(active)
+            footer = f"{n} persona{'s' if n != 1 else ''} active"
     except Exception:
         log.debug("persona footer failed", exc_info=True)
 
