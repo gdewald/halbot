@@ -31,11 +31,28 @@ export function LogsPanel() {
     });
   }, [effectiveLogs, filter, search]);
 
+  // Pin to bottom whenever logs change (or tail re-enabled). Depends on
+  // `logs` reference — not `visible.length` — so it keeps firing after the
+  // ring buffer caps at MAX (length plateaus but reference updates per batch).
+  // rAF defers scroll until after layout reflects new rows.
   useEffect(() => {
-    if (autoScroll && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [visible.length, autoScroll]);
+    if (!autoScroll) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [logs, visible.length, autoScroll]);
+
+  // Auto-disable tail when user scrolls up; auto-enable when back at bottom.
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (nearBottom && !autoScroll) setAutoScroll(true);
+    else if (!nearBottom && autoScroll) setAutoScroll(false);
+  };
 
   const counts = useMemo(() => {
     const c = { ALL: effectiveLogs.length, DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0 };
@@ -106,7 +123,7 @@ export function LogsPanel() {
       </div>
 
       {/* log output */}
-      <div ref={scrollRef} style={{ flex: 1, overflow: 'auto' }}>
+      <div ref={scrollRef} onScroll={onScroll} style={{ flex: 1, overflow: 'auto' }}>
         {visible.length === 0 && (
           <div style={{ padding: '20px 12px', color: T.dim, fontSize: 11, fontFamily: 'JetBrains Mono' }}>
             {connected ? 'no matching lines' : 'waiting for daemon log stream…'}
