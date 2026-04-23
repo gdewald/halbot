@@ -167,17 +167,151 @@ def db_init():
             conn.execute("ALTER TABLE personas ADD COLUMN fire_count INTEGER NOT NULL DEFAULT 0")
 
 
+class DuplicateSound(Exception):
+    """Raised by db_save when a live row collides by name or audio content.
+
+    Carries the existing row's id/name and which dimension matched so callers
+    can tell the user which slot is occupied without running another query.
+    """
+
+    def __init__(self, existing_id: int, existing_name: str, kind: str) -> None:
+        super().__init__(f"duplicate by {kind}: existing #{existing_id} {existing_name!r}")
+        self.existing_id = existing_id
+        self.existing_name = existing_name
+        self.kind = kind  # "name" or "audio"
+
+
 def db_save(name: str, audio: bytes, emoji: str | None, metadata: str | None, saved_by: str,
             parent_id: int | None = None, effects: str = "") -> int:
     metadata = metadata or ""
     if len(metadata.encode()) > METADATA_MAX_BYTES:
         raise ValueError(f"Metadata exceeds {METADATA_MAX_BYTES} bytes")
     with _db() as conn:
+        name_row = conn.execute(
+            "SELECT id, name FROM saved_sounds "
+            "WHERE name = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1",
+            (name,),
+        ).fetchone()
+        if name_row:
+            raise DuplicateSound(name_row["id"], name_row["name"], "name")
+        # Byte-identical audio under a different name: catches the
+        # "save the soundboard sound twice" case AND the "apply the same
+        # effect chain to the same source" case where save_as differs but
+        # the output BLOB is the same. length() gate lets SQLite short-
+        # circuit most rows before the BLOB comparison.
+        audio_row = conn.execute(
+            "SELECT id, name FROM saved_sounds "
+            "WHERE length(audio) = ? AND audio = ? AND deleted_at IS NULL LIMIT 1",
+            (len(audio), audio),
+        ).fetchone()
+        if audio_row:
+            raise DuplicateSound(audio_row["id"], audio_row["name"], "audio")
         cur = conn.execute(
             "INSERT INTO saved_sounds (name, audio, emoji, metadata, saved_by, parent_id, effects) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (name, audio, emoji, metadata, saved_by, parent_id, effects),
         )
         return cur.lastrowid
+
+
+def db_dedupe_sounds(db_path: str | None = None, dry_run: bool = False) -> dict:
+    """One-shot: collapse name + audio duplicates among live saved_sounds rows.
+
+    Pass 1 (name): group live rows by lower(name). Lowest id in each group =
+    canonical; others soft-deleted.
+    Pass 2 (audio): on rows still live, group by (length(audio), audio). Lowest
+    id in each group = canonical; others soft-deleted.
+    Pass 3 (parent rewrite): any still-live row whose parent_id now points at
+    a soft-deleted row is rewritten to point at that group's canonical id
+    (or cleared if the canonical itself ended up dead — shouldn't happen).
+
+    db_path: pass a path to operate on a specific sqlite file (e.g. production
+    %ProgramData%\\Halbot\\sounds.db from a source checkout). Defaults to
+    DB_PATH.
+    dry_run: compute + print groups; do not write.
+
+    Returns {"name_groups", "audio_groups", "soft_deleted", "parent_rewrites",
+    "canonical_map"} for audit.
+    """
+    path = db_path or DB_PATH
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, name, length(audio) as n, audio, parent_id "
+            "FROM saved_sounds WHERE deleted_at IS NULL ORDER BY id"
+        ).fetchall()
+
+        name_groups: dict[str, list[int]] = {}
+        for r in rows:
+            key = (r["name"] or "").strip().lower()
+            name_groups.setdefault(key, []).append(r["id"])
+        name_dupes = {k: v for k, v in name_groups.items() if len(v) > 1}
+
+        # canonical_map: soft-deleted id -> canonical id it was collapsed into.
+        canonical_map: dict[int, int] = {}
+        dead: set[int] = set()
+        for ids in name_dupes.values():
+            canonical = ids[0]
+            for dup in ids[1:]:
+                canonical_map[dup] = canonical
+                dead.add(dup)
+
+        # Pass 2: audio dedupe on survivors only.
+        survivors = [r for r in rows if r["id"] not in dead]
+        audio_groups: dict[tuple[int, bytes], list[int]] = {}
+        for r in survivors:
+            audio_groups.setdefault((r["n"], bytes(r["audio"])), []).append(r["id"])
+        audio_dupes = {k: v for k, v in audio_groups.items() if len(v) > 1}
+        for ids in audio_dupes.values():
+            canonical = ids[0]
+            for dup in ids[1:]:
+                canonical_map[dup] = canonical
+                dead.add(dup)
+
+        # Pass 3: parent rewrites — any still-live row pointing into dead set.
+        parent_rewrites: list[tuple[int, int, int]] = []  # (row_id, old_parent, new_parent)
+        for r in rows:
+            if r["id"] in dead:
+                continue
+            p = r["parent_id"]
+            if p is None or p not in dead:
+                continue
+            # Follow chain in case canonical was itself collapsed (shouldn't
+            # happen since we only collapse into survivors, but be defensive).
+            target = p
+            seen: set[int] = set()
+            while target in canonical_map and target not in seen:
+                seen.add(target)
+                target = canonical_map[target]
+            parent_rewrites.append((r["id"], p, target))
+
+        result = {
+            "name_groups": len(name_dupes),
+            "audio_groups": len(audio_dupes),
+            "soft_deleted": len(dead),
+            "parent_rewrites": len(parent_rewrites),
+            "canonical_map": canonical_map,
+            "parent_rewrite_detail": parent_rewrites,
+        }
+
+        if dry_run:
+            return result
+
+        with conn:
+            for dup_id in dead:
+                conn.execute(
+                    "UPDATE saved_sounds SET deleted_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND deleted_at IS NULL",
+                    (dup_id,),
+                )
+            for row_id, _old, new_parent in parent_rewrites:
+                conn.execute(
+                    "UPDATE saved_sounds SET parent_id = ? WHERE id = ?",
+                    (new_parent, row_id),
+                )
+        return result
+    finally:
+        conn.close()
 
 
 def db_list() -> list[dict]:
