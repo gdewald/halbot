@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Halbot · Flows v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    --bg:        oklch(0.19 0.008 260);
+    --bg-2:      oklch(0.22 0.009 260);
+    --bg-3:      oklch(0.26 0.010 260);
+    --line:      oklch(0.32 0.012 260);
+    --line-soft: oklch(0.28 0.010 260 / 0.7);
+    --text:      oklch(0.96 0.008 100);
+    --text-dim:  oklch(0.74 0.010 260);
+    --text-faint:oklch(0.56 0.012 260);
+
+    --amber:     oklch(0.78 0.15 70);
+    --amber-ink: oklch(0.30 0.08 60);
+    --amber-soft:oklch(0.78 0.15 70 / 0.14);
+
+    --good:      oklch(0.78 0.14 155);
+    --warn:      oklch(0.80 0.15 45);
+    --bad:       oklch(0.70 0.17 25);
+    --violet:    oklch(0.72 0.14 300);
+    --cyan:      oklch(0.80 0.11 210);
+
+    --ui: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+  html, body { margin:0; background:#f0eee9; font-family: var(--ui); color: var(--text); }
+  /* Prevent the outer canvas grid bleed visually */
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="chat-primitives-v2.jsx"></script>
+<script type="text/babel" src="voice-primitives.jsx"></script>
+<script type="text/babel" src="flows-v3.jsx"></script>
+<script type="text/babel" src="app-v3.jsx"></script>
+
+</body>
+</html>
