@@ -1,6 +1,6 @@
 """Rotating JSONL transcript logger for voice analytics.
 
-Off by default; gated by `transcript_log_enabled` config (BOOL).
+JSONL file is gated by `transcript_log_enabled` config (BOOL).
 Flip in dashboard → next utterance lands in file. No daemon
 restart required — the toggle is read on every emit().
 
@@ -13,6 +13,11 @@ Roles: "user" (Whisper STT input), "bot" (parsed LLM reply text),
 transforms applied after the LLM stage).
 
 File path: paths.log_dir() / transcripts.jsonl, rotated 20MB × 20.
+
+Independently of the JSONL toggle, every emit() also writes a
+DEBUG line to the main `halbot` logger so a DEBUG-level halbot.log
+captures transcripts + their meta dict without needing the JSONL
+file enabled.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ _BACKUP = 20                    # ~400 MB total ceiling
 
 _logger = logging.getLogger("halbot.transcript")
 _logger.propagate = False  # don't double-log into halbot.log
+_main_log = logging.getLogger("halbot")
 _initialized = False
 _BUILD = "unknown"
 
@@ -57,12 +63,21 @@ def init() -> None:
 
 
 def emit(role: str, text: str, **meta) -> None:
-    """Append one JSON record. No-op when transcript_log_enabled=false.
+    """Append one JSON record + a DEBUG line to the main logger.
+
+    JSONL write is gated on `transcript_log_enabled`. The DEBUG line
+    fires unconditionally, so flipping log_level=DEBUG surfaces every
+    transcript (with meta) in halbot.log without the JSONL file.
 
     `text` is stored verbatim (no truncation). `meta` is merged into
     the record so callers can attach user_id / latency_ms / action
     / audio_seconds / concurrency_peak etc. without schema gymnastics.
     """
+    # Always: DEBUG mirror to main log. Cheap when DEBUG is filtered.
+    try:
+        _main_log.debug("[transcript] role=%s text=%r meta=%s", role, text, meta or {})
+    except Exception:
+        pass
     # Read config every call so the dashboard toggle takes effect
     # immediately without daemon restart. Cost: one dict lookup.
     try:
