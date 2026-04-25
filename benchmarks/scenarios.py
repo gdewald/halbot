@@ -132,9 +132,9 @@ def _llm_only(name: str, **overrides) -> Scenario:
 
 
 def llm_sweep() -> list[Scenario]:
-    # Only gemma4:e4b is installed on the box today. Add other model
-    # lines after `ollama pull <name>`. Sweep still runs end-to-end
-    # over the token-budget axis without extra pulls.
+    # gemma4:e4b is the only model installed out of the box. Token-budget +
+    # temperature scenarios always run. Model-comparison scenarios need an
+    # explicit `ollama pull`; see the commented block.
     return [
         _llm_only("llm-baseline"),
         _llm_only("llm-max256",     max_tokens=256),
@@ -142,9 +142,15 @@ def llm_sweep() -> list[Scenario]:
         _llm_only("llm-max1024",    max_tokens=1024),
         _llm_only("llm-temp02",     temperature=0.2),
         _llm_only("llm-temp12",     temperature=1.2),
-        # Uncomment after pulling the model:
-        # _llm_only("llm-qwen2.5-7b", model="qwen2.5:7b"),
-        # _llm_only("llm-llama3.2-3b", model="llama3.2:3b"),
+        # After `ollama pull`, uncomment the relevant lines. VRAM noted in
+        # plan 016 / hardware-fit review.
+        # Gemma 4 family (current generation, April 2026):
+        # _llm_only("llm-gemma4-e2b",    model="gemma4:e2b"),   # ~1.5 GB, 2.3B effective
+        # _llm_only("llm-gemma4-26b",    model="gemma4:26b"),   # ~14-18 GB, MoE (3.8B active)
+        # _llm_only("llm-gemma4-31b",    model="gemma4:31b"),   # ~20 GB, dense
+        # Cross-family references:
+        # _llm_only("llm-qwen3-8b",      model="qwen3:8b"),     # ~6 GB
+        # _llm_only("llm-phi-4",         model="phi-4:14b"),    # ~9 GB
     ]
 
 
