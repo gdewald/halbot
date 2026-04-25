@@ -106,15 +106,31 @@ def _stt_only(name: str, **overrides) -> Scenario:
 
 
 def stt_sweep() -> list[Scenario]:
+    # Whisper/Distil-Whisper variants via faster-whisper + Parakeet via NeMo.
+    # Parakeet scenarios require: uv pip install "nemo-toolkit[asr]"
     return [
         _stt_only("stt-baseline"),
-        _stt_only("stt-large-v3",        model="large-v3"),
-        _stt_only("stt-medium",          model="medium"),
-        _stt_only("stt-small-en",        model="small.en"),
-        _stt_only("stt-beam3",           beam_size=3),
-        _stt_only("stt-beam5",           beam_size=5),
-        _stt_only("stt-int8-fp16",       compute_type="int8_float16"),
-        _stt_only("stt-int8",            compute_type="int8"),
+        _stt_only("stt-large-v3",            model="large-v3"),
+        _stt_only("stt-medium",              model="medium"),
+        _stt_only("stt-small-en",            model="small.en"),
+        _stt_only("stt-beam3",               beam_size=3),
+        _stt_only("stt-beam5",               beam_size=5),
+        _stt_only("stt-int8-fp16",           compute_type="int8_float16"),
+        _stt_only("stt-int8",                compute_type="int8"),
+        # Distil-Whisper: drop-in via faster-whisper, ~1.5x faster than turbo,
+        # within 1% WER. Model IDs accepted by WhisperModel as HF repos.
+        _stt_only("stt-distil-large-v3",     model="distil-whisper/distil-large-v3"),
+        _stt_only("stt-distil-large-v3.5",   model="distil-whisper/distil-large-v3.5"),
+        # Parakeet-TDT: ~10x faster than whisper-large-v3, 6.3% WER. NeMo.
+        Scenario(
+            name="stt-parakeet-tdt-0.6b-v3",
+            pipeline=["stt"],
+            stt={"engine": "parakeet",
+                 "model": "nvidia/parakeet-tdt-0.6b-v3",
+                 "device": "cuda", "language": "en"},
+            inputs=list(_voice_clips()), warmup=1, iterations=5,
+            description="NVIDIA Parakeet-TDT via NeMo — install nemo-toolkit[asr] first.",
+        ),
     ]
 
 
@@ -132,25 +148,23 @@ def _llm_only(name: str, **overrides) -> Scenario:
 
 
 def llm_sweep() -> list[Scenario]:
-    # gemma4:e4b is the only model installed out of the box. Token-budget +
-    # temperature scenarios always run. Model-comparison scenarios need an
-    # explicit `ollama pull`; see the commented block.
+    # Models required: gemma4:e4b (baseline), gemma4:e2b, qwen3:8b, phi4:14b.
+    # Gemma 4 26B MoE (14-18 GB Q4) and 31B dense (20 GB Q4) excluded —
+    # both land in tight/OOM territory once whisper (1.5 GB) + CUDA
+    # overhead (~5 GB) stack on top in a full-chain run. Re-add for
+    # llm-only comparisons if ever needed.
     return [
         _llm_only("llm-baseline"),
-        _llm_only("llm-max256",     max_tokens=256),
-        _llm_only("llm-max384",     max_tokens=384),
-        _llm_only("llm-max1024",    max_tokens=1024),
-        _llm_only("llm-temp02",     temperature=0.2),
-        _llm_only("llm-temp12",     temperature=1.2),
-        # After `ollama pull`, uncomment the relevant lines. VRAM noted in
-        # plan 016 / hardware-fit review.
+        _llm_only("llm-max256",        max_tokens=256),
+        _llm_only("llm-max384",        max_tokens=384),
+        _llm_only("llm-max1024",       max_tokens=1024),
+        _llm_only("llm-temp02",        temperature=0.2),
+        _llm_only("llm-temp12",        temperature=1.2),
         # Gemma 4 family (current generation, April 2026):
-        # _llm_only("llm-gemma4-e2b",    model="gemma4:e2b"),   # ~1.5 GB, 2.3B effective
-        # _llm_only("llm-gemma4-26b",    model="gemma4:26b"),   # ~14-18 GB, MoE (3.8B active)
-        # _llm_only("llm-gemma4-31b",    model="gemma4:31b"),   # ~20 GB, dense
+        _llm_only("llm-gemma4-e2b",    model="gemma4:e2b"),
         # Cross-family references:
-        # _llm_only("llm-qwen3-8b",      model="qwen3:8b"),     # ~6 GB
-        # _llm_only("llm-phi-4",         model="phi-4:14b"),    # ~9 GB
+        _llm_only("llm-qwen3-8b",      model="qwen3:8b"),
+        _llm_only("llm-phi4-14b",      model="phi4:14b"),
     ]
 
 
@@ -170,12 +184,30 @@ def _tts_only(name: str, inputs: list[str], **overrides) -> Scenario:
 def tts_sweep() -> list[Scenario]:
     texts = _texts()
     return [
-        _tts_only("tts-baseline",  inputs=texts),
-        _tts_only("tts-speed-08",  inputs=texts, speed=0.8),
-        _tts_only("tts-speed-12",  inputs=texts, speed=1.2),
+        _tts_only("tts-baseline",     inputs=texts),
+        _tts_only("tts-speed-08",     inputs=texts, speed=0.8),
+        _tts_only("tts-speed-12",     inputs=texts, speed=1.2),
         # af_bella / af_sarah / am_adam are known kokoro voices.
-        _tts_only("tts-voice-bella", inputs=texts, voice="af_bella"),
-        _tts_only("tts-voice-sarah", inputs=texts, voice="af_sarah"),
+        _tts_only("tts-voice-bella",  inputs=texts, voice="af_bella"),
+        _tts_only("tts-voice-sarah",  inputs=texts, voice="af_sarah"),
+        # Chatterbox (Resemble AI) — ~4.5 GB VRAM, sub-300ms latency,
+        # voice cloning. No voice prompt = default model voice.
+        Scenario(
+            name="tts-chatterbox",
+            pipeline=["tts"],
+            tts={"engine": "chatterbox", "device": "cuda"},
+            inputs=texts, warmup=1, iterations=5,
+            description="Chatterbox on CUDA (~4.5 GB VRAM).",
+        ),
+        # Chatterbox-Turbo — 1-step distilled decoder, ~2 GB VRAM,
+        # sub-150ms time-to-first-sound.
+        Scenario(
+            name="tts-chatterbox-turbo",
+            pipeline=["tts"],
+            tts={"engine": "chatterbox", "device": "cuda", "turbo": True},
+            inputs=texts, warmup=1, iterations=5,
+            description="Chatterbox-Turbo (1-step decoder) on CUDA.",
+        ),
     ]
 
 

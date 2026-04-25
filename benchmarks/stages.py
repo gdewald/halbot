@@ -18,6 +18,8 @@ from typing import Any
 # ``unload_*`` when model config changes between scenarios.
 _whisper_model = None
 _whisper_key: tuple | None = None
+_parakeet_model = None
+_parakeet_key: tuple | None = None
 _tts_engine = None
 _tts_key: tuple | None = None
 
@@ -55,11 +57,11 @@ def _load_whisper(model: str, device: str, compute_type: str):
 
 
 def unload_stt() -> None:
-    global _whisper_model, _whisper_key
-    if _whisper_model is None:
-        return
+    global _whisper_model, _whisper_key, _parakeet_model, _parakeet_key
     _whisper_model = None
     _whisper_key = None
+    _parakeet_model = None
+    _parakeet_key = None
     import gc
     gc.collect()
     try:
@@ -70,43 +72,101 @@ def unload_stt() -> None:
         pass
 
 
-def run_stt(audio_path: Path, *, config: dict) -> tuple[str, StageTiming]:
-    """Transcribe a 16 kHz mono wav. Config keys:
-    - model (str, default "large-v3-turbo")
-    - device (str, default "cuda")
-    - compute_type (str, default "float16")
-    - beam_size (int, default 1)
-    - language (str, default "en")
-    """
-    import numpy as np
+def _load_parakeet(model: str, device: str):
+    """Lazy-load an NVIDIA Parakeet model via NeMo. Install separately:
+    ``uv pip install "nemo-toolkit[asr]"``."""
+    global _parakeet_model, _parakeet_key
+    key = (model, device)
+    if _parakeet_model is not None and _parakeet_key == key:
+        return _parakeet_model, 0.0
+    unload_stt()
+    try:
+        from nemo.collections.asr.models import ASRModel  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "parakeet scenarios require nemo_toolkit[asr] — install with "
+            "`uv pip install \"nemo-toolkit[asr]\"` and retry"
+        ) from e
+    t0 = time.perf_counter()
+    m = ASRModel.from_pretrained(model_name=model)
+    m.to(device)
+    m.eval()
+    _parakeet_model = m
+    _parakeet_key = key
+    return _parakeet_model, (time.perf_counter() - t0) * 1000.0
+
+
+def _load_audio(audio_path: Path):
     import soundfile as sf  # type: ignore
-
-    model_name = config.get("model", "large-v3-turbo")
-    device = config.get("device", "cuda")
-    compute_type = config.get("compute_type", "float16")
-    beam_size = int(config.get("beam_size", 1))
-    language = config.get("language", "en")
-
     audio, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     if sr != 16000:
-        # Whisper expects 16 kHz. Corpus should already be 16 kHz, but
-        # resample defensively so a stray clip doesn't silently distort
-        # the numbers.
         from scipy.signal import resample_poly  # type: ignore
         from math import gcd
         g = gcd(sr, 16000)
         audio = resample_poly(audio, 16000 // g, sr // g).astype("float32")
+    return audio
 
-    model, load_ms = _load_whisper(model_name, device, compute_type)
 
-    t0 = time.perf_counter()
-    segments, info = model.transcribe(
-        audio, language=language, beam_size=beam_size, temperature=0.0,
-    )
-    text = " ".join(s.text for s in segments).strip()
-    wall_ms = (time.perf_counter() - t0) * 1000.0
+def run_stt(audio_path: Path, *, config: dict) -> tuple[str, StageTiming]:
+    """Transcribe a 16 kHz mono wav.
+
+    Engine dispatch via ``config["engine"]``:
+    - ``"faster-whisper"`` (default): OpenAI Whisper / Distil-Whisper via
+      CTranslate2. Config: model, device, compute_type, beam_size, language.
+    - ``"parakeet"``: NVIDIA Parakeet-TDT via NeMo. Config: model, device,
+      language. ~10x faster than whisper-large on GPU; requires nemo-toolkit.
+    """
+    engine = config.get("engine", "faster-whisper")
+    device = config.get("device", "cuda")
+    language = config.get("language", "en")
+
+    audio = _load_audio(audio_path)
+
+    if engine == "faster-whisper":
+        model_name = config.get("model", "large-v3-turbo")
+        compute_type = config.get("compute_type", "float16")
+        beam_size = int(config.get("beam_size", 1))
+        model, load_ms = _load_whisper(model_name, device, compute_type)
+        t0 = time.perf_counter()
+        segments, info = model.transcribe(
+            audio, language=language, beam_size=beam_size, temperature=0.0,
+        )
+        text = " ".join(s.text for s in segments).strip()
+        wall_ms = (time.perf_counter() - t0) * 1000.0
+        extra = {
+            "engine": engine,
+            "model": model_name,
+            "audio_seconds": len(audio) / 16000.0,
+            "language_probability": float(info.language_probability),
+            "transcript": text,
+            "audio_path": str(audio_path),
+        }
+
+    elif engine == "parakeet":
+        model_name = config.get("model", "nvidia/parakeet-tdt-0.6b-v3")
+        model, load_ms = _load_parakeet(model_name, device)
+        t0 = time.perf_counter()
+        # NeMo ASRModel.transcribe accepts a list of audio arrays or paths.
+        # Passing the float32 array directly keeps us consistent with the
+        # whisper branch (same load_audio path, same resample guarantees).
+        out = model.transcribe([audio], batch_size=1, verbose=False)
+        # NeMo returns either list[str] (older) or list[Hypothesis] (newer).
+        first = out[0] if out else ""
+        text = first.text if hasattr(first, "text") else str(first)
+        text = text.strip()
+        wall_ms = (time.perf_counter() - t0) * 1000.0
+        extra = {
+            "engine": engine,
+            "model": model_name,
+            "audio_seconds": len(audio) / 16000.0,
+            "transcript": text,
+            "audio_path": str(audio_path),
+        }
+
+    else:
+        raise ValueError(f"unknown STT engine: {engine!r}")
 
     return text, StageTiming(
         stage="stt",
@@ -114,12 +174,7 @@ def run_stt(audio_path: Path, *, config: dict) -> tuple[str, StageTiming]:
         model_load_ms=load_ms if load_ms > 0 else None,
         input_size=len(audio),
         output_size=len(text),
-        extra={
-            "audio_seconds": len(audio) / 16000.0,
-            "language_probability": float(info.language_probability),
-            "transcript": text,
-            "audio_path": str(audio_path),
-        },
+        extra=extra,
     )
 
 
@@ -194,9 +249,13 @@ def run_llm(prompt: str | dict, *, config: dict) -> tuple[str, StageTiming]:
 # ---------------------------------------------------------------------------
 # TTS — kokoro (only engine in repo; abstracted so new engines drop in)
 # ---------------------------------------------------------------------------
-def _load_tts(engine: str, voice: str, lang: str, speed: float, device: str):
+def _load_tts(engine: str, voice: str, lang: str, speed: float, device: str,
+              extra: dict | None = None):
     global _tts_engine, _tts_key
-    key = (engine, voice, lang, float(speed), device)
+    extra = extra or {}
+    # Include whichever extras matter for the cache key (e.g. turbo flag).
+    cache_extras = tuple(sorted((k, v) for k, v in extra.items() if k in ("turbo",)))
+    key = (engine, voice, lang, float(speed), device, cache_extras)
     if _tts_engine is not None and _tts_key == key:
         return _tts_engine, 0.0
     unload_tts()
@@ -211,6 +270,33 @@ def _load_tts(engine: str, voice: str, lang: str, speed: float, device: str):
             except Exception:
                 pass
         _tts_engine = ("kokoro", pipe, voice, speed)
+    elif engine == "chatterbox":
+        try:
+            from chatterbox.tts import ChatterboxTTS  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "chatterbox scenarios require chatterbox-tts — install with "
+                "`uv pip install chatterbox-tts --no-deps` "
+                "(not in benchmarks group: chatterbox pins torch 2.6/cublas "
+                "12.4 which clashes with faster-whisper's cublas 12.9 pin)"
+            ) from e
+        turbo = bool(extra.get("turbo", False))
+        if turbo:
+            # Turbo distills the diffusion decoder to 1 step. API: same
+            # from_pretrained, but the Resemble AI release ships turbo as
+            # a separate repo; pass it via the `ckpt_dir` option if the
+            # config provides one.
+            try:
+                from chatterbox.tts import ChatterboxTTSTurbo  # type: ignore
+                model = ChatterboxTTSTurbo.from_pretrained(device=device)
+            except ImportError:
+                # Fall back to loading the turbo weights through the base
+                # class — works for installs that ship turbo under the
+                # main entry point.
+                model = ChatterboxTTS.from_pretrained(device=device, turbo=True)
+        else:
+            model = ChatterboxTTS.from_pretrained(device=device)
+        _tts_engine = ("chatterbox", model, voice, speed)
     else:
         raise ValueError(f"unknown tts engine: {engine!r}")
     _tts_key = key
@@ -233,23 +319,26 @@ def unload_tts() -> None:
 
 def run_tts(text: str, *, config: dict) -> tuple[tuple[bytes, str], StageTiming]:
     """Synthesize TTS. Config keys:
-    - engine (str, default "kokoro")
-    - voice (str, default "af_heart")
-    - lang (str, default "a")
-    - speed (float, default 1.0)
-    - device (str, default "cpu" — matches prod; kokoro on same GPU as
-      ollama has caused driver crashes per halbot/tts.py)
+    - engine (str, default "kokoro"): "kokoro" | "chatterbox"
+    - voice (str, default "af_heart") — kokoro voice name, or chatterbox
+      ``audio_prompt_path`` (skip cloning if not set)
+    - lang (str, default "a") — kokoro only
+    - speed (float, default 1.0) — kokoro only
+    - device (str, default "cpu" for kokoro, "cuda" for chatterbox)
+    - turbo (bool, default False) — chatterbox only; uses the 1-step decoder
     """
     import numpy as np
     import soundfile as sf  # type: ignore
 
     engine_name = config.get("engine", "kokoro")
-    voice = config.get("voice", "af_heart")
+    voice = config.get("voice", "af_heart" if engine_name == "kokoro" else None)
     lang = config.get("lang", "a")
     speed = float(config.get("speed", 1.0))
-    device = config.get("device", "cpu")
+    default_device = "cpu" if engine_name == "kokoro" else "cuda"
+    device = config.get("device", default_device)
+    extras = {"turbo": bool(config.get("turbo", False))}
 
-    loaded, load_ms = _load_tts(engine_name, voice, lang, speed, device)
+    loaded, load_ms = _load_tts(engine_name, voice, lang, speed, device, extras)
 
     t0 = time.perf_counter()
     if loaded[0] == "kokoro":
@@ -260,13 +349,25 @@ def run_tts(text: str, *, config: dict) -> tuple[tuple[bytes, str], StageTiming]
                 audio = audio.detach().cpu().numpy()
             chunks.append(np.asarray(audio, dtype="float32"))
         waveform = np.concatenate(chunks) if chunks else np.zeros(0, dtype="float32")
-        buf = io.BytesIO()
-        sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
-        audio_bytes, fmt = buf.getvalue(), "wav"
-        sample_count = int(waveform.shape[0])
         sample_rate = 24000
+    elif loaded[0] == "chatterbox":
+        _, model, voice_prompt, speed = loaded
+        gen_kwargs = {}
+        if voice_prompt:
+            gen_kwargs["audio_prompt_path"] = str(voice_prompt)
+        wav = model.generate(text, **gen_kwargs)
+        # ChatterboxTTS.generate returns torch.Tensor on model.device.
+        if hasattr(wav, "detach"):
+            wav = wav.detach().cpu().numpy()
+        waveform = np.asarray(wav, dtype="float32").squeeze()
+        sample_rate = int(getattr(model, "sr", 24000))
     else:
         raise ValueError(f"unknown engine: {loaded[0]!r}")
+
+    buf = io.BytesIO()
+    sf.write(buf, waveform, sample_rate, format="WAV", subtype="PCM_16")
+    audio_bytes, fmt = buf.getvalue(), "wav"
+    sample_count = int(waveform.shape[0]) if waveform.ndim else 0
     wall_ms = (time.perf_counter() - t0) * 1000.0
 
     return (audio_bytes, fmt), StageTiming(
@@ -281,6 +382,7 @@ def run_tts(text: str, *, config: dict) -> tuple[tuple[bytes, str], StageTiming]
             "sample_rate": sample_rate,
             "audio_seconds": sample_count / float(sample_rate) if sample_rate else 0.0,
             "text": text,
+            "turbo": extras["turbo"],
         },
     )
 

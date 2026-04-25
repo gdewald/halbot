@@ -54,6 +54,13 @@ benchmarks = [
     "pynvml>=11.5",
     "tabulate>=0.9",
     "scipy>=1.11",
+    # chatterbox-tts and nemo-toolkit are NOT listed here because both pin
+    # older torch / cublas versions that conflict with the daemon group
+    # (faster-whisper needs nvidia-cublas-cu12 >= 12.9). Install separately
+    # in a side venv or with `uv pip install --no-deps`:
+    #   chatterbox-tts:       uv pip install chatterbox-tts --no-deps (torch already satisfied)
+    #   nemo-toolkit (parakeet): uv pip install "nemo-toolkit[asr]" --no-deps
+    # Both are gated at runtime in stages.py; missing deps raise an actionable error.
 ]
 
 [tool.uv]
