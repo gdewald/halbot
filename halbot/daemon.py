@@ -62,6 +62,8 @@ async def _run_async() -> int:
 
     config.load()
     logging_setup.init(level=config.get("log_level"))
+    from . import transcript_log
+    transcript_log.init()
     log.info("halbot daemon starting, version=%s", _version())
 
     started = time.time()

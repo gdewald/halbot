@@ -26,6 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     "tts_lang": "a",
     "tts_speed": "1.0",
     "analytics_retention_days": "90",
+    "transcript_log_enabled": "false",
     "halbot_avatar_url": "",
     "halbot_dashboard_url": "",
 }
@@ -233,6 +234,11 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 1.0, "max": 3650.0, "step": 1.0,
         "description": "Days of analytics history retained on disk",
         "group": "general", "label": "ANALYTICS_RETENTION_DAYS",
+    },
+    "transcript_log_enabled": {
+        "type": "BOOL",
+        "description": "Persist voice transcripts to logs/transcripts.jsonl (rotating file)",
+        "group": "voice", "label": "TRANSCRIPT_LOG_ENABLED",
     },
     "halbot_avatar_url": {
         "type": "URL",

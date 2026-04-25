@@ -14,6 +14,7 @@ _wake_captured_at: contextvars.ContextVar[float | None] = contextvars.ContextVar
 import discord
 
 from . import analytics
+from . import transcript_log
 from .bot_ui import EmbedField, Mode, ReplyPayload, send_halbot_reply
 from .db import (
     db_get, db_list, trigger_list, trigger_mark_fired,
@@ -209,6 +210,13 @@ async def _speak(session, text: str) -> bool:
         chars=len(clean),
         bytes=len(audio) if audio else 0,
         concurrency_start=tracker.start,
+        concurrency_peak=tracker.peak,
+    )
+    transcript_log.emit(
+        "tts", clean,
+        guild_id=gid,
+        engine=getattr(engine, "name", "unknown"),
+        latency_ms=_tts_latency_ms,
         concurrency_peak=tracker.peak,
     )
     try:
@@ -495,6 +503,7 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
     intent parsing on transcripts that already passed the substring gate.
     """
     log.info("[voice-cmd] stage=begin user=%s transcript=%r", user_id, transcript[:120])
+    transcript_log.emit("user", transcript, user_id=user_id, guild_id=guild.id)
     if captured_at is not None:
         _wake_captured_at.set(captured_at)
     session = voice_listeners.get(guild.id)
@@ -570,6 +579,10 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
 
     def _record(bot_response: str) -> None:
         wake_reply.append(bot_response)
+        transcript_log.emit(
+            "bot", bot_response,
+            user_id=user_id, guild_id=guild.id, reply_to=user_id,
+        )
         if VOICE_HISTORY_TURNS <= 0:
             return
         turn = {

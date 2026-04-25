@@ -35,5 +35,9 @@ def log_file() -> Path:
     return log_dir() / "halbot.log"
 
 
+def transcript_log_file() -> Path:
+    return log_dir() / "transcripts.jsonl"
+
+
 def events_db() -> Path:
     return data_dir() / "events.db"
