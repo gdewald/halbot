@@ -29,6 +29,9 @@ DEFAULTS: Dict[str, Any] = {
     "transcript_log_enabled": "false",
     "halbot_avatar_url": "",
     "halbot_dashboard_url": "",
+    "models_offline": "true",
+    "llm_keepalive_minutes": "10",
+    "llm_keepalive_interval_seconds": "240",
 }
 
 
@@ -249,5 +252,20 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "URL",
         "description": "Base URL for the dashboard (used by See-triggers deeplink)",
         "group": "general", "label": "HALBOT_DASHBOARD_URL",
+    },
+    "models_offline": {
+        "type": "BOOL",
+        "description": "Block HF Hub network access (no model downloads / update checks)",
+        "group": "general", "label": "MODELS_OFFLINE",
+    },
+    "llm_keepalive_minutes": {
+        "type": "NUMBER", "min": 0.0, "max": 1440.0, "step": 1.0,
+        "description": "Ollama keep_alive duration sent on every call (0 disables)",
+        "group": "llm", "label": "LLM_KEEPALIVE_MINUTES",
+    },
+    "llm_keepalive_interval_seconds": {
+        "type": "NUMBER", "min": 0.0, "max": 3600.0, "step": 30.0,
+        "description": "Background ping interval to keep LLM resident (0 disables)",
+        "group": "llm", "label": "LLM_KEEPALIVE_INTERVAL_SECONDS",
     },
 }

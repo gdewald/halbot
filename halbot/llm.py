@@ -16,6 +16,31 @@ LLM_URL = _config.get("llm_url")
 LLM_MODEL = _config.get("llm_model") or "gemma4:e4b"
 
 
+def _keepalive_value() -> str | None:
+    """Ollama `keep_alive` body parameter — string like "10m". None disables."""
+    try:
+        mins = int(_config.get("llm_keepalive_minutes"))
+    except (TypeError, ValueError):
+        mins = 10
+    if mins <= 0:
+        return None
+    return f"{mins}m"
+
+
+def _apply_model_and_keepalive(body: dict) -> dict:
+    """Inject `model` and ollama-specific `keep_alive` on every request body.
+
+    `keep_alive` is ignored by non-ollama OpenAI-compat servers, so it's safe
+    to send unconditionally.
+    """
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
+    ka = _keepalive_value()
+    if ka is not None:
+        body["keep_alive"] = ka
+    return body
+
+
 PERSONA_STACKING_GUIDE = (
     "PERSONA STACKING: when MULTIPLE directives are listed, you MUST honor "
     "ALL of them simultaneously in every response — do not pick one and "
@@ -192,6 +217,53 @@ def _llm_base() -> str:
     return LLM_URL.rstrip("/")
 
 
+def _keepalive_ping() -> bool:
+    """One-shot Ollama keepalive ping. Empty prompt + keep_alive refreshes
+    VRAM residency without inference. Returns True on 200, False on any error."""
+    if not LLM_MODEL:
+        return False
+    ka = _keepalive_value()
+    if ka is None:
+        return False
+    base = _llm_base()
+    body = {"model": LLM_MODEL, "keep_alive": ka, "prompt": ""}
+    try:
+        r = requests.post(f"{base}/api/generate", json=body, timeout=10)
+        ok = r.status_code == 200
+        if not ok:
+            log.warning("[llm-keepalive] %s: %s", r.status_code, r.text[:200])
+        return ok
+    except requests.RequestException as e:
+        log.warning("[llm-keepalive] ping failed: %s", e)
+        return False
+
+
+async def keepalive_loop() -> None:
+    """Periodically refresh Ollama's keep_alive timer so the model stays in VRAM
+    during idle stretches. Interval and duration come from config; either set
+    to 0 disables the loop."""
+    try:
+        interval = int(_config.get("llm_keepalive_interval_seconds"))
+    except (TypeError, ValueError):
+        interval = 240
+    if interval <= 0 or _keepalive_value() is None:
+        log.info("[llm-keepalive] disabled (interval=%ss)", interval)
+        return
+    log.info("[llm-keepalive] loop start: interval=%ss model=%s keep_alive=%s",
+             interval, LLM_MODEL, _keepalive_value())
+    while True:
+        try:
+            await asyncio.to_thread(_keepalive_ping)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[llm-keepalive] unexpected error")
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+
+
 def ensure_model_loaded(model: str = LLM_MODEL, timeout: int = 180) -> bool:
     """Check model is available in Ollama. Ollama auto-loads on inference — this
     is a connectivity + existence check only, not a JIT trigger."""
@@ -226,8 +298,7 @@ def describe_emoji_image(image_bytes: bytes, name: str) -> str:
         "temperature": 0.3,
         "max_tokens": 60,
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
     body["reasoning_effort"] = "none"
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
@@ -342,8 +413,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         "temperature": 0.1,
         "max_tokens": 6144,
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
 
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
@@ -441,8 +511,7 @@ def customize_response(raw_text: str, *, context: str = "") -> str:
         "think": False,
         "reasoning_effort": "none",
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
@@ -535,8 +604,7 @@ def customize_response_rich(raw_text: str, *, context: str = "",
         "max_tokens": 2000,
         "response_format": {"type": "json_object"},
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
@@ -638,8 +706,7 @@ def generate_wake_variants(word: str) -> list[str]:
         "max_tokens": 2048,
         "response_format": {"type": "json_object"},
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
     resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
     if resp.status_code in (400, 404, 409, 503):
         if ensure_model_loaded(LLM_MODEL):
@@ -739,8 +806,7 @@ def customize_flavor(resolution_hint: str = "", *, context: str = "") -> str:
         "temperature": 0.9,
         "max_tokens": 120,
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
@@ -895,8 +961,7 @@ def answer_stats_question(question: str, *, rollup_block: str,
         "temperature": 0.7,
         "max_tokens": 3600,
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         if resp.status_code >= 400:
@@ -1038,8 +1103,7 @@ def answer_voice_conversation(
         "think": False,
         "reasoning_effort": "none",
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
 
     try:
         resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
@@ -1156,8 +1220,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         # prose-before-JSON failure mode independently of reasoning.
         "response_format": {"type": "json_object"},
     }
-    if LLM_MODEL:
-        body["model"] = LLM_MODEL
+    _apply_model_and_keepalive(body)
 
     content = ""
     try:

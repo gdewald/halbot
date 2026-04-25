@@ -115,6 +115,35 @@ client: "discord.Client | None" = None
 _slash_tree: "discord.app_commands.CommandTree | None" = None
 
 
+_voice_preload_lock = asyncio.Lock()
+
+
+async def _preload_voice_pipeline() -> None:
+    """Warm Kokoro (CPU) then faster-whisper (GPU) so the first wake-word
+    doesn't pay the cold-start. Serialized via a lock so concurrent
+    voice_join calls don't double-load. Errors logged + swallowed — preload
+    is best-effort, the lazy paths in voice.py / tts.py still cover us."""
+    async with _voice_preload_lock:
+        try:
+            if _preload_tts_engine is not None:
+                log.info("[voice-preload] stage=tts-load (background, CPU)")
+                # preload_engine_async spawns its own thread and returns
+                # immediately; no need for to_thread here.
+                _preload_tts_engine()
+        except Exception:
+            log.exception("[voice-preload] TTS preload failed")
+        # Stagger: give TTS a moment so its CPU/RAM init isn't running
+        # concurrent with whisper's GPU init alongside Ollama.
+        await asyncio.sleep(1.0)
+        try:
+            if load_whisper is not None:
+                log.info("[voice-preload] stage=whisper-load (background, GPU)")
+                await asyncio.to_thread(load_whisper)
+                log.info("[voice-preload] stage=whisper-loaded")
+        except Exception:
+            log.exception("[voice-preload] whisper preload failed")
+
+
 async def sync_emojis(guild: discord.Guild):
     """Sync server emojis to the DB, generating descriptions for new/changed ones."""
     server_ids = set()
@@ -1226,11 +1255,16 @@ async def on_message(message: discord.Message):
                 voice_listeners[guild.id] = session
                 persist_voice_session(guild.id, session)
 
-                # Lazy-load whisper + Kokoro on first use: concurrent GPU
-                # initialization while Ollama is serving (~12 GiB resident
-                # on the GPU) has tripped NVIDIA's TDR watchdog and killed
-                # the daemon with a c0000005 in msvcp140.dll.  First-utterance
-                # cold-start (~2s) is the price of not crashing.
+                # Eagerly warm STT + TTS in background so first wake word
+                # doesn't pay the ~10-20s cold-start. TTS first (Kokoro runs
+                # on CPU — no Ollama GPU contention). Whisper second after a
+                # short stagger to avoid concurrent GPU-init peaks with
+                # Ollama (TDR watchdog has crashed daemon when both grabbed
+                # the GPU simultaneously). Fire-and-forget — voice_join
+                # replies immediately.
+                asyncio.create_task(
+                    _preload_voice_pipeline(), name=f"voice-preload-{guild.id}"
+                )
 
                 log.info("[voice_join] stage=listener-start")
                 listener.start()

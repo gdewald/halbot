@@ -35,6 +35,15 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 # Keep MKL on sequential threading so it never races with torch's OpenMP pool.
 os.environ.setdefault("MKL_THREADING_LAYER", "SEQUENTIAL")
 
+# Phone-home / telemetry suppression. MUST be set before any HF / spacy /
+# huggingface_hub import — voice.py and tts.py defer those imports inside
+# their lazy loaders, so setting here covers them. Always-on (no downside):
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+os.environ.setdefault("DO_NOT_TRACK", "1")
+# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE flipped after config load below
+# (gated on `models_offline`).
+
 from . import config, logging_setup
 
 log = logging.getLogger(__name__)
@@ -61,6 +70,12 @@ async def _run_async() -> int:
     from .mgmt_server import serve
 
     config.load()
+    # Apply offline-mode env vars now that config is loaded; these only need
+    # to be in place before the lazy whisper/kokoro imports inside voice.py /
+    # tts.py, both of which fire well after this point.
+    if str(config.get("models_offline")).lower() in ("1", "true", "yes"):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
     logging_setup.init(level=config.get("log_level"))
     from . import transcript_log
     transcript_log.init()
@@ -92,9 +107,12 @@ async def _run_async() -> int:
 
     from . import bot as bot_module
 
+    from . import llm as llm_mod
+
     tasks = [
         asyncio.create_task(_run_bot(bot_module), name="discord-bot"),
         asyncio.create_task(analytics.prune_loop(), name="analytics-prune"),
+        asyncio.create_task(llm_mod.keepalive_loop(), name="llm-keepalive"),
     ]
 
     await stop_event.wait()
