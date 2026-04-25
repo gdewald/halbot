@@ -655,8 +655,18 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
                 _record(customized)
 
             elif action == "conversation":
-                # Fast path didn't match a sound; user asked something
-                # conversational. Escalate to the FULL text-grade pipeline:
+                # Fast-path passthrough: parse_voice_intent already
+                # produced a coherent prose reply (returned as
+                # {"action":"conversation","reply":"..."}). Use it
+                # directly to avoid a redundant second LLM call.
+                passthrough = (intent.get("reply") or "").strip()
+                if passthrough:
+                    log.info("[voice-convo] passthrough from parse_voice_intent (%d chars)",
+                             len(passthrough))
+                    await _voice_feedback(session, sink, passthrough)
+                    _record(passthrough)
+                    continue
+                # No passthrough → escalate to FULL text-grade pipeline:
                 # same model, same SYSTEM_PROMPT, same persona stacking,
                 # full sound + emoji + voice-status context. Slow but
                 # thoughtful; output constrained to a single TTS-ready reply.

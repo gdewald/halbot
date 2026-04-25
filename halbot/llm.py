@@ -1219,6 +1219,12 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         # Grammar-constrain the sampler to valid JSON. Kills the
         # prose-before-JSON failure mode independently of reasoning.
         "response_format": {"type": "json_object"},
+        # Ollama-native json grammar. response_format alone is not
+        # honored by gemma4:e2b on the openai-compat path (verified
+        # 2026-04-25: model emitted plain "How's it going?" against
+        # response_format=json_object). format=json is the harder
+        # constraint and ollama applies it on the /v1/ path too.
+        "format": "json",
     }
     _apply_model_and_keepalive(body)
 
@@ -1263,10 +1269,22 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
             return [parsed]
         if isinstance(parsed, list):
             return parsed
-        return [{"action": "unknown", "message": str(parsed)}]
+        # format=json can wrap a bare string ("How's it going?") as
+        # valid JSON. The model wrote prose, not a tool call — pass
+        # it through as the conversation reply rather than throwing
+        # it away on a redundant second LLM call.
+        spoken = str(parsed).strip()
+        log.warning("Voice LLM returned non-object JSON, using as conversation reply: %r",
+                    spoken[:200])
+        return [{"action": "conversation", "reply": spoken}]
     except json.JSONDecodeError:
-        log.warning("Voice LLM returned non-JSON: %r", content[:200])
-        return [{"action": "unknown", "message": content or "(empty LLM response)"}]
+        # Model wrote a chatty reply instead of JSON. Use it
+        # directly as the conversation reply — re-asking a second
+        # LLM rarely produces a better answer to the user's actual
+        # question, and the first reply was a sensible response.
+        log.warning("Voice LLM returned non-JSON, using as conversation reply: %r",
+                    content[:200])
+        return [{"action": "conversation", "reply": content.strip()}]
     except Exception as e:
         log.error("Voice intent parse failed: %s", e)
         return [{"action": "unknown", "message": "Couldn't process that voice command."}]
