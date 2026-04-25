@@ -16,6 +16,7 @@ const KIND_META = {
   voice_join:      { c: T.green,   e: '🎙' },
   llm_call:        { c: T.yellow,  e: '🧠' },
   tts_request:     { c: T.blurpleL,e: '🗣' },
+  stt_request:     { c: T.cyan,    e: '👂' },
   mention:         { c: T.sub,     e: '@'  },
 };
 
@@ -57,6 +58,9 @@ function metaSummary(meta, kind) {
     parts.push(kb >= 1024 ? `${(kb/1024).toFixed(1)}MB` : `${Math.round(kb)}KB`);
   }
   if (typeof meta.chars === 'number' && kind === 'tts_request') parts.push(`${meta.chars}ch`);
+  if (typeof meta.audio_seconds === 'number' && kind === 'stt_request') parts.push(`${meta.audio_seconds}s`);
+  if (typeof meta.lock_wait_ms === 'number' && meta.lock_wait_ms > 0) parts.push(`wait=${meta.lock_wait_ms}ms`);
+  if (typeof meta.concurrency_peak === 'number' && meta.concurrency_peak > 1) parts.push(`peak=${meta.concurrency_peak}`);
   if (meta.trigger) parts.push(meta.trigger);
   if (meta.source) parts.push(meta.source);
   if (meta.status && meta.status !== 'ok') parts.push(meta.status);
