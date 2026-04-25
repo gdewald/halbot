@@ -457,7 +457,9 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         out["llm"]["requests_today"] = llm_today["count_today"]
         # No ttft / tokens emitted yet; leave 0.
 
-        # STT has no emitter; stays zero.
+        # STT latency
+        stt_today = _latency_bundle(conn, "stt_request", t_today)
+        out["stt"] = stt_today
 
         # Soundboard table totals from sounds DB
         try:

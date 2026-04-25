@@ -20,6 +20,52 @@ import threading
 log = logging.getLogger("halbot")
 
 
+# ---------------------------------------------------------------------------
+# In-flight gauge (used by callers that emit per-synth analytics so we can
+# correlate latency spikes with concurrent load. Each begin() returns a
+# tracker whose `peak` is bumped by every begin/end that overlaps with it,
+# so the caller can record the worst contention seen during *its* synth.)
+# ---------------------------------------------------------------------------
+class SynthTracker:
+    __slots__ = ("start", "peak")
+
+    def __init__(self, start: int) -> None:
+        self.start = start
+        self.peak = start
+
+
+_inflight = 0
+_inflight_lock = threading.Lock()
+_active_trackers: "list[SynthTracker]" = []
+
+
+def synth_begin() -> SynthTracker:
+    """Mark a synth as starting. Returns tracker recording start + peak counts."""
+    global _inflight
+    with _inflight_lock:
+        _inflight += 1
+        t = SynthTracker(_inflight)
+        for o in _active_trackers:
+            o.peak = max(o.peak, _inflight)
+        _active_trackers.append(t)
+        return t
+
+
+def synth_end(t: SynthTracker) -> None:
+    """Mark a synth as finished. Final peak update for any remaining synths."""
+    global _inflight
+    with _inflight_lock:
+        _inflight -= 1
+        try:
+            _active_trackers.remove(t)
+        except ValueError:
+            pass
+
+
+def inflight() -> int:
+    return _inflight
+
+
 class TTSEngine(abc.ABC):
     """Abstract TTS engine.  Implementations must be thread-safe for synth()."""
 

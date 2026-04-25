@@ -169,11 +169,16 @@ async def _speak(session, text: str) -> bool:
 
     _tts_t0 = time.monotonic()
     log.info("[voice-cmd] stage=tts-synth-dispatch engine=%s chars=%d", getattr(engine, "name", "?"), len(clean))
+    from . import tts as _tts_mod
+    tracker = _tts_mod.synth_begin()
     try:
-        audio, fmt = await asyncio.to_thread(engine.synth, clean)
-    except Exception:
-        log.exception("[tts] Synthesis failed; falling back to text")
-        return False
+        try:
+            audio, fmt = await asyncio.to_thread(engine.synth, clean)
+        except Exception:
+            log.exception("[tts] Synthesis failed; falling back to text")
+            return False
+    finally:
+        _tts_mod.synth_end(tracker)
     log.info("[voice-cmd] stage=tts-synth-returned bytes=%d fmt=%s", len(audio) if audio else 0, fmt)
     _tts_latency_ms = int((time.monotonic() - _tts_t0) * 1000)
     try:
@@ -187,6 +192,8 @@ async def _speak(session, text: str) -> bool:
         latency_ms=_tts_latency_ms,
         chars=len(clean),
         bytes=len(audio) if audio else 0,
+        concurrency_start=tracker.start,
+        concurrency_peak=tracker.peak,
     )
     try:
         await session.play_sound(audio, fmt)

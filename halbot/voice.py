@@ -174,6 +174,45 @@ _whisper_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
 
 
+class SttTracker:
+    __slots__ = ("start", "peak")
+
+    def __init__(self, start: int) -> None:
+        self.start = start
+        self.peak = start
+
+
+_stt_inflight = 0
+_stt_inflight_lock = threading.Lock()
+_stt_active_trackers: "list[SttTracker]" = []
+
+
+def stt_begin() -> SttTracker:
+    """Mark transcribe arrival (pre-lock). peak counts threads queued for whisper."""
+    global _stt_inflight
+    with _stt_inflight_lock:
+        _stt_inflight += 1
+        t = SttTracker(_stt_inflight)
+        for o in _stt_active_trackers:
+            o.peak = max(o.peak, _stt_inflight)
+        _stt_active_trackers.append(t)
+        return t
+
+
+def stt_end(t: SttTracker) -> None:
+    global _stt_inflight
+    with _stt_inflight_lock:
+        _stt_inflight -= 1
+        try:
+            _stt_active_trackers.remove(t)
+        except ValueError:
+            pass
+
+
+def stt_inflight() -> int:
+    return _stt_inflight
+
+
 def _register_nvidia_dll_dirs() -> None:
     """Add nvidia pip-wheel DLL directories to the Windows DLL search path.
 
@@ -262,12 +301,22 @@ def unload_whisper() -> None:
     log.info("[whisper] Model unloaded")
 
 
-def transcribe(audio_float32: np.ndarray) -> str:
-    """Transcribe 16 kHz mono float32 audio.  **Blocking** — run in executor."""
+def transcribe(audio_float32: np.ndarray) -> "tuple[str, dict]":
+    """Transcribe 16 kHz mono float32 audio.  **Blocking** — run in executor.
+
+    Returns (text, metrics) where metrics = {
+        "lock_wait_ms": int,    # time waiting on _transcribe_lock
+        "decode_ms":    int,    # time inside model.transcribe + iteration
+        "lang_prob":    float,
+    }.
+    """
     log.info("[stt] stage=load-whisper samples=%d", len(audio_float32))
     model = load_whisper()
+    t_lock = time.monotonic()
     with _transcribe_lock:
-        log.info("[stt] stage=transcribe-begin")
+        lock_wait_ms = int((time.monotonic() - t_lock) * 1000)
+        t_decode = time.monotonic()
+        log.info("[stt] stage=transcribe-begin lock_wait_ms=%d", lock_wait_ms)
         segments, info = model.transcribe(
             audio_float32,
             language="en",
@@ -290,7 +339,12 @@ def transcribe(audio_float32: np.ndarray) -> str:
         text = " ".join(texts).strip()
         if not text:
             log.debug("[whisper] no segments returned (lang=%s prob=%.2f)", info.language, info.language_probability)
-        return text
+        decode_ms = int((time.monotonic() - t_decode) * 1000)
+        return text, {
+            "lock_wait_ms": lock_wait_ms,
+            "decode_ms": decode_ms,
+            "lang_prob": float(getattr(info, "language_probability", 0.0) or 0.0),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -629,14 +683,42 @@ class VoiceListener:
         log.info("[stt] Transcribing %.1fs from user %s (queue_wait=%.1fs) …",
                  duration, user_id, queue_wait)
         t0 = time.monotonic()
-
+        tracker = stt_begin()
+        stt_metrics: dict = {}
+        text = ""
         try:
-            text = await self._loop.run_in_executor(None, transcribe, audio)
-        except Exception:
-            log.exception("[stt] Whisper transcription failed")
-            return
+            try:
+                text, stt_metrics = await self._loop.run_in_executor(None, transcribe, audio)
+            except Exception:
+                log.exception("[stt] Whisper transcription failed")
+                return
+        finally:
+            stt_end(tracker)
 
         elapsed = time.monotonic() - t0
+        try:
+            from . import analytics as _analytics
+            try:
+                gid = self.vc.guild.id
+            except Exception:
+                gid = 0
+            _analytics.record(
+                "stt_request",
+                user_id=int(user_id or 0),
+                guild_id=gid,
+                target="faster-whisper-large-v3-turbo",
+                latency_ms=int(elapsed * 1000),
+                lock_wait_ms=int(stt_metrics.get("lock_wait_ms", 0)),
+                decode_ms=int(stt_metrics.get("decode_ms", 0)),
+                queue_wait_ms=int(queue_wait * 1000),
+                audio_seconds=round(duration, 2),
+                text_chars=len(text or ""),
+                lang_prob=round(float(stt_metrics.get("lang_prob", 0.0)), 3),
+                concurrency_start=tracker.start,
+                concurrency_peak=tracker.peak,
+            )
+        except Exception:
+            log.exception("[stt] analytics emit failed")
 
         if not text:
             log.info("[stt] (empty result, %.1fs)", elapsed)
