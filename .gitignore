@@ -9,4 +9,5 @@ dist/
 *.original.md
 docs/plans/drafts/
 halbot/_build_info.py
+benchmarks/_out/
 /.claude/
