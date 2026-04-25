@@ -369,6 +369,10 @@ if ($buildDaemon -or $buildTray) {
     if ($buildDaemon) { $stamp["daemon_build"] = $daemonFp }
     if ($buildTray)   { $stamp["tray_build"]   = $trayFp }
     Write-Stamp $stamp
+
+    # Refresh dist presence after build — pre-build values are stale for the deploy gate.
+    $daemonDistOk = (Test-Path (Join-Path $root "dist\halbot-daemon\halbot-daemon.exe"))
+    $trayDistOk   = (Test-Path (Join-Path $root "dist\halbot-tray\halbot-tray.exe"))
 } else {
     Write-Host "[deploy] build: nothing to do." -ForegroundColor DarkGray
 }
