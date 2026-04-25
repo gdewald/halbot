@@ -18,11 +18,8 @@ DEFAULTS: Dict[str, Any] = {
     "llm_url": "http://localhost:11434/v1/chat/completions",
     "llm_model": "",
     "llm_max_tokens_text": "512",
-    "llm_max_tokens_voice": "256",
-    "voice_wake_word": "halbot",
     "voice_idle_timeout_seconds": "1800",
     "voice_history_turns": "10",
-    "voice_llm_combine_calls": "true",
     "tts_engine": "kokoro",
     "tts_voice": "af_heart",
     "tts_lang": "a",
@@ -196,16 +193,6 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "description": "Max output tokens for text LLM calls",
         "group": "llm", "label": "LLM_MAX_TOKENS_TEXT",
     },
-    "llm_max_tokens_voice": {
-        "type": "NUMBER", "min": 16.0, "max": 2048.0, "step": 16.0,
-        "description": "Max output tokens for voice LLM calls",
-        "group": "llm", "label": "LLM_MAX_TOKENS_VOICE",
-    },
-    "voice_wake_word": {
-        "type": "STRING",
-        "description": "Wake word phrase",
-        "group": "voice", "label": "VOICE_WAKE_WORD",
-    },
     "voice_idle_timeout_seconds": {
         "type": "NUMBER", "min": 30.0, "max": 7200.0, "step": 30.0,
         "description": "Seconds before bot leaves empty channel",
@@ -215,11 +202,6 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 0.0, "max": 50.0, "step": 1.0,
         "description": "Conversation turns kept in voice LLM context",
         "group": "voice", "label": "VOICE_HISTORY_TURNS",
-    },
-    "voice_llm_combine_calls": {
-        "type": "BOOL",
-        "description": "Batch voice LLM calls for lower latency",
-        "group": "voice", "label": "VOICE_LLM_COMBINE_CALLS",
     },
     "tts_engine": {
         "type": "SELECT", "options": ["kokoro", "espeak", "piper"],
