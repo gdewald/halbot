@@ -18,6 +18,7 @@ DEFAULTS: Dict[str, Any] = {
     "llm_url": "http://localhost:11434/v1/chat/completions",
     "llm_model": "",
     "llm_max_tokens_text": "512",
+    "chat_history_limit": "50",
     "voice_idle_timeout_seconds": "1800",
     "voice_history_turns": "10",
     "tts_engine": "kokoro",
@@ -192,6 +193,11 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 16.0, "max": 4096.0, "step": 16.0,
         "description": "Max output tokens for text LLM calls",
         "group": "llm", "label": "LLM_MAX_TOKENS_TEXT",
+    },
+    "chat_history_limit": {
+        "type": "NUMBER", "min": 0.0, "max": 200.0, "step": 1.0,
+        "description": "Channel messages of context fed to text-channel LLM calls",
+        "group": "llm", "label": "CHAT_HISTORY_LIMIT",
     },
     "voice_idle_timeout_seconds": {
         "type": "NUMBER", "min": 30.0, "max": 7200.0, "step": 30.0,

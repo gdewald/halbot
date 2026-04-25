@@ -27,7 +27,7 @@ from .db import (
     persona_mark_fired_all,
 )
 from .llm import (
-    CHANNEL_HISTORY_LIMIT, answer_stats_question_async, customize_response_async,
+    answer_stats_question_async, chat_history_limit, customize_response_async,
     customize_response_rich_async, customize_flavor_async,
     describe_emoji_image, format_events_for_prompt, parse_intent,
 )
@@ -508,7 +508,7 @@ async def on_message(message: discord.Message):
 
     channel_history = []
     history_attachments = {}
-    async for msg in message.channel.history(limit=CHANNEL_HISTORY_LIMIT, before=message):
+    async for msg in message.channel.history(limit=chat_history_limit(), before=message):
         text = msg.content
         audio_atts = []
         for att in msg.attachments:

@@ -110,7 +110,11 @@ def _format_persona_block(header: str = "ACTIVE BEHAVIOR DIRECTIVES",
 LLM_TIMEOUT = 120
 LLM_RETRY_TIMEOUT = 180
 
-CHANNEL_HISTORY_LIMIT = 50
+def chat_history_limit() -> int:
+    try:
+        return max(0, int(_config.get("chat_history_limit")))
+    except (TypeError, ValueError):
+        return 50
 
 import time as _time
 _REACH_CACHE: dict = {"ok": False, "ts": 0.0}
