@@ -1,6 +1,6 @@
 # Halbot
 
-A Discord bot that manages your server's soundboard using natural language. Mention the bot and tell it what to do — it uses a local LLM (via LM Studio) to interpret your requests and take action.
+A Discord bot that manages your server's soundboard using natural language. Mention the bot and tell it what to do — it uses a local LLM (Ollama by default, LM Studio also supported via OpenAI-compatible endpoint) to interpret your requests and take action.
 
 > DISCLAIMER: THIS IS A TOY PROJECT DON'T TRY TO USE IT OUTSIDE YOUR PERSONAL PRIVATE DISCORD SERVER WITH TRUSTED USERS
 > YOU CAN AND WILL BE PWND IF YOU TRY TO RUN THIS AGAINST A PUBLIC DISCORD SERVER OR A DISCORD SERVER WITH RANDOM PEOPLE
@@ -11,11 +11,14 @@ A Discord bot that manages your server's soundboard using natural language. Ment
 Halbot runs as two PyInstaller onedir bundles on Windows:
 
 - **Daemon** (`halbot-daemon.exe`) — NSSM-managed Windows service running under
-  `LocalSystem`. Hosts the Discord client, LM Studio bridge, Whisper STT, and
-  Kokoro TTS. Exposes an async gRPC management API on `127.0.0.1:50199`.
+  `LocalSystem`. Hosts the Discord client, LLM bridge (Ollama / LM Studio /
+  any OpenAI-compatible endpoint), faster-whisper STT, Kokoro TTS, persona
+  + analytics stack. Exposes an async gRPC management API on
+  `127.0.0.1:50199`.
 - **Tray** (`halbot-tray.exe`) — user-mode pystray app. Start/Stop/Restart the
   service, view logs, toggle log level, trigger reconnect, unload VRAM-heavy
-  models, read health. Pure gRPC client — no bot logic.
+  models, launch the pywebview **dashboard** (Stats / Logs / Daemon / Config
+  / Analytics panels). Pure gRPC client — no bot logic.
 
 Configuration lives in `HKLM\SOFTWARE\Halbot\Config` (plain REG_SZ) and secrets
 (e.g. `DISCORD_TOKEN`) in `HKLM\SOFTWARE\Halbot\Secrets` (DPAPI-encrypted with
@@ -52,20 +55,43 @@ Apply effects to saved sounds and store the results as new clips. Powered by pyd
 
 ### Custom Emoji Awareness
 - Syncs server custom emojis to sqlite on startup
-- Uses LM Studio vision model to auto-describe each emoji
+- Uses a vision-capable LLM (whatever `llm_url` points at — Ollama
+  multimodal models, LM Studio vision models, etc.) to auto-describe
+  each emoji
 - Re-syncs when emojis change
 
 ### Persona System
 Users change the bot's voice via natural language directives stored in the DB and injected into the LLM system prompt. Max 200 chars × 10 directives.
 
 ### Conversation Context
-Last 50 channel messages passed to the LLM so follow-ups resolve correctly.
+Last N channel messages passed to the LLM so follow-ups resolve
+correctly. N is set by `chat_history_limit` (default 50, tunable
+in the dashboard Config panel).
+
+### Owner Slash Commands
+`/halbot-admin` exposes owner-only recovery surfaces:
+
+- `status` — live + tombstoned row counts per kind
+- `deleted` / `undelete` / `undelete-all` — soft-delete browser + restore
+- `panic` — soft-clear personas/facts/triggers/grudges (recoverable)
+- `purge` — permanent delete of tombstoned rows (irreversible)
+- `wake-variants` — sub-group: `generate` (LLM-generate phonetic
+  variants of the wake word), `list`, `add`, `remove`, `clear`
+
+### Voice Transcript Logging
+Off by default. Toggle `transcript_log_enabled` in the dashboard
+Config panel to start writing every STT input + LLM reply + TTS
+string to `%ProgramData%\Halbot\logs\transcripts.jsonl` as one
+JSON object per line (rotating, 20 MB × 20 files).
 
 ## Requirements
 
 - Windows 10/11 (DPAPI, NSSM, pywin32 hard dependencies)
 - Python 3.12+ (build-time only; end users run PyInstaller exes)
-- [LM Studio](https://lmstudio.ai/) running locally, or any OpenAI-compatible endpoint
+- A local LLM endpoint — [Ollama](https://ollama.com/) (default) or
+  [LM Studio](https://lmstudio.ai/) or any OpenAI-compatible
+  `/v1/chat/completions` server. Configure via `llm_url` +
+  `llm_model` in the dashboard Config panel.
 - [ffmpeg](https://ffmpeg.org/) on PATH (audio effects)
 - Discord bot token with message content + guild + voice intents
 
@@ -176,24 +202,6 @@ There is no "soft" uninstall that preserves config. Back up
 `HKLM\SOFTWARE\Halbot` (`reg export`) and `%ProgramData%\Halbot\` first
 if you want to restore state later.
 
-## Migrating from v0.5.0
-
-If you were running the flat `bot.py` layout (`.env` + `sounds.db` in repo
-root), run the one-shot migrator from an elevated shell after installing v0.6:
-
-```powershell
-python scripts\migrate_v050.py --repo .
-```
-
-Effects:
-- `.env DISCORD_TOKEN` → DPAPI (`HKLM\SOFTWARE\Halbot\Secrets`)
-- `.env LMSTUDIO_* / VOICE_* / TTS_* / KOKORO_*` → `HKLM\SOFTWARE\Halbot\Config`
-- `./sounds.db` → `%ProgramData%\Halbot\sounds.db`
-
-Flags: `--dry-run`, `--force`, `--env PATH`, `--db PATH`,
-`--skip-{secrets,config,db}`. Idempotent. See
-[docs/plans/006-project-restructure-phase3.md](docs/plans/006-project-restructure-phase3.md).
-
 ## Usage
 
 Mention the bot in any channel:
@@ -237,7 +245,11 @@ halbot/                 daemon package (Discord + voice + LLM + TTS + gRPC serve
   voice_session.py      voice lifecycle + TTS orchestration
   voice.py              voice-receive + faster-whisper STT
   tts.py                Kokoro engine (+ pluggable registry)
-  llm.py                LM Studio calls, intent parsing
+  llm.py                LLM bridge (Ollama / LM Studio), intent parsing,
+                        wake-variant generator, persona prompt assembly
+  slash.py              /halbot-admin slash command tree
+  transcript_log.py     rotating JSONL transcript logger (off by default)
+  analytics.py          events.db writer + dashboard stat rollups
   db.py                 sqlite: sounds, personas, voice history, emojis
   audio.py              validation, format detection, pydub effects
   config.py             layered config (DEFAULTS → HKLM → runtime override)
@@ -246,16 +258,24 @@ halbot/                 daemon package (Discord + voice + LLM + TTS + gRPC serve
   paths.py              data_dir(): %ProgramData%\Halbot / ./_dev_data
   logging_setup.py      rotating file handler
   prompts/              system prompt text
-tray/                   pystray + tkinter log viewer + grpc client
+tray/                   pystray app + grpc client + dashboard launcher
+dashboard/              pywebview shell (app.py / bridge.py / log_stream.py)
+frontend/               Vite/React dashboard (panels: Stats / Logs / Daemon
+                        / Config / Analytics)
 proto/mgmt.proto
 scripts/
-  build.ps1
+  build.ps1             full build: stamp _build_info, gen_proto, uv sync,
+                        pyinstaller, frontend npm build, zip
+  deploy.ps1            smart fingerprinted incremental rebuild + swap
   gen_proto.ps1
-  migrate_v050.py       v0.5.0 .env + sounds.db migration
-docs/plans/             design (002) + phase plans (003, 005, 006)
+  extract_transcripts.py  one-shot scrape of halbot.log → _data/transcripts.jsonl
+docs/plans/             design + impl records (002, 003, 007, 008, 014, 016,
+                        017, 018, …)
 ```
 
 ## Infrastructure
 
-`infra/` contains Terraform + cloud-init for a GCP VM running LM Studio — not
-required if LM Studio runs on the same box as the daemon.
+`infra/` contains Terraform + cloud-init for a GCP VM running an
+LLM endpoint — not required if Ollama / LM Studio runs on the same
+box as the daemon. Legacy from the v0.5 LM-Studio-on-cloud-VM
+configuration; not actively maintained.
