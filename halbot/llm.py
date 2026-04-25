@@ -575,6 +575,85 @@ async def customize_response_rich_async(raw_text: str, *, context: str = "",
     )
 
 
+WAKE_VARIANTS_PROMPT = """\
+You generate phonetic and Whisper-typical mishearings of a wake word so a
+voice bot's substring matcher catches more invocations.
+
+Word: {word}
+
+Return STRICT JSON: {{"variants": ["...", "...", ...]}}
+- 20-40 lowercase items.
+- Include the word itself as the first item.
+- Items can be 1-3 words (the matcher does substring scan; phrases
+  longer than 3 words rarely show up in a single Whisper segment).
+- Prefer items that Whisper actually emits when mishearing the word:
+  homophones, common substitutions, syllable splits with spaces or
+  hyphens, vowel shifts, dropped or doubled consonants.
+- Skip ordinary English words that Whisper would not produce when the
+  user said the wake word.
+- No duplicates. No explanations. JSON only — no prose, no fences.
+"""
+
+
+def generate_wake_variants(word: str) -> list[str]:
+    """Ask the configured LLM for a list of wake-word variants.
+
+    Returns the parsed list on success. Raises on any failure (HTTP,
+    JSON parse, schema mismatch, empty list) so the caller can abort
+    rather than blow away the existing dictionary.
+    """
+    word_clean = (word or "").strip().lower()
+    if not word_clean:
+        raise ValueError("word is empty")
+    body = {
+        "messages": [
+            {"role": "system", "content": WAKE_VARIANTS_PROMPT.format(word=word_clean)},
+            {"role": "user", "content": f"Generate variants of {word_clean!r}."},
+        ],
+        "temperature": 0.4,
+        "max_tokens": 1024,
+        "response_format": {"type": "json_object"},
+    }
+    if LLM_MODEL:
+        body["model"] = LLM_MODEL
+    resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
+    if resp.status_code in (400, 404, 409, 503):
+        if ensure_model_loaded(LLM_MODEL):
+            resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
+    resp.raise_for_status()
+    message = resp.json()["choices"][0].get("message", {})
+    content = (message.get("content") or "").strip()
+    if "<think>" in content and "</think>" in content:
+        _, _, rest = content.partition("</think>")
+        content = rest.strip()
+    if content.startswith("```"):
+        content = content.strip("`")
+        if content.lower().startswith("json"):
+            content = content[4:].lstrip()
+    parsed = json.loads(content)
+    raw_variants = parsed.get("variants")
+    if not isinstance(raw_variants, list) or not raw_variants:
+        raise ValueError(f"LLM returned no variants list: {parsed!r}")
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in raw_variants:
+        if not isinstance(v, str):
+            continue
+        n = v.strip().lower()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    if not out:
+        raise ValueError("LLM returned only empty / duplicate variants")
+    log.info("[wake-variants] %r → %d items: %r", word_clean, len(out), out[:8])
+    return out
+
+
+async def generate_wake_variants_async(word: str) -> list[str]:
+    return await asyncio.to_thread(generate_wake_variants, word)
+
+
 FLAVOR_SUBTEXT_PROMPT = """\
 You are Halbot. Produce ONE short persona-voiced lead-in line that will
 render as italic grey subtext above a literal data listing (e.g. a sound

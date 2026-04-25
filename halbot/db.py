@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 
 from . import paths
 
@@ -110,6 +111,30 @@ def db_init():
                 updated_at INTEGER NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS wake_variants (
+                token TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        # Seed the wake-variant dictionary on first boot. Keeps wake
+        # detection working before any /halbot-admin wake-variants
+        # generate has run.
+        seed_count = conn.execute(
+            "SELECT COUNT(*) FROM wake_variants"
+        ).fetchone()[0]
+        if seed_count == 0:
+            now = int(time.time())
+            seed_tokens = (
+                "robot", "ro bot", "ro-bot", "roebot", "roe bot",
+                "robots", "roboto", "robo ", "row bot", "rowbot",
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO wake_variants (token, source, created_at) "
+                "VALUES (?, 'seed', ?)",
+                [(t, now) for t in seed_tokens],
+            )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -564,6 +589,87 @@ def voice_reconnect_load_all() -> dict[int, tuple]:
             spec = (kind,)
         out[r["guild_id"]] = (r["vc_channel_id"], spec)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Wake-word variant dictionary — substring tokens consulted by the voice
+# matcher. Three sources cohabit the same table: 'seed' (the original
+# hardcoded list, planted on first boot), 'llm' (output of the
+# /halbot-admin wake-variants generate command), 'manual' (admin add).
+# generate replaces only the 'llm' slice so a bad LLM run can't break
+# wake detection — seed + manual stay live.
+# ---------------------------------------------------------------------------
+_VARIANT_SOURCES = ("seed", "llm", "manual")
+
+
+def _normalize_variant(token: str) -> str:
+    return (token or "").strip().lower()
+
+
+def wake_variant_list() -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT token, source, created_at FROM wake_variants ORDER BY token"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def wake_variant_tokens() -> list[str]:
+    """Just the tokens, lower-cased — what the runtime matcher reads."""
+    with _db() as conn:
+        rows = conn.execute("SELECT token FROM wake_variants").fetchall()
+    return [r["token"] for r in rows]
+
+
+def wake_variant_replace_llm(tokens: list[str]) -> int:
+    """Atomically swap the 'llm' slice. Seed + manual untouched."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        n = _normalize_variant(t)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        cleaned.append(n)
+    now = int(time.time())
+    with _db() as conn:
+        conn.execute("DELETE FROM wake_variants WHERE source = 'llm'")
+        conn.executemany(
+            "INSERT OR IGNORE INTO wake_variants (token, source, created_at) "
+            "VALUES (?, 'llm', ?)",
+            [(t, now) for t in cleaned],
+        )
+    return len(cleaned)
+
+
+def wake_variant_add(token: str) -> bool:
+    n = _normalize_variant(token)
+    if not n:
+        raise ValueError("token is empty")
+    now = int(time.time())
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO wake_variants (token, source, created_at) "
+            "VALUES (?, 'manual', ?)",
+            (n, now),
+        )
+        return cur.rowcount > 0
+
+
+def wake_variant_remove(token: str) -> bool:
+    n = _normalize_variant(token)
+    if not n:
+        return False
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM wake_variants WHERE token = ?", (n,))
+        return cur.rowcount > 0
+
+
+def wake_variant_clear() -> int:
+    """Drop every row except seed entries. Seed stays so wake never breaks."""
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM wake_variants WHERE source != 'seed'")
+        return cur.rowcount
 
 
 def emoji_db_list() -> list[dict]:

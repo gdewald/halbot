@@ -18,6 +18,7 @@ import discord
 from discord import app_commands
 
 from . import db
+from . import voice as _voice
 from .bot_ui import (
     EmbedField,
     Mode,
@@ -30,6 +31,7 @@ from .interactions import (
     PanicConfirmView,
     UndeleteView,
 )
+from .llm import generate_wake_variants_async
 
 log = logging.getLogger("halbot.slash")
 
@@ -298,6 +300,205 @@ async def admin_purge(
         footer="No undo — this bypassed the tombstone.",
     ))
     await interaction.response.send_message(embed=emb)
+
+
+wake_variants_group = app_commands.Group(
+    name="wake-variants",
+    description="Manage wake-word substring dictionary (LLM-generated + manual).",
+    parent=admin_group,
+)
+
+
+def _format_variants_table(rows: list[dict]) -> str:
+    if not rows:
+        return "(empty)"
+    return fenced_table(
+        [[r["token"], r["source"]] for r in rows],
+        headers=["token", "source"],
+    )
+
+
+@wake_variants_group.command(
+    name="generate",
+    description="LLM-generate variants of the wake word; replaces only the 'llm' slice.",
+)
+@app_commands.describe(
+    word="Override the wake word (default: 'robot').",
+)
+async def wake_variants_generate(
+    interaction: discord.Interaction,
+    word: str | None = None,
+) -> None:
+    if not _is_owner(interaction):
+        await _deny(interaction)
+        return
+    target = (word or _voice.WAKE_WORD or "robot").strip().lower()
+    if not target:
+        await interaction.response.send_message("Word is empty.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        variants = await generate_wake_variants_async(target)
+    except Exception as e:
+        log.exception("[slash] wake-variants generate failed")
+        await interaction.followup.send(
+            f"LLM generation failed — dictionary unchanged.\n`{type(e).__name__}: {e}`",
+            ephemeral=True,
+        )
+        return
+
+    before = set(db.wake_variant_tokens())
+    try:
+        n = db.wake_variant_replace_llm(variants)
+    except Exception:
+        log.exception("[slash] wake-variants replace failed")
+        await interaction.followup.send(
+            "Storing variants failed — dictionary unchanged.",
+            ephemeral=True,
+        )
+        return
+    after = set(db.wake_variant_tokens())
+    added = sorted(after - before)
+    removed = sorted(before - after)
+    log.info(
+        "[admin] %s ran wake-variants generate %r → %d items (+%d / -%d)",
+        interaction.user, target, n, len(added), len(removed),
+    )
+
+    rows = db.wake_variant_list()
+    emb = build_embed(ReplyPayload(
+        mode=Mode.ADMIN_UNDELETE,
+        title=f"Wake variants regenerated for `{target}`",
+        description=_format_variants_table(rows),
+        fields=(
+            EmbedField("Word", target, inline=True),
+            EmbedField("LLM rows", str(n), inline=True),
+            EmbedField("Total", str(len(rows)), inline=True),
+            EmbedField(
+                "Added",
+                ", ".join(f"`{t}`" for t in added[:20]) or "(none)",
+                inline=False,
+            ),
+            EmbedField(
+                "Removed",
+                ", ".join(f"`{t}`" for t in removed[:20]) or "(none)",
+                inline=False,
+            ),
+        ),
+        subtext=f"admin/wake-variants/generate · {target}",
+        footer="Seed + manual rows untouched. Picked up on next utterance.",
+    ))
+    await interaction.followup.send(embed=emb, ephemeral=True)
+
+
+@wake_variants_group.command(name="list", description="Show current wake-variant dictionary.")
+async def wake_variants_list(interaction: discord.Interaction) -> None:
+    if not _is_owner(interaction):
+        await _deny(interaction)
+        return
+    try:
+        rows = db.wake_variant_list()
+    except Exception:
+        log.exception("[slash] wake-variants list failed")
+        await interaction.response.send_message("List query failed.", ephemeral=True)
+        return
+    by_source: dict[str, int] = {}
+    for r in rows:
+        by_source[r["source"]] = by_source.get(r["source"], 0) + 1
+    summary = " · ".join(f"{k}={v}" for k, v in sorted(by_source.items())) or "(empty)"
+    emb = build_embed(ReplyPayload(
+        mode=Mode.ADMIN_STATUS,
+        title=f"Wake variants ({len(rows)})",
+        description=_format_variants_table(rows),
+        subtext=f"admin/wake-variants/list · {summary}",
+    ))
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@wake_variants_group.command(name="add", description="Add a manual wake-variant token.")
+@app_commands.describe(token="Substring to match (lowercased automatically).")
+async def wake_variants_add(
+    interaction: discord.Interaction,
+    token: str,
+) -> None:
+    if not _is_owner(interaction):
+        await _deny(interaction)
+        return
+    try:
+        added = db.wake_variant_add(token)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+    except Exception:
+        log.exception("[slash] wake-variants add failed")
+        await interaction.response.send_message("Add errored.", ephemeral=True)
+        return
+    n = (token or "").strip().lower()
+    if not added:
+        await interaction.response.send_message(
+            f"`{n}` already in dictionary.", ephemeral=True,
+        )
+        return
+    log.info("[admin] %s added wake-variant %r", interaction.user, n)
+    await interaction.response.send_message(
+        f"Added `{n}` (source=manual). Picked up on next utterance.",
+        ephemeral=True,
+    )
+
+
+@wake_variants_group.command(name="remove", description="Remove a wake-variant token by exact match.")
+@app_commands.describe(token="Token to remove (case-insensitive).")
+async def wake_variants_remove(
+    interaction: discord.Interaction,
+    token: str,
+) -> None:
+    if not _is_owner(interaction):
+        await _deny(interaction)
+        return
+    try:
+        removed = db.wake_variant_remove(token)
+    except Exception:
+        log.exception("[slash] wake-variants remove failed")
+        await interaction.response.send_message("Remove errored.", ephemeral=True)
+        return
+    n = (token or "").strip().lower()
+    if not removed:
+        await interaction.response.send_message(
+            f"No such variant `{n}`.", ephemeral=True,
+        )
+        return
+    log.info("[admin] %s removed wake-variant %r", interaction.user, n)
+    await interaction.response.send_message(
+        f"Removed `{n}`. Picked up on next utterance.",
+        ephemeral=True,
+    )
+
+
+@wake_variants_group.command(
+    name="clear",
+    description="Drop every wake-variant except the original seed list.",
+)
+async def wake_variants_clear(interaction: discord.Interaction) -> None:
+    if not _is_owner(interaction):
+        await _deny(interaction)
+        return
+    try:
+        n = db.wake_variant_clear()
+    except Exception:
+        log.exception("[slash] wake-variants clear failed")
+        await interaction.response.send_message("Clear errored.", ephemeral=True)
+        return
+    log.warning("[admin] %s cleared %d wake-variant rows", interaction.user, n)
+    rows = db.wake_variant_list()
+    emb = build_embed(ReplyPayload(
+        mode=Mode.ADMIN_PANIC,
+        title=f"Cleared {n} non-seed wake-variant row(s)",
+        description=_format_variants_table(rows),
+        subtext="admin/wake-variants/clear",
+        footer="Seed rows preserved so wake detection cannot break.",
+    ))
+    await interaction.response.send_message(embed=emb, ephemeral=True)
 
 
 def register_slash(client: discord.Client) -> app_commands.CommandTree:

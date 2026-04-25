@@ -41,10 +41,26 @@ from . import config as _config
 # 200-token ollama call each and stacked up until read-timeout (120s), which
 # cascaded into audible "Voice command processing failed" TTS feedback that
 # the bot's own mic re-captured → feedback loop.
-_WAKE_PREFILTER_TOKENS = (
-    "robot", "ro bot", "ro-bot", "roebot", "roe bot",
-    "robots", "roboto", "robo ", "row bot", "rowbot",
-)
+def _wake_tokens() -> list[str]:
+    """Read the wake-variant dictionary from sqlite.
+
+    Substring scan with ~50 tokens is microseconds; the sqlite read is
+    too. Skip the cache so admin slash-command edits are picked up
+    on the next utterance with no invalidation dance.
+    """
+    try:
+        from .db import wake_variant_tokens
+        toks = wake_variant_tokens()
+    except Exception:
+        toks = []
+    if not toks:
+        # Fallback: if the table is somehow empty, keep wake detection
+        # alive with the historical seed list rather than going silent.
+        toks = [
+            "robot", "ro bot", "ro-bot", "roebot", "roe bot",
+            "robots", "roboto", "robo ", "row bot", "rowbot",
+        ]
+    return toks
 
 
 def _has_wake_candidate(transcript: str) -> bool:
@@ -53,7 +69,7 @@ def _has_wake_candidate(transcript: str) -> bool:
     if not transcript:
         return False
     t = transcript.lower()
-    return any(tok in t for tok in _WAKE_PREFILTER_TOKENS)
+    return any(tok in t for tok in _wake_tokens())
 
 
 def _extract_command(transcript: str) -> str:
@@ -65,7 +81,7 @@ def _extract_command(transcript: str) -> str:
     # chop the wrong word.
     best_idx = -1
     best_tok = ""
-    for tok in _WAKE_PREFILTER_TOKENS:
+    for tok in _wake_tokens():
         idx = tl.find(tok)
         if idx >= 0 and (best_idx < 0 or idx < best_idx):
             best_idx = idx
