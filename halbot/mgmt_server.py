@@ -170,13 +170,18 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             from . import voice_session
         except ImportError:
             return mgmt_pb2.StatusReply(ok=False, message="voice unavailable")
-        active = list(voice_session.voice_listeners.values())
-        for sess in active:
+        active = list(voice_session.voice_listeners.items())
+        for gid, sess in active:
             try:
                 await sess.vc.disconnect(force=True)
             except Exception as e:
                 log.warning(f"Failed to disconnect from voice session for {sess}: {type(e).__name__} - {str(e)}")
                 pass
+            try:
+                from .db import voice_reconnect_clear
+                voice_reconnect_clear(gid)
+            except Exception:
+                log.exception("[voice] Failed to clear reconnect row for guild %s", gid)
         voice_session.voice_listeners.clear()
         return mgmt_pb2.StatusReply(ok=True, message=f"left {len(active)} voice session(s)")
 

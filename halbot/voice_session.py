@@ -17,7 +17,8 @@ from . import analytics
 from .bot_ui import EmbedField, Mode, ReplyPayload, send_halbot_reply
 from .db import (
     db_get, db_list, trigger_list, trigger_mark_fired,
-    voice_history_append, VOICE_HISTORY_TURNS,
+    voice_history_append, voice_reconnect_clear, voice_reconnect_set,
+    VOICE_HISTORY_TURNS,
 )
 from .audio import detect_audio_format
 from .llm import (
@@ -114,9 +115,6 @@ except ImportError:
 
 # Active voice sessions per guild (guild_id → VoiceSession)
 voice_listeners: dict[int, "VoiceSession"] = {}
-
-# Saved sessions for reconnect after restart: guild_id → (vc_channel_id, sink_spec)
-_voice_reconnect: dict[int, tuple] = {}
 
 # Pending idle-disconnect tasks per guild
 _voice_idle_tasks: dict[int, asyncio.Task] = {}
@@ -233,6 +231,7 @@ async def _voice_idle_disconnect(guild_id: int, delay: int) -> None:
     if _channel_has_humans(session.vc.channel):
         return
     voice_listeners.pop(guild_id, None)
+    voice_reconnect_clear(guild_id)
     channel_name = session.vc.channel.name if session.vc.channel else "?"
     sink = session.message_sink
     session.stop()
@@ -276,6 +275,19 @@ def _sink_to_spec(sink) -> SinkSpec:
     return ("log_only",)
 
 
+def persist_voice_session(guild_id: int, session) -> None:
+    """Persist this session's reconnect target to SQLite. Survives hard crashes."""
+    try:
+        vc_channel_id = session.vc.channel.id
+    except AttributeError:
+        log.warning("[voice] persist_voice_session: guild %s has no vc.channel", guild_id)
+        return
+    spec = _sink_to_spec(session.message_sink)
+    voice_reconnect_set(guild_id, vc_channel_id, spec)
+    log.info("[voice] Persisted reconnect target guild=%s vc=%s sink=%s",
+             guild_id, vc_channel_id, spec)
+
+
 def _spec_to_sink(spec: SinkSpec, guild, vc_channel):
     """Rebuild a sink from a stored spec. Falls back to LogOnlySink on lookup failure."""
     kind = spec[0] if spec else None
@@ -292,17 +304,6 @@ def _spec_to_sink(spec: SinkSpec, guild, vc_channel):
         return LogOnlySink()
     log.warning("[voice] Reconnect sink: unknown spec %r; using log-only", spec)
     return LogOnlySink()
-
-
-def snapshot_voice_state() -> None:
-    """Capture active voice sessions into _voice_reconnect before shutdown."""
-    for gid, session in list(voice_listeners.items()):
-        if not session.vc.is_connected():
-            continue
-        sink_spec = _sink_to_spec(session.message_sink)
-        _voice_reconnect[gid] = (session.vc.channel.id, sink_spec)
-        log.info("[voice] Snapshotted session for guild %s: vc=%s sink=%s",
-                 gid, session.vc.channel.id, sink_spec)
 
 
 def voice_log_dest(vc) -> "discord.abc.Messageable | None":

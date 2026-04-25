@@ -102,6 +102,15 @@ def db_init():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_history_guild_ts "
                      "ON voice_history(guild_id, ts DESC)")
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS voice_reconnect (
+                guild_id INTEGER PRIMARY KEY,
+                vc_channel_id INTEGER NOT NULL,
+                sink_kind TEXT NOT NULL,
+                sink_arg INTEGER,
+                updated_at INTEGER NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject TEXT NOT NULL,
@@ -513,6 +522,48 @@ def voice_history_clear(guild_id: int | None = None) -> int:
         else:
             cur = conn.execute("DELETE FROM voice_history WHERE guild_id = ?", (guild_id,))
         return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Voice reconnect target — durable across hard crashes (TDR / OOM / segfault).
+# Mirror of the in-process state that used to live in voice_session._voice_reconnect:
+# write on session start, clear on session stop, read at bot startup.
+# ---------------------------------------------------------------------------
+
+def voice_reconnect_set(guild_id: int, vc_channel_id: int, sink_spec: tuple) -> None:
+    kind = sink_spec[0] if sink_spec else "log_only"
+    arg = sink_spec[1] if len(sink_spec) > 1 else None
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO voice_reconnect (guild_id, vc_channel_id, sink_kind, sink_arg, updated_at) "
+            "VALUES (?, ?, ?, ?, strftime('%s','now')) "
+            "ON CONFLICT(guild_id) DO UPDATE SET "
+            "vc_channel_id=excluded.vc_channel_id, sink_kind=excluded.sink_kind, "
+            "sink_arg=excluded.sink_arg, updated_at=excluded.updated_at",
+            (guild_id, vc_channel_id, kind, arg),
+        )
+
+
+def voice_reconnect_clear(guild_id: int) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM voice_reconnect WHERE guild_id = ?", (guild_id,))
+
+
+def voice_reconnect_load_all() -> dict[int, tuple]:
+    """Return {guild_id: (vc_channel_id, sink_spec)} for every persisted target."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT guild_id, vc_channel_id, sink_kind, sink_arg FROM voice_reconnect"
+        ).fetchall()
+    out: dict[int, tuple] = {}
+    for r in rows:
+        kind = r["sink_kind"]
+        if kind == "text_channel":
+            spec = ("text_channel", r["sink_arg"])
+        else:
+            spec = (kind,)
+        out[r["guild_id"]] = (r["vc_channel_id"], spec)
+    return out
 
 
 def emoji_db_list() -> list[dict]:

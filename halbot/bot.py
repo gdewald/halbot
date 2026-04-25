@@ -23,7 +23,7 @@ from .db import (
     grudge_clear, grudge_list, grudge_remove, grudge_set,
     persona_add, persona_clear, persona_list, persona_remove, persona_update,
     trigger_add, trigger_clear, trigger_list, trigger_mark_fired, trigger_remove,
-    voice_history_load,
+    voice_history_load, voice_reconnect_clear, voice_reconnect_load_all,
     persona_mark_fired_all,
 )
 from .llm import (
@@ -44,7 +44,7 @@ from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
     VoiceSession, _channel_has_humans, _maybe_unload_whisper, _preload_tts_engine,
     _spec_to_sink, cancel_voice_idle_timer, handle_voice_command, load_whisper,
-    schedule_voice_idle_timer, voice_listeners, _voice_reconnect
+    persist_voice_session, schedule_voice_idle_timer, voice_listeners,
 )
 
 log = logging.getLogger("halbot")
@@ -182,14 +182,16 @@ async def on_ready():
     for guild in client.guilds:
         await sync_emojis(guild)
 
-    if _voice_reconnect and VOICE_RECV_AVAILABLE:
-        for gid, (vc_id, sink_spec) in list(_voice_reconnect.items()):
+    if VOICE_RECV_AVAILABLE:
+        targets = voice_reconnect_load_all()
+        for gid, (vc_id, sink_spec) in targets.items():
             guild = client.get_guild(gid)
             if not guild:
                 continue
             vc_channel = guild.get_channel(vc_id)
             if not vc_channel:
                 log.warning("[voice] Reconnect skipped for guild %s — voice channel %s gone", gid, vc_id)
+                voice_reconnect_clear(gid)
                 continue
             try:
                 log.info("[voice] Reconnecting to #%s in %s", vc_channel.name, guild.name)
@@ -207,7 +209,6 @@ async def on_ready():
                 log.info("[voice] Reconnected to #%s", vc_channel.name)
             except Exception:
                 log.exception("[voice] Failed to reconnect to #%s", vc_channel.name)
-        _voice_reconnect.clear()
 
 
 async def on_guild_emojis_update(guild, before, after):
@@ -281,6 +282,7 @@ async def on_voice_state_update(member, before, after):
         guild_id = before.channel.guild.id
         cancel_voice_idle_timer(guild_id)
         session = voice_listeners.pop(guild_id, None)
+        voice_reconnect_clear(guild_id)
         if session:
             session.stop()
             log.info("Voice listener removed (bot left %s)", before.channel.name)
@@ -1222,6 +1224,7 @@ async def on_message(message: discord.Message):
                     history=voice_history_load(guild.id),
                 )
                 voice_listeners[guild.id] = session
+                persist_voice_session(guild.id, session)
 
                 # Lazy-load whisper + Kokoro on first use: concurrent GPU
                 # initialization while Ollama is serving (~12 GiB resident
@@ -1251,6 +1254,7 @@ async def on_message(message: discord.Message):
         elif action == "voice_leave":
             cancel_voice_idle_timer(guild.id)
             session = voice_listeners.pop(guild.id, None)
+            voice_reconnect_clear(guild.id)
             if session:
                 session.stop()
                 try:
