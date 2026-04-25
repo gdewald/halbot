@@ -273,9 +273,3 @@ docs/plans/             design + impl records (002, 003, 007, 008, 014, 016,
                         017, 018, …)
 ```
 
-## Infrastructure
-
-`infra/` contains Terraform + cloud-init for a GCP VM running an
-LLM endpoint — not required if Ollama / LM Studio runs on the same
-box as the daemon. Legacy from the v0.5 LM-Studio-on-cloud-VM
-configuration; not actively maintained.
