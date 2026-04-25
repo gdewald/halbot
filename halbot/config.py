@@ -21,7 +21,6 @@ DEFAULTS: Dict[str, Any] = {
     "llm_max_tokens_voice": "256",
     "voice_wake_word": "halbot",
     "voice_idle_timeout_seconds": "1800",
-    "voice_energy_threshold": "0.02",
     "voice_history_turns": "10",
     "voice_llm_combine_calls": "true",
     "tts_engine": "kokoro",
@@ -211,11 +210,6 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 30.0, "max": 7200.0, "step": 30.0,
         "description": "Seconds before bot leaves empty channel",
         "group": "voice", "label": "VOICE_IDLE_TIMEOUT_SECONDS",
-    },
-    "voice_energy_threshold": {
-        "type": "RANGE", "min": 0.0, "max": 0.2, "step": 0.005,
-        "description": "Voice activity detection threshold",
-        "group": "voice", "label": "VOICE_ENERGY_THRESHOLD",
     },
     "voice_history_turns": {
         "type": "NUMBER", "min": 0.0, "max": 50.0, "step": 1.0,
