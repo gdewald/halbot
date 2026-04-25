@@ -1,0 +1,7 @@
+{"id": "short-play", "prompt": "Play a sound for me, something upbeat."}
+{"id": "short-greet", "prompt": "Hey Halbot, how's it going?"}
+{"id": "medium-question", "prompt": "What was that clip we were laughing at last night, do you remember?"}
+{"id": "medium-opinion", "prompt": "Between the Mario theme and the Zelda theme, which one do you think hits harder and why?"}
+{"id": "long-story", "prompt": "Tell me a quick story about a robot learning to appreciate music for the first time, keep it under five sentences."}
+{"id": "with-system", "messages": [{"role": "system", "content": "You are Halbot, a friendly Discord soundboard bot. Keep replies to 1-2 spoken sentences. Do not use markdown. Do not list commands."}, {"role": "user", "content": "What's your favorite sound in the board?"}]}
+{"id": "multi-turn", "messages": [{"role": "system", "content": "You are Halbot, a friendly Discord soundboard bot. Keep replies to 1-2 spoken sentences."}, {"role": "user", "content": "Play Big Yoshi."}, {"role": "assistant", "content": "Coming right up."}, {"role": "user", "content": "Now play something calmer."}]}

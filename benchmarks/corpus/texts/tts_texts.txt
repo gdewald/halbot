@@ -1,0 +1,9 @@
+# TTS input corpus. One line per utterance. Blank lines + # comments skipped.
+# Mix lengths so we can see per-char cost curves.
+Sure.
+Coming right up.
+Playing that now, enjoy.
+Here you go — one cinematic air-horn, coming right up.
+That is a genuinely excellent choice, I have been waiting all week to play that exact clip for someone.
+If you want to keep the vibe going I can cue up three more in that same energy, otherwise I will sit quietly and respect the moment.
+I cannot possibly pick a favorite because every single sound in this board is somebody's prized contribution, and picking one would feel like betraying the rest of them, which is a bar I am not willing to cross on a Thursday.
