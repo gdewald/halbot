@@ -539,6 +539,11 @@ class VoiceListener:
                 if user is None or not data.pcm:
                     return
 
+                # Drop frames during TTS playback so open-speaker users don't
+                # echo the bot's own voice back into STT and re-trigger wake.
+                if listener.vc.is_playing():
+                    return
+
                 audio_16k = resample_48k_stereo_to_16k_mono(data.pcm)
                 state = listener._users[user.id]
                 segment = state.feed(user.id, audio_16k)
