@@ -173,10 +173,16 @@ def run_scenario(scenario: Scenario, *, progress: Callable[[str], None] | None =
 
 
 def run_suite(scenarios: list[Scenario], *, progress: Callable[[str], None] | None = None) -> list[ScenarioResult]:
+    if progress is None:
+        progress = lambda msg: log.info("%s", msg)
     results: list[ScenarioResult] = []
     for scenario in scenarios:
-        res = run_scenario(scenario, progress=progress)
-        results.append(res)
+        try:
+            res = run_scenario(scenario, progress=progress)
+            results.append(res)
+        except Exception as e:
+            progress(f"[{scenario.name}] SKIPPED: {type(e).__name__}: {e}")
+            log.exception("scenario %s failed", scenario.name)
         # Isolation between scenarios — don't let a huge model resident
         # from scenario N skew the load cost of scenario N+1.
         stages.unload_all()
