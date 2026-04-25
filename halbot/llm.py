@@ -577,20 +577,44 @@ async def customize_response_rich_async(raw_text: str, *, context: str = "",
 
 WAKE_VARIANTS_PROMPT = """\
 You generate phonetic and Whisper-typical mishearings of a wake word so a
-voice bot's substring matcher catches more invocations.
+voice bot's substring matcher catches more invocations. Be GENEROUS and
+EXHAUSTIVE — false positives are cheap (the bot answers an extra
+sentence), false negatives are costly (the user is ignored). Aim wide.
 
 Word: {word}
 
-Return STRICT JSON: {{"variants": ["...", "...", ...]}}
-- 20-40 lowercase items.
+Brainstorm out loud (mentally) before writing the JSON:
+1. Sound the word out by syllables. For each syllable, list common
+   Whisper substitutions (e.g. "hal" → "hail", "hall", "howl", "haul",
+   "hull", "owl", "al"; "bot" → "bought", "but", "butt", "bod", "pot",
+   "boat", "boot", "bought").
+2. Combine syllable substitutions: every plausible sub × every other.
+   "halbot" → hailbot, howlbot, haulbot, hullbot, halbought, halpot,
+   halboat, hailbought, howl bought, hal boat, …
+3. Vary spacing and hyphens for each combo: "hal bot", "hal-bot",
+   "halbot", "ha lbot". Whisper inserts and drops spaces unpredictably.
+4. Add same-rhyme English words/phrases that sound like the whole
+   word, even if not literal substitutions: "all bot", "owl bought",
+   "how about", "hot pot" — anything that overlaps phonetically with
+   what a user said.
+5. Add common rhymes ending the word: anything ending in -bot, -bought,
+   -bod, -boat, -pot, -but if the back syllable contributes.
+6. Include any alternate stress / drawl / accent versions (Southern
+   "haaal", British "hawl", clipped "hal'bot").
+
+Then return STRICT JSON: {{"variants": ["...", "...", ...]}}
+- 30-60 lowercase items. More is better — go to 60 if syllable
+  combinatorics support it.
 - Include the word itself as the first item.
-- Items can be 1-3 words (the matcher does substring scan; phrases
-  longer than 3 words rarely show up in a single Whisper segment).
-- Prefer items that Whisper actually emits when mishearing the word:
-  homophones, common substitutions, syllable splits with spaces or
-  hyphens, vowel shifts, dropped or doubled consonants.
-- Skip ordinary English words that Whisper would not produce when the
-  user said the wake word.
+- Items can be 1-3 words (substring scan; longer phrases rarely show
+  up in one Whisper segment).
+- INCLUDE single-word fragments that often appear in Whisper output
+  even alone ("howlbot", "hailbot") — substring scan catches them
+  inside any larger transcript.
+- INCLUDE phrases with a leading/trailing common filler word if it
+  changes Whisper's segmentation ("hey halbot", "uh halbot").
+- Skip ordinary English words/phrases that have NO phonetic overlap
+  with the wake word.
 - No duplicates. No explanations. JSON only — no prose, no fences.
 """
 
@@ -610,8 +634,8 @@ def generate_wake_variants(word: str) -> list[str]:
             {"role": "system", "content": WAKE_VARIANTS_PROMPT.format(word=word_clean)},
             {"role": "user", "content": f"Generate variants of {word_clean!r}."},
         ],
-        "temperature": 0.4,
-        "max_tokens": 1024,
+        "temperature": 0.7,
+        "max_tokens": 2048,
         "response_format": {"type": "json_object"},
     }
     if LLM_MODEL:
@@ -636,14 +660,30 @@ def generate_wake_variants(word: str) -> list[str]:
         raise ValueError(f"LLM returned no variants list: {parsed!r}")
     out: list[str] = []
     seen: set[str] = set()
+
+    def _add(token: str) -> None:
+        n = token.strip().lower()
+        if not n or n in seen:
+            return
+        seen.add(n)
+        out.append(n)
+
     for v in raw_variants:
         if not isinstance(v, str):
             continue
         n = v.strip().lower()
-        if not n or n in seen:
+        if not n:
             continue
-        seen.add(n)
-        out.append(n)
+        _add(n)
+        # Whisper segmentation is unstable: emit the token, the
+        # space-stripped form, and the hyphen-stripped form so substring
+        # scan catches "howlbot" when the LLM only produced "howl bot".
+        compact = "".join(ch for ch in n if not ch.isspace())
+        if compact and compact != n:
+            _add(compact)
+        nohyphen = compact.replace("-", "")
+        if nohyphen and nohyphen != compact:
+            _add(nohyphen)
     if not out:
         raise ValueError("LLM returned only empty / duplicate variants")
     log.info("[wake-variants] %r → %d items: %r", word_clean, len(out), out[:8])
