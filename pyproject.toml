@@ -25,7 +25,10 @@ daemon = [
     "faster-whisper>=1.0",
     "kokoro>=0.9",
     "soundfile>=0.12",
-    "nvidia-cublas-cu12>=12.9.2.10",
+    # Lower bound set by what torch==2.11+cu128 pins (cublas==12.8.4.1).
+    # faster-whisper/ctranslate2 works with any cu12 series. Keep the
+    # floor where torch resolves so benchmarks can install chatterbox.
+    "nvidia-cublas-cu12>=12.8.4.1",
     # kokoro -> misaki -> spacy.load("en_core_web_sm"). Not a transitive dep
     # of spacy itself; must be installed explicitly, otherwise uv sync prunes
     # it and the frozen bundle can't phonemize English. Installed from a wheel
@@ -54,17 +57,44 @@ benchmarks = [
     "pynvml>=11.5",
     "tabulate>=0.9",
     "scipy>=1.11",
-    # chatterbox-tts and nemo-toolkit are NOT listed here because both pin
-    # older torch / cublas versions that conflict with the daemon group
-    # (faster-whisper needs nvidia-cublas-cu12 >= 12.9). Install separately
-    # in a side venv or with `uv pip install --no-deps`:
-    #   chatterbox-tts:       uv pip install chatterbox-tts --no-deps (torch already satisfied)
-    #   nemo-toolkit (parakeet): uv pip install "nemo-toolkit[asr]" --no-deps
-    # Both are gated at runtime in stages.py; missing deps raise an actionable error.
+    # Declare torch directly so [tool.uv.sources] below can route it to
+    # the CUDA index — kokoro pulls torch transitively, but sources only
+    # apply to direct deps. Without this we end up with torch==CPU.
+    "torch>=2.11",
+    "torchaudio>=2.11",
+    # chatterbox for GPU TTS comparisons. Its transitive deps (librosa,
+    # diffusers, s3tokenizer, etc.) resolve cleanly once torch is CUDA.
+    "chatterbox-tts>=0.1.7",
+    # nemo-toolkit (parakeet STT) intentionally omitted — it depends on
+    # NVIDIA-internal packages (nv-one-logger, not on PyPI) starting with
+    # 2.x, and hits `signal.SIGKILL` on Windows. Install manually on Linux
+    # if you want to benchmark parakeet; gated at runtime in stages.py.
 ]
 
 [tool.uv]
 default-groups = ["daemon", "tray", "build"]
+
+# chatterbox-tts 0.1.7 pins torch==2.6.0 in its wheel metadata. We run
+# torch 2.11+cu128 for CUDA on Windows. Override the pin — chatterbox
+# actually runs fine on torch 2.11 (verified via smoke test), Resemble
+# just hasn't bumped their dep range.
+override-dependencies = [
+    "torch>=2.11",
+    "torchaudio>=2.11",
+]
+
+# PyPI's torch wheel is CPU-only. kokoro pulls torch transitively, so the
+# default sync gave us torch==2.11.0+cpu. Benchmarks need CUDA torch for
+# chatterbox (and any future GPU-TTS). Route torch/torchaudio to the
+# PyTorch CUDA 12.8 index so `uv sync` keeps the +cu128 build.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 
 [build-system]
 requires = ["hatchling"]

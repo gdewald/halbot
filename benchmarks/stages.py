@@ -275,25 +275,13 @@ def _load_tts(engine: str, voice: str, lang: str, speed: float, device: str,
             from chatterbox.tts import ChatterboxTTS  # type: ignore
         except ImportError as e:
             raise RuntimeError(
-                "chatterbox scenarios require chatterbox-tts — install with "
-                "`uv pip install chatterbox-tts --no-deps` "
-                "(not in benchmarks group: chatterbox pins torch 2.6/cublas "
-                "12.4 which clashes with faster-whisper's cublas 12.9 pin)"
+                "chatterbox-tts import failed — try `uv sync --group benchmarks`"
             ) from e
         turbo = bool(extra.get("turbo", False))
         if turbo:
-            # Turbo distills the diffusion decoder to 1 step. API: same
-            # from_pretrained, but the Resemble AI release ships turbo as
-            # a separate repo; pass it via the `ckpt_dir` option if the
-            # config provides one.
-            try:
-                from chatterbox.tts import ChatterboxTTSTurbo  # type: ignore
-                model = ChatterboxTTSTurbo.from_pretrained(device=device)
-            except ImportError:
-                # Fall back to loading the turbo weights through the base
-                # class — works for installs that ship turbo under the
-                # main entry point.
-                model = ChatterboxTTS.from_pretrained(device=device, turbo=True)
+            # Turbo = 1-step distilled decoder, separate class in chatterbox.tts_turbo.
+            from chatterbox.tts_turbo import ChatterboxTurboTTS  # type: ignore
+            model = ChatterboxTurboTTS.from_pretrained(device=device)
         else:
             model = ChatterboxTTS.from_pretrained(device=device)
         _tts_engine = ("chatterbox", model, voice, speed)
