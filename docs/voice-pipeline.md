@@ -13,10 +13,52 @@ Background plans worth reading before changing this:
   (wake card + voice-trigger card)
 - [016 — voice-pipeline benchmarks](plans/016-voice-pipeline-benchmarks-impl.md)
   (STT/TTS/LLM tuning rig under `benchmarks/`)
+- [017 — wake variants](plans/017-wake-variants-impl.md) (sqlite-backed
+  wake-token dictionary that replaced the hard-coded prefilter)
+- [018 — transcript capture](plans/018-transcript-capture-impl.md)
+  (rotating JSONL transcript log + DEBUG mirror in main log)
 
-> **Note:** `CLAUDE.md` claims voice/Discord/LLM code is not in the repo.
-> That is stale — phase 1 reintroduced it. Treat the modules below as
-> source of truth.
+## State machine
+
+High-level lifecycle of a voice turn. Each transition is labeled with
+the gate or signal that fires it. Stale-gates short-circuit before
+expensive stages — see "Staleness gates" below.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: voice_join
+    Idle --> Capturing: VAD energy > 0.015 RMS
+    Capturing --> Capturing: 20ms frames, voiced
+    Capturing --> STT: 1.5s silence (segment complete)
+
+    STT --> Idle: STALE_PRE_STT (queue_wait > 12s)
+    STT --> WakeFilter: transcript ready
+
+    WakeFilter --> VoiceTrigger: keyword_voice phrase match (ambient)
+    VoiceTrigger --> WakeFilter: trigger fan-out
+
+    WakeFilter --> Idle: no wake token
+    WakeFilter --> IntentParse: substring hit in wake_variant_tokens()
+
+    IntentParse --> Idle: STALE_PRE_INTENT (age > 15s)
+    IntentParse --> VoicePlay: action=voice_play
+    IntentParse --> ConversationFast: action=conversation + reply field
+    IntentParse --> ConversationFull: action=conversation, no reply
+    IntentParse --> Unknown: action=unknown
+
+    VoicePlay --> Speak: sound miss → customize_response
+    VoicePlay --> Playback: sound hit → session.play_sound
+    ConversationFast --> Speak: passthrough text (1 LLM call total)
+    ConversationFull --> Speak: answer_voice_conversation_async (2nd LLM call)
+    Unknown --> Speak: customize_response_async
+
+    Speak --> Idle: STALE_PRE_PLAY (age > 25s)
+    Speak --> Synth: TTS engine.synth(text)
+    Synth --> Playback: ffmpeg PCMVolumeTransformer
+    Playback --> Idle: vc.play complete
+
+    Idle --> [*]: voice_idle_timeout_seconds elapsed
+```
 
 ## Module map
 
@@ -50,14 +92,16 @@ asyncio loop      →  VoiceListener._process_segment
 
 handle_voice_command (voice_session.py)
     ↳ _fire_voice_triggers(...)            # ambient — bypasses wake gate
-    ↳ _has_wake_candidate(transcript)?     # substring scan, no LLM
+    ↳ _has_wake_candidate(transcript)?     # substring scan vs sqlite dict
         no  → return
     ↳ _extract_command(transcript)
     ↳ STALE_PRE_INTENT gate
     ↳ asyncio.to_thread(parse_voice_intent, command, sounds, saved, history)
         ├─ action="voice_play"     → session.play_sound(...)
-        ├─ action="conversation"   → answer_voice_conversation_async
-        │                             ↳ _voice_feedback → _speak → TTS → play_sound
+        │                             (miss → customize_response_async → _voice_feedback)
+        ├─ action="conversation"   → if intent.reply: passthrough → _voice_feedback
+        │                             else: answer_voice_conversation_async
+        │                                   ↳ _voice_feedback → _speak → TTS → play_sound
         └─ action="unknown"        → customize_response_async → _voice_feedback
     ↳ _post_wake_card(...)
 
@@ -71,17 +115,26 @@ _speak (voice_session.py)
 
 ## Wake detection
 
-**Authoritative wake signal is a substring scan**, not an LLM call. See
-`_WAKE_PREFILTER_TOKENS` in [voice_session.py](../halbot/voice_session.py)
-(`robot`, `ro bot`, `roebot`, `roboto`, `row bot`, …).
+**Authoritative wake signal is a substring scan**, not an LLM call.
+`_has_wake_candidate` in [voice_session.py](../halbot/voice_session.py)
+loops `wake_variant_tokens()` (read from sqlite `wake_variants` table)
+and returns true on the first `tok in transcript.lower()` hit.
 
-- `voice.py::WAKE_WORD` is `"robot"`. `config.voice_wake_word` default is
-  `"halbot"`. The config field is **not consulted by the runtime** — wake
-  is hard-coded to the prefilter token list. Either rename the config
-  field or wire it up; right now it's a footgun.
-- `llm.check_wake_word` and `llm.parse_voice_combined` exist for the old
-  LLM-arbitrated wake path. Not on the hot path. Removing them is fair
-  game once benchmarks 016 lands.
+- The variant table holds three slices keyed by `source` column:
+  - `seed` — installer-shipped baseline (`robot`, `ro bot`, `roboto`, …).
+  - `llm` — entries written by `/halbot wake-variants generate`.
+  - `manual` — entries added by `/halbot wake-variants add` (and
+    removable by `…remove`). Use this when whisper coughs up a new
+    homophone the seed list missed.
+- `voice.py::WAKE_WORD = "robot"` is the canonical English form; only
+  `/halbot wake-variants generate` reads it as the LLM seed. Runtime
+  matching is purely the sqlite dictionary — no `voice_wake_word`
+  config field exists.
+- `llm.check_wake_word` and `llm.parse_voice_combined` exist for the
+  old LLM-arbitrated wake path. Not on the hot path. Removing them is
+  fair game.
+- The dictionary is read fresh on every utterance (no cache) so
+  slash-command edits land on the next turn without invalidation.
 
 ## Staleness gates
 
@@ -147,17 +200,22 @@ In [halbot/config.py](../halbot/config.py) (registry layer:
 
 | Key | Default | Used by |
 |---|---|---|
-| `voice_wake_word` | `halbot` | **unused at runtime** — see "Wake detection" |
-| `voice_idle_timeout_seconds` | `1800` | `_voice_idle_disconnect` |
-| `voice_energy_threshold` | `0.02` | (read at module import; `voice.ENERGY_THRESHOLD` constant is `0.015` — also a drift) |
-| `voice_history_turns` | `10` | `db.VOICE_HISTORY_TURNS` |
-| `voice_llm_combine_calls` | `true` | **unused** (combined-call path retired) |
+| `voice_idle_timeout_seconds` | `1800` | `_voice_idle_disconnect` (per-guild leave timer) |
+| `voice_history_turns` | `10` | rolling per-session voice history fed to LLM |
+| `transcript_log_enabled` | `false` | gates `transcripts.jsonl` writes; DEBUG mirror always fires |
 | `tts_engine` | `kokoro` | `tts.get_engine` |
 | `tts_voice` | `af_heart` | `KokoroEngine` |
 | `tts_lang` | `a` | `KokoroEngine` |
 | `tts_speed` | `1.0` | `KokoroEngine` |
-| `llm_model` | `gemma4:e4b` | all LLM calls |
-| `llm_max_tokens_voice` | `256` | (declared, not currently consulted — `parse_voice_intent` hard-codes 256) |
+| `llm_model` | (registry) | all LLM calls (live registry: `gemma4:e2b`) |
+| `llm_max_tokens_text` | `512` | text-grade LLM cap; `parse_voice_intent` hard-codes 256 |
+| `llm_keepalive_minutes` | `10` | `keep_alive` body field on every ollama call |
+| `llm_keepalive_interval_seconds` | `240` | background `/api/generate` ping cadence |
+
+Voice-specific tunables that are **not** registry-backed (constants in
+[voice.py](../halbot/voice.py)): `WAKE_WORD = "robot"`,
+`ENERGY_THRESHOLD = 0.015`, `STALE_PRE_STT_SECONDS = 12`,
+`STALE_PRE_INTENT_SECONDS = 15`, `STALE_PRE_PLAY_SECONDS = 25`.
 
 ## Common pitfalls
 
@@ -173,6 +231,13 @@ In [halbot/config.py](../halbot/config.py) (registry layer:
   `_patch_dave_decryption` no-ops in that window.
 - **`discord.ext.voice_recv.reader` floods INFO at 1 Hz** ("unexpected
   rtcp packet"). `VoiceListener.start` raises it to WARNING.
+- **Other voice-recv loggers spam DEBUG.** `discord.ext.voice_recv.router`
+  emits two "Dispatching voice_client event rtcp_packet" lines per
+  second whenever a voice connection is open; `discord.gateway` dumps
+  full payload dicts at DEBUG. `logging_setup.reconfigure` clamps these
+  (plus `grpc._cython.cygrpc`, `discord.http`, `discord.voice_state`,
+  `discord.player`) above DEBUG so `log_level=DEBUG` stays readable for
+  transcript / `[voice-cmd]` / `[stt]` lines.
 - **AudioSink runs on the router thread, not the asyncio loop.** Hand
   segments back via `asyncio.run_coroutine_threadsafe(... , self._loop)`.
 - **`_users` defaultdict grows unbounded** without the
