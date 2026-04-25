@@ -38,6 +38,13 @@ def reconfigure(level: str) -> None:
     # Chatty noise loggers — clamp above DEBUG so root=DEBUG stays readable.
     # grpc._cython.cygrpc floods hundreds of "[_cygrpc] Loaded running loop"
     # lines per second; discord.gateway emits a heartbeat keep-alive every
-    # ~40s but also dumps entire WebSocket payload dicts at DEBUG.
-    for name in ("grpc._cython.cygrpc", "grpc", "discord.gateway", "discord.http"):
+    # ~40s but also dumps entire WebSocket payload dicts at DEBUG;
+    # discord.ext.voice_recv.router fires "Dispatching voice_client event
+    # rtcp_packet" twice per second whenever a voice connection is open,
+    # drowning transcript-grade DEBUG output.
+    for name in (
+        "grpc._cython.cygrpc", "grpc", "discord.gateway", "discord.http",
+        "discord.ext.voice_recv.router", "discord.ext.voice_recv.gateway",
+        "discord.voice_state", "discord.player",
+    ):
         logging.getLogger(name).setLevel(max(lvl, logging.INFO))
