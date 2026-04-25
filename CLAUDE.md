@@ -70,33 +70,53 @@
 
 ## Project state
 
-**Currently mid-restructure, phase 1 of [003](docs/plans/003-project-restructure-impl.md).**
-Phase 1 skeleton: daemon + tray + build/deploy. **No Discord / voice /
-LLM code in repo right now.** Original bot code wiped; features re-land
-phase-by-phase on top of new architecture.
+**Restructure complete — phases 1–3 of [003](docs/plans/003-project-restructure-impl.md) all merged to `main`.**
+Phase 1 skeleton (daemon + tray + build/deploy,
+[004](docs/plans/004-project-restructure-phase1.md)), phase 2 Discord /
+voice / LLM port ([005](docs/plans/005-project-restructure-phase2.md)),
+phase 3 v0.5.0 → v0.6 migration tool
+([006](docs/plans/006-project-restructure-phase3.md)). Original `bot.py`
+re-landed inside `halbot/` package; voice / LLM / TTS / analytics /
+persona stack all back, hosted in-process by the daemon.
 
 v0.7 (WIP) adds a pywebview dashboard launched from the tray —
 see docs/plans/007-gui-dashboard.md for the step-by-step plan.
+Active feature work on top of the new layout: Discord embed flows
+([014](docs/plans/014-discord-embed-flows-impl.md)), analytics events
+([008](docs/plans/008-analytics-events.md)), and voice-pipeline
+benchmarks ([016](docs/plans/016-voice-pipeline-benchmarks-impl.md)).
 
 Single-user private-server toy. No harden for public/multi-tenant.
 
-## Architecture (phase 1)
+## Architecture
 
 Two PyInstaller onedir bundles talking over local gRPC:
 
 - **Daemon** (`halbot/` package, runs as Windows service `halbot` via
   NSSM, LocalSystem). Async gRPC server on `127.0.0.1:50199` exposing
-  `Health`, `GetConfig`, `UpdateConfig`, `PersistConfig`, `ResetConfig`.
-  Currently only emits periodic INFO + DEBUG tick logs so log-level
-  toggle observable in tray.
+  `Health`, config RPCs (`GetConfig`/`UpdateConfig`/`PersistConfig`/
+  `ResetConfig`), `SetSecret`, module-lifecycle RPCs (`RestartDiscord`,
+  `LeaveVoice`, `LoadWhisper`/`UnloadWhisper`, `LoadTTS`/`UnloadTTS`),
+  log + event streams (`StreamLogs`, `StreamEvents`), and analytics
+  readbacks (`GetStats`, `QueryStats`). Hosts the Discord client, voice
+  pipeline (faster-whisper STT → LLM → TTS), persona system, and
+  analytics stack in-process. Voice flow detail:
+  [docs/voice-pipeline.md](docs/voice-pipeline.md).
 - **Tray** (`tray/` package, user-mode pystray). Service Start/Stop/
-  Restart, log viewer, log-level radio (auto-persists), reset overrides.
-  Menu handlers run in worker threads so UI never blocks.
+  Restart, log viewer, log-level radio (auto-persists), reset overrides,
+  pywebview dashboard launcher (v0.7). Menu handlers run in worker
+  threads so UI never blocks.
 
 Config has three layers (lowest → highest precedence): code default →
 `HKLM\SOFTWARE\Halbot\Config` registry → runtime override. Runtime
 override lives in daemon process memory; `PersistConfig` promotes it to
-registry; `ResetConfig` drops it. Only field this phase: `log_level`.
+registry; `ResetConfig` drops it. Schema covers `log_level`, LLM
+(`llm_backend`, `llm_url`, `llm_model`, `llm_max_tokens_*`), voice
+(`voice_wake_word`, `voice_idle_timeout_seconds`, `voice_history_turns`,
+…), TTS (`tts_engine`, `tts_voice`, `tts_lang`, `tts_speed`), and
+analytics retention. Secrets (`DISCORD_TOKEN`) live separately under
+`HKLM\SOFTWARE\Halbot\Secrets` as DPAPI-encrypted REG_BINARY
+(`CRYPTPROTECT_LOCAL_MACHINE`).
 
 ## Repo layout
 
@@ -306,14 +326,11 @@ uv run python -m halbot.daemon run
   and user lacks HKLM write until `setup --install` has granted it
   (grant is persisted on the HKLM key, not the process).
 
-## Explicitly absent this phase
+## Explicitly absent
 
-- Discord client, voice receiving, faster-whisper, TTS, LLM calls,
-  `sounds.db` usage, `persona` system — all gone until later phases
-  re-introduce them on top of this skeleton.
-- Secrets / DPAPI / `DISCORD_TOKEN` handling. `log_level` is plaintext
-  registry only.
-- Module-level RPCs (`RestartDiscord`, `LoadWhisper`, etc.).
-- Per-user tray autostart (HKCU Run / Startup shortcut).
+- Per-user tray autostart (HKCU Run / Startup shortcut). Tray must be
+  relaunched manually after each login, or the user pins the exe into
+  `shell:startup`. Elevated installer cannot cleanly target invoking
+  user's HKCU, so this is deferred indefinitely.
 - `README.md` now describes v0.6 daemon+tray architecture — keep in
   sync with this file when build/deploy commands change.
