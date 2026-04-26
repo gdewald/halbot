@@ -6,19 +6,23 @@ A Discord bot that manages your server's soundboard using natural language. Ment
 > YOU CAN AND WILL BE PWND IF YOU TRY TO RUN THIS AGAINST A PUBLIC DISCORD SERVER OR A DISCORD SERVER WITH RANDOM PEOPLE
 > I TAKE 0% LIABILITY FOR YOU IGNORING THIS MESSAGE FOR ANYTHING WHATSOEVER.
 
-## Architecture (v0.6+)
+## Architecture (v0.9+)
 
-Halbot runs as two PyInstaller onedir bundles on Windows:
+Halbot runs as plain Python out of an installed venv on Windows:
 
-- **Daemon** (`halbot-daemon.exe`) — NSSM-managed Windows service running under
+- **Daemon** (`halbot.daemon`) — NSSM-managed Windows service running under
   `LocalSystem`. Hosts the Discord client, LLM bridge (Ollama / LM Studio /
   any OpenAI-compatible endpoint), faster-whisper STT, Kokoro TTS, persona
   + analytics stack. Exposes an async gRPC management API on
-  `127.0.0.1:50199`.
-- **Tray** (`halbot-tray.exe`) — user-mode pystray app. Start/Stop/Restart the
-  service, view logs, toggle log level, trigger reconnect, unload VRAM-heavy
-  models, launch the pywebview **dashboard** (Stats / Logs / Daemon / Config
-  / Analytics panels). Pure gRPC client — no bot logic.
+  `127.0.0.1:50199`. Service binary: `%ProgramFiles%\Halbot\.venv\Scripts\python.exe -m halbot.daemon run`.
+- **Tray** (`tray`) — user-mode pystray app. Start/Stop/Restart the service,
+  view logs, toggle log level, trigger reconnect, unload VRAM-heavy models,
+  launch the pywebview **dashboard** (Stats / Logs / Daemon / Config /
+  Analytics panels). Pure gRPC client — no bot logic. Launcher:
+  `%ProgramFiles%\Halbot\halbot-tray.cmd` (`pythonw.exe -m tray`).
+
+Both share `%ProgramFiles%\Halbot\.venv\` (one set of deps, no duplication).
+The full repo source mirror lives at `%ProgramFiles%\Halbot\src\`.
 
 Configuration lives in `HKLM\SOFTWARE\Halbot\Config` (plain REG_SZ) and secrets
 (e.g. `DISCORD_TOKEN`) in `HKLM\SOFTWARE\Halbot\Secrets` (DPAPI-encrypted with
@@ -99,100 +103,59 @@ one-time setup.
 ## Requirements
 
 - Windows 10/11 (DPAPI, NSSM, pywin32 hard dependencies)
-- Python 3.12+ (build-time only; end users run PyInstaller exes)
+- [uv](https://docs.astral.sh/uv/) on PATH (`winget install --id=astral-sh.uv -e`).
+  Used to materialize the install's Python 3.12 + venv. No system
+  Python required — uv installs a standalone Python under
+  `%ProgramFiles%\Halbot\python\`.
 - A local LLM endpoint — [Ollama](https://ollama.com/) (default) or
   [LM Studio](https://lmstudio.ai/) or any OpenAI-compatible
   `/v1/chat/completions` server. Configure via `llm_url` +
   `llm_model` in the dashboard Config panel.
 - [ffmpeg](https://ffmpeg.org/) on PATH (audio effects)
 - Discord bot token with message content + guild + voice intents
+- [Node.js](https://nodejs.org/) for `npm run build` of the React
+  dashboard. Used by both the tray's pywebview window and the
+  `/halbot-stats` snapshot.
 
 ## Build + deploy
 
-All commands assume CWD is repo root and PowerShell is **elevated**. Copy
-blocks verbatim — no placeholders to fill in. One-time tooling:
-`winget install 7zip.7zip` (10× faster archiving than
-`Compress-Archive`).
+All commands assume CWD is repo root and PowerShell is **elevated**.
+Copy blocks verbatim — no placeholders to fill in.
 
 ### First install (one-time setup)
 
-Builds both bundles, extracts to `Program Files`, creates NSSM service,
-stores Discord token, launches tray.
+Bootstraps `%ProgramFiles%\Halbot\` with a managed Python, frozen venv,
+source mirror, and the NSSM service. Stores the Discord token.
 
 ```powershell
-scripts\build.ps1
+scripts\install.ps1
 
-$dst = "$env:ProgramFiles\Halbot"
-New-Item -ItemType Directory -Force -Path "$dst\daemon","$dst\tray" | Out-Null
-Expand-Archive -Force -Path ".\dist\halbot-daemon.zip" -DestinationPath "$dst\daemon"
-Expand-Archive -Force -Path ".\dist\halbot-tray.zip"   -DestinationPath "$dst\tray"
+# Store Discord token (DPAPI, CRYPTPROTECT_LOCAL_MACHINE):
+& "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --set-secret DISCORD_TOKEN <paste-token-here>
 
-# NSSM service + HKLM ACLs + ProgramData ACLs + service-control ACL, auto-start.
-& "$dst\daemon\halbot-daemon.exe" setup --install
-
-# Store Discord token (DPAPI, CRYPTPROTECT_LOCAL_MACHINE).
-& "$dst\daemon\halbot-daemon.exe" setup --set-secret DISCORD_TOKEN <paste-token-here>
-
-# Launch tray (no autostart this phase — relaunch after each login, or pin to Startup).
-Start-Process "$dst\tray\halbot-tray.exe"
+# Launch tray (no autostart this phase — relaunch after each login, or pin to Startup):
+Start-Process "$env:ProgramFiles\Halbot\halbot-tray.cmd"
 ```
 
 ### Update existing install (operational)
 
-Rebuild + hot-swap binaries. Preserves config, secrets, logs, sqlite
-data. Day-to-day Start / Stop / Restart: use the **tray menu** (no
-elevation needed — ACL granted at install time).
+Stops the service, mirrors source from the repo to the install,
+runs `uv sync` only if `pyproject.toml` / `uv.lock` changed, restarts.
+Brief outage during the swap (~5 s source-only, ~30 s lock-changing).
+Day-to-day Start / Stop / Restart: use the **tray menu** (no elevation
+needed — ACL granted at install time).
 
 ```powershell
-# One command. Fingerprints sources per target; rebuilds only what
-# changed; self-elevates and streams the elevated log back.
-scripts\deploy.ps1
-
-# Single target:
-scripts\deploy.ps1 -Daemon
-scripts\deploy.ps1 -Tray
-
-# Force a full rebuild + redeploy:
-scripts\deploy.ps1 -Force -Clean
-
-# Print the plan without running anything:
-scripts\deploy.ps1 -DryRun
+scripts\deploy.ps1                 # build + stop + mirror + (sync) + start + bounce tray
+scripts\deploy.ps1 -NoBuild        # skip the gen_proto + npm step
+scripts\deploy.ps1 -NoTrayBounce   # leave the tray alone
+scripts\deploy.ps1 -DryRun         # show plan only
 ```
 
-Under the hood `deploy.ps1` calls `build.ps1` only for stale targets,
-then robocopy-mirrors `dist\halbot-{daemon,tray}\` into
-`%ProgramFiles%\Halbot\`, stopping/starting the service and bouncing
-the tray as needed. Run `scripts\build.ps1` directly if you want to
-build without deploying.
-
-### When to pass `-Clean`
-
-Default build is incremental — reuses PyInstaller's analysis cache in
-`build/`, cutting a daemon rebuild from ~150 s to ~20–30 s. Safe for
-pure Python edits in `halbot/` or `tray/`. Add `-Clean` when any of
-these changed:
-
-- `build_daemon.spec` / `build_tray.spec` (hiddenimports, datas,
-  `collect_submodules` / `collect_data_files` calls) — PyInstaller's
-  cache invalidation on spec changes is flaky; stale analysis can ship
-  a bundle missing newly-referenced modules.
-- `proto/mgmt.proto` (or anything regenerating gRPC stubs).
-- `pyproject.toml` / `uv.lock` dependency bumps that move import graph
-  (new packages, major version jumps, removed deps).
-- Python interpreter upgrade.
-
-If the daemon crashes on startup with `ModuleNotFoundError: No module
-named 'halbot.<something>'` after a rebuild, that's the cache-staleness
-symptom — rerun with `-Clean`.
-
-`-Clean` is per-target when combined with `-Target`: e.g.
-`scripts\build.ps1 -Target tray -Clean` only wipes the tray's
-`build\build_tray\` + `dist\halbot-tray\`, leaving the daemon bundle
-intact. `-Target all -Clean` (the default if `-Target` is omitted)
-nukes both.
-
-Other flags: `-NoZip` skips the archive step (leaves
-`dist\halbot-{daemon,tray}\` only — handy when iterating locally).
+Run `scripts\build.ps1` standalone if you want gen_proto + frontend
+without touching the install. There's no PyInstaller, no spec files,
+no `-Clean` ritual; whatever's in `halbot/`, `tray/`, `dashboard/`
+runs as-is at deploy time.
 
 ### Rotating the Discord token or editing config
 
@@ -211,8 +174,7 @@ Other flags: `-NoZip` skips the archive step (leaves
 #   - NSSM service
 #   - HKLM\SOFTWARE\Halbot tree (Config *and* DPAPI-encrypted Secrets, incl. DISCORD_TOKEN)
 #   - %ProgramData%\Halbot\ (logs, sqlite sounds.db, everything)
-# Does NOT remove %ProgramFiles%\Halbot\ binaries — rm them manually.
-& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
+& "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --uninstall
 Remove-Item -Recurse -Force "$env:ProgramFiles\Halbot"
 ```
 
@@ -241,16 +203,17 @@ Attach audio (MP3, OGG, WAV) to save directly to the library.
 - Max duration: 5.2 seconds
 - Formats: MP3, OGG, WAV
 
-## Source run (dev, no build)
+## Source run (dev, no install)
 
 ```powershell
-uv sync --only-group daemon
+uv sync
 uv run python -m halbot.daemon run
 ```
 
-Data lands in `.\_dev_data\`. Source-run cannot `PersistConfig` or write
-secrets unless `setup --install` has already granted HKLM ACLs to the current
-user, or the shell is elevated.
+Data lands in `.\_dev_data\`. Source-run cannot `PersistConfig` or
+write secrets unless `install.ps1` has already granted HKLM ACLs to
+the current user, or the shell is elevated. Same Python in dev and
+prod — no `sys.frozen` branching to surprise you.
 
 ## Repo layout
 
@@ -282,12 +245,13 @@ frontend/               Vite/React dashboard (panels: Stats / Logs / Daemon
                         / Config / Analytics)
 proto/mgmt.proto
 scripts/
-  build.ps1             full build: stamp _build_info, gen_proto, uv sync,
-                        pyinstaller, frontend npm build, zip
-  deploy.ps1            smart fingerprinted incremental rebuild + swap
+  install.ps1           first-time bootstrap (uv python install + venv +
+                        NSSM service + ACLs)
+  deploy.ps1            stop service → robocopy src → uv sync if lock changed → start
+  build.ps1             gen_proto + npm run build (no PyInstaller)
   gen_proto.ps1
   extract_transcripts.py  one-shot scrape of halbot.log → _data/transcripts.jsonl
 docs/plans/             design + impl records (002, 003, 007, 008, 014, 016,
-                        017, 018, …)
+                        017, 018, 020, 021, …)
 ```
 

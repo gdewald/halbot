@@ -48,9 +48,6 @@ tray = [
     "pywebview>=5.0",
     "psutil>=5.9",
 ]
-build = [
-    "pyinstaller>=6.3",
-]
 dev = []
 benchmarks = [
     "faster-whisper>=1.0",
@@ -76,7 +73,7 @@ benchmarks = [
 ]
 
 [tool.uv]
-default-groups = ["daemon", "tray", "build"]
+default-groups = ["daemon", "tray"]
 
 # chatterbox-tts 0.1.7 pins torch==2.6.0 in its wheel metadata. We run
 # torch 2.11+cu128 for CUDA on Windows. Override the pin — chatterbox

@@ -29,11 +29,20 @@ def _is_admin() -> bool:
         return False
 
 
-def _daemon_exe() -> Path:
-    """Path to the installed daemon.exe (this process if frozen)."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable)
-    raise RuntimeError("setup --install must run from frozen daemon.exe")
+def _install_root() -> Path:
+    """Resolve `%ProgramFiles%\\Halbot\\` from the env."""
+    program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    return Path(program_files) / "Halbot"
+
+
+def _service_exe() -> Path:
+    """Path to the venv's python.exe NSSM points at."""
+    return _install_root() / ".venv" / "Scripts" / "python.exe"
+
+
+def _service_workdir() -> Path:
+    """`AppDirectory` for NSSM (so `python -m halbot.daemon` resolves)."""
+    return _install_root() / "src"
 
 
 def _current_user() -> str:
@@ -49,10 +58,12 @@ def _find_nssm() -> str:
     exe = shutil.which("nssm") or shutil.which("nssm.exe")
     if exe:
         return exe
-    candidate = Path(sys.executable).parent / "nssm.exe"
-    if candidate.exists():
-        return str(candidate)
-    raise RuntimeError("nssm.exe not found on PATH or alongside daemon.exe")
+    # `install.ps1` drops nssm.exe at the install root; the daemon process
+    # may be running from anywhere (dev or installed). Look in both.
+    for candidate in (_install_root() / "nssm.exe", Path(sys.executable).parent / "nssm.exe"):
+        if candidate.exists():
+            return str(candidate)
+    raise RuntimeError("nssm.exe not found on PATH or under %ProgramFiles%\\Halbot\\")
 
 
 def _create_data_dirs() -> None:
@@ -120,15 +131,21 @@ def install() -> int:
         print("setup --install requires elevated shell", file=sys.stderr)
         return 1
 
-    exe = _daemon_exe()
+    py_exe = _service_exe()
+    workdir = _service_workdir()
+    if not py_exe.exists():
+        raise RuntimeError(f"venv python missing: {py_exe} -- run install.ps1 first")
+    if not workdir.exists():
+        raise RuntimeError(f"src dir missing: {workdir} -- run install.ps1 first")
     nssm = _find_nssm()
     user = _current_user()
 
     _create_data_dirs()
     _grant_programdata(user)
 
-    # NSSM service create.
-    _run([nssm, "install", SERVICE_NAME, str(exe), "run"])
+    # NSSM service create. `python.exe -m halbot.daemon run` from src/.
+    _run([nssm, "install", SERVICE_NAME, str(py_exe), "-m", "halbot.daemon", "run"])
+    _run([nssm, "set", SERVICE_NAME, "AppDirectory", str(workdir)])
     _run([nssm, "set", SERVICE_NAME, "AppThrottle", "1500"])
     _run([nssm, "set", SERVICE_NAME, "AppRestartDelay", "30000"])
     _run([nssm, "set", SERVICE_NAME, "AppExit", "Default", "Restart"])

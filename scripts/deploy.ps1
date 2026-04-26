@@ -1,633 +1,176 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  One-shot smart deploy: builds stale targets, then swaps %ProgramFiles%\Halbot
-  atomically. Handles elevation and streams the elevated log back to the
-  caller so the non-elevated window is not left guessing.
+  Deploy local repo source to the live install at %ProgramFiles%\Halbot\.
 
 .DESCRIPTION
-  Fingerprints daemon and tray source trees independently. Rebuilds only the
-  ones whose inputs changed since the last successful deploy. Refuses to
-  deploy if either requested target has no dist\ output. Elevates once,
-  swaps both, restarts service + tray, streams transcript back.
+  Single deploy path. Whether Claude or the user invokes, this is the
+  one script that touches the live install. No flags-that-only-Claude-
+  uses, no fingerprint stamps, no elevated mirror dance.
 
-  Typical usage:
-    scripts\deploy.ps1                  # build what changed, deploy both
-    scripts\deploy.ps1 -Daemon          # only touch daemon
-    scripts\deploy.ps1 -Force           # rebuild + redeploy both regardless
-    scripts\deploy.ps1 -BuildOnly       # build, skip deploy
-    scripts\deploy.ps1 -DryRun          # print plan, do nothing
+  Steps (self-elevates once via UAC):
+    1. Run scripts\build.ps1 (gen_proto + frontend) unless -NoBuild.
+    2. sc stop halbot.
+    3. Robocopy halbot\, tray\, dashboard\, frontend\dist\, proto\
+       and pyproject.toml + uv.lock from repo to %ProgramFiles%\Halbot\src\.
+    4. If pyproject.toml or uv.lock changed since last sync:
+       uv sync --frozen against the install's .venv\.
+    5. sc start halbot.
+    6. Bounce the tray (kill + relaunch via halbot-tray.cmd).
 
-.PARAMETER Daemon
-  Only consider daemon. Mutually exclusive with -Tray.
+  Brief outage during steps 2-5. That's the trade.
 
-.PARAMETER Tray
-  Only consider tray. Mutually exclusive with -Daemon.
-
-.PARAMETER Force
-  Rebuild + redeploy even if fingerprint matches.
-
-.PARAMETER BuildOnly
-  Skip deploy step (no elevation, no service restart).
-
-.PARAMETER NoBuild
-  Skip build step (deploy whatever is already in dist\). Still refuses if
-  dist\ output missing for a requested target.
-
-.PARAMETER Clean
-  Forwarded to build.ps1 -Clean.
-
-.PARAMETER DryRun
-  Print plan, exit.
+.NOTES
+  uv must be on PATH (the build host's uv reaches the install dir's
+  pyproject.toml via --project).
 #>
+[CmdletBinding()]
 param(
-    [switch]$Daemon,
-    [switch]$Tray,
-    [switch]$Force,
-    [switch]$BuildOnly,
     [switch]$NoBuild,
-    [switch]$Clean,
+    [switch]$NoTrayBounce,
     [switch]$DryRun,
-    # Internal: set when this invocation is the self-elevated child.
-    [switch]$ElevatedChild,
-    # Internal: path the elevated child writes streamed output to.
-    [string]$ElevatedLog
+    [string]$InstallRoot = (Join-Path $env:ProgramFiles "Halbot")
 )
 
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
-Push-Location $root
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Push-Location $repoRoot
 
-# ---- pre-elevate gate ----
-# Fire UAC at the top (not after build) so the user can walk away for the
-# whole 3-min build without watching for a prompt. The child reruns this
-# same script with -ElevatedChild, streaming its log back to the caller
-# via the same tailer pattern used for the post-build swap.
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-if (-not $isAdmin -and -not $ElevatedChild -and -not $DryRun -and -not $BuildOnly) {
-    $logFile  = Join-Path $env:TEMP ("halbot-deploy-{0}.log" -f ([Guid]::NewGuid().ToString("N").Substring(0,8)))
-    $doneFile = "$logFile.done"
-    $exitFile = "$logFile.exit"
-    Set-Content -Path $logFile -Value "" -Encoding utf8
-
-    # Rebuild original arg list for the child.
-    $childArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$PSCommandPath,"-ElevatedChild","-ElevatedLog",$logFile)
-    foreach ($sw in @("Daemon","Tray","Force","NoBuild","Clean")) {
-        if ($PSBoundParameters[$sw]) { $childArgs += "-$sw" }
+# --- self-elevate -------------------------------------------------------
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin -and -not $DryRun) {
+    Write-Host "[deploy] elevating via UAC..."
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
+    foreach ($sw in @("NoBuild", "NoTrayBounce")) {
+        if ($PSBoundParameters[$sw]) { $argList += "-$sw" }
     }
-
-    Write-Host "[deploy] elevating up-front; streaming log..." -ForegroundColor Cyan
-    $proc = Start-Process powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList $childArgs
-
-    $pos = 0
-    $timeoutSec = 900  # build can take ~3 min; give headroom for -Clean rebuilds and slow disks.
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    while (-not (Test-Path $doneFile)) {
-        if ((Get-Date) -gt $deadline) {
-            Write-Host "[deploy] timeout waiting for elevated child (${timeoutSec}s)." -ForegroundColor Red
-            break
-        }
-        if (Test-Path $logFile) {
-            try {
-                $fs = [System.IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
-                if ($fs.Length -gt $pos) {
-                    $fs.Seek($pos, 'Begin') | Out-Null
-                    $sr = New-Object System.IO.StreamReader($fs)
-                    $chunk = $sr.ReadToEnd()
-                    $pos = $fs.Position
-                    $sr.Close()
-                    if ($chunk) { Write-Host $chunk -NoNewline }
-                }
-                $fs.Close()
-            } catch { }
-        }
-        Start-Sleep -Milliseconds 150
+    if ($PSBoundParameters.ContainsKey("InstallRoot")) {
+        $argList += @("-InstallRoot", $InstallRoot)
     }
-    # Final flush.
-    if (Test-Path $logFile) {
-        try {
-            $fs = [System.IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
-            if ($fs.Length -gt $pos) {
-                $fs.Seek($pos, 'Begin') | Out-Null
-                $sr = New-Object System.IO.StreamReader($fs)
-                $chunk = $sr.ReadToEnd()
-                $sr.Close()
-                if ($chunk) { Write-Host $chunk -NoNewline }
-            }
-            $fs.Close()
-        } catch { }
-    }
-    Write-Host ""
-    $childExit = if (Test-Path $exitFile) { [int](Get-Content $exitFile -Raw).Trim() } else { 1 }
-    Remove-Item -Force -ErrorAction Ignore $logFile, $doneFile, $exitFile
+    $proc = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
     Pop-Location
-    if ($childExit -ne 0) { throw "elevated deploy failed (exit=$childExit)" }
-    return
+    exit $proc.ExitCode
 }
 
-# If we are the elevated child, mirror every Write-Host/native stdout into
-# the shared log so the parent tailer sees it. PowerShell's pipeline isn't
-# redirected across Start-Process -Verb RunAs, so we intercept Write-Host
-# and wrap a Tee-like layer.
-if ($ElevatedChild -and $ElevatedLog) {
-    # $global: not $script: -- the Write-Host shim is invoked from inside
-    # build.ps1's child scope, where $script:_elevatedLog resolves against
-    # build.ps1's script scope (null) instead of deploy.ps1's. Same trap for
-    # the .exit/.done sentinels used by Finish-Deploy and the trap below.
-    $global:_elevatedLog = $ElevatedLog
-    function global:Write-Host {
-        [CmdletBinding()]
-        param(
-            [Parameter(Position=0,ValueFromPipeline=$true,ValueFromRemainingArguments=$true)]
-            [object[]]$Object,
-            [switch]$NoNewline,
-            [ConsoleColor]$ForegroundColor,
-            [ConsoleColor]$BackgroundColor,
-            [object]$Separator
-        )
-        $text = ($Object | ForEach-Object { "$_" }) -join ' '
-        try {
-            $fs = [System.IO.File]::Open($global:_elevatedLog, 'Append', 'Write', 'ReadWrite')
-            $sw = New-Object System.IO.StreamWriter($fs)
-            if ($NoNewline) { $sw.Write($text) } else { $sw.WriteLine($text) }
-            $sw.Flush(); $sw.Close(); $fs.Close()
-        } catch { }
-        # Local echo -- invisible hidden window but harmless.
-        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
-    }
-    # Mirror native-command stdout+stderr too. PyInstaller / uv / robocopy
-    # output goes through native streams, bypassing Write-Host. Without this
-    # the parent tail goes silent for minutes during the long stages and any
-    # red error block from a cmdlet-returning-error never reaches the log.
-    function global:Write-MirrorLine {
-        param([string]$Line)
-        try {
-            $fs = [System.IO.File]::Open($global:_elevatedLog, 'Append', 'Write', 'ReadWrite')
-            $sw = New-Object System.IO.StreamWriter($fs)
-            $sw.WriteLine($Line); $sw.Flush(); $sw.Close(); $fs.Close()
-        } catch { }
-    }
-    # Wrap the whole remainder so any uncaught exception still writes an
-    # exit sentinel the parent can read.
-    trap {
-        try {
-            Write-Host ""
-            Write-Host "[elevated] ERROR: $($_.Exception.Message)" -ForegroundColor Red
-            # Full ErrorRecord -- includes CategoryInfo, FullyQualifiedErrorId,
-            # the offending command line, caret markers. Plain $_ prints to the
-            # error stream which the Write-Host mirror doesn't see.
-            Write-Host ($_ | Out-String)
-            Write-Host $_.ScriptStackTrace
-        } catch { }
-        Set-Content -Path "$global:_elevatedLog.exit" -Value 1
-        Set-Content -Path "$global:_elevatedLog.done" -Value 'done'
-        exit 1
-    }
+function Time-Stage($name, $block) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    & $block
+    $sw.Stop()
+    Write-Host ("[stage] {0}: {1:N1}s" -f $name, $sw.Elapsed.TotalSeconds)
 }
 
-function Finish-Deploy([int]$code = 0) {
-    # Normal exit. In the elevated child, hand back the exit code via the
-    # sentinel files the parent tailer is watching. In a non-elevated run
-    # it's just a Pop-Location.
-    if ($global:_elevatedLog) {
-        Set-Content -Path "$global:_elevatedLog.exit" -Value $code
-        Set-Content -Path "$global:_elevatedLog.done" -Value 'done'
+function Test-LockChanged {
+    foreach ($f in @("pyproject.toml", "uv.lock")) {
+        $repoFile = Join-Path $repoRoot $f
+        $instFile = Join-Path $InstallRoot "src\$f"
+        if (-not (Test-Path $instFile)) { return $true }
+        if ((Get-FileHash $repoFile).Hash -ne (Get-FileHash $instFile).Hash) { return $true }
     }
-    Pop-Location
+    return $false
 }
 
-# ---- target selection ----
-if ($Daemon -and $Tray) { throw "-Daemon and -Tray are mutually exclusive" }
-$wantDaemon = $Daemon -or (-not $Daemon -and -not $Tray)
-$wantTray   = $Tray   -or (-not $Daemon -and -not $Tray)
-
-# ---- source sets ----
-# Each entry is either:
-#   @{ File = "rel\path\to\file" }                         single file
-#   @{ Dir  = "rel\dir"; Include = @("*.ext", ...) }       recursive dir scan
-# Shared entries appear in both targets so a dep bump rebuilds both.
-$sharedSpecs = @(
-    @{ File = "pyproject.toml" },
-    @{ File = "uv.lock" },
-    @{ File = "scripts\gen_proto.ps1" },
-    @{ File = "scripts\build.ps1" },
-    @{ Dir = "proto"; Include = @("*.proto") }
-)
-
-$daemonSpecs = $sharedSpecs + @(
-    @{ Dir = "halbot"; Include = @("*.py") },
-    @{ File = "build_daemon.spec" },
-    @{ File = "halbot_daemon_entry.py" }
-)
-
-$traySpecs = $sharedSpecs + @(
-    @{ Dir = "tray"; Include = @("*.py", "*.ico", "*.png") },
-    @{ Dir = "dashboard"; Include = @("*.py", "*.html") },
-    @{ Dir = "frontend\src"; Include = @("*") },
-    @{ File = "frontend\index.html" },
-    @{ File = "frontend\vite.config.js" },
-    @{ File = "frontend\package.json" },
-    @{ File = "frontend\package-lock.json" },
-    @{ File = "build_tray.spec" },
-    @{ File = "halbot_tray_entry.py" }
-)
-
-# Exclusions: generated / ephemeral. Match against lowercased relative path
-# using -like semantics (\ separator, * wildcard).
-$excludePatterns = @(
-    "halbot\_gen\*",          # regenerated from proto by build
-    "halbot\_build_info.py",  # stamped every build
-    "*\__pycache__\*",
-    "*.pyc"
-)
-
-function Resolve-SourceSet($specs) {
-    $files = @{}
-    foreach ($spec in $specs) {
-        if ($spec.ContainsKey('File')) {
-            $p = Join-Path $root $spec.File
-            if (Test-Path -LiteralPath $p -PathType Leaf) {
-                $fi = Get-Item -LiteralPath $p
-                $files[$spec.File.ToLowerInvariant()] = $fi
-            }
-            continue
-        }
-        $dirPath = Join-Path $root $spec.Dir
-        if (-not (Test-Path -LiteralPath $dirPath)) { continue }
-        $found = Get-ChildItem -LiteralPath $dirPath -File -Recurse -ErrorAction SilentlyContinue -Include $spec.Include
-        foreach ($m in $found) {
-            $rel = $m.FullName.Substring($root.Length).TrimStart('\')
-            $relLc = $rel.ToLowerInvariant()
-            $skip = $false
-            foreach ($ex in $excludePatterns) {
-                if ($relLc -like $ex) { $skip = $true; break }
-            }
-            if (-not $skip) { $files[$relLc] = $m }
+function Stop-HalbotService {
+    $svc = Get-Service -Name halbot -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne "Stopped") {
+        Stop-Service -Name halbot -Force -ErrorAction SilentlyContinue
+        # Wait briefly for handles to release before robocopy.
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Service -Name halbot).Status -ne "Stopped" -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 200
         }
     }
-    return $files.Values | Sort-Object FullName
 }
 
-function Compute-Fingerprint($fileList) {
-    # Hash = SHA256 over "rel|size|mtime-ticks\n" lines. Fast; no file reads.
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($f in $fileList) {
-        $rel = $f.FullName.Substring($root.Length).TrimStart('\').ToLowerInvariant()
-        [void]$sb.Append($rel); [void]$sb.Append('|')
-        [void]$sb.Append($f.Length); [void]$sb.Append('|')
-        [void]$sb.Append($f.LastWriteTimeUtc.Ticks); [void]$sb.Append("`n")
+function Start-HalbotService {
+    Start-Service -Name halbot -ErrorAction Continue
+}
+
+function Mirror-Sources {
+    $srcDst = Join-Path $InstallRoot "src"
+    $rcArgs = @("/MIR", "/NJH", "/NJS", "/NDL", "/NP", "/NFL", "/MT:8")
+    foreach ($d in @("halbot", "tray", "dashboard", "proto")) {
+        $src = Join-Path $repoRoot $d
+        $dst = Join-Path $srcDst $d
+        if (Test-Path $src) {
+            & robocopy $src $dst @rcArgs /XD __pycache__ .pytest_cache | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "robocopy $d failed exit=$LASTEXITCODE" }
+        }
     }
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($sb.ToString())
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    $hash = $sha.ComputeHash($bytes)
-    $sha.Dispose()
-    return -join ($hash | ForEach-Object { $_.ToString("x2") })
+    $feDist = Join-Path $repoRoot "frontend\dist"
+    if (Test-Path $feDist) {
+        $feDst = Join-Path $srcDst "frontend\dist"
+        & robocopy $feDist $feDst @rcArgs | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "robocopy frontend/dist failed exit=$LASTEXITCODE" }
+    }
+    foreach ($f in @("pyproject.toml", "uv.lock")) {
+        Copy-Item -Force (Join-Path $repoRoot $f) (Join-Path $srcDst $f)
+    }
+    # Refresh build stamp (cheap, helps Health() report deploy time).
+    $bi = Join-Path $srcDst "halbot\_build_info.py"
+    $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz")
+    Set-Content -Path $bi -Value "BUILD_TIMESTAMP = `"$ts`"`n" -NoNewline
 }
 
-# ---- stamps ----
-$stampPath = Join-Path $root "dist\.deploy-stamp.json"
-function Read-Stamp {
-    if (-not (Test-Path $stampPath)) { return @{} }
+function Sync-Venv {
+    $srcDst = Join-Path $InstallRoot "src"
+    $venv   = Join-Path $InstallRoot ".venv"
+    $env:UV_PROJECT_ENVIRONMENT = $venv
     try {
-        $raw = Get-Content -Raw $stampPath
-        $obj = $raw | ConvertFrom-Json
-        $h = @{}
-        foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = $p.Value }
-        return $h
-    } catch { return @{} }
-}
-function Write-Stamp($h) {
-    $dir = Split-Path $stampPath
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
-    ($h | ConvertTo-Json -Depth 5) | Set-Content -Path $stampPath -Encoding utf8
+        & uv sync --frozen --project $srcDst --no-dev `
+            --group daemon --group tray
+        if ($LASTEXITCODE -ne 0) { throw "uv sync failed exit=$LASTEXITCODE" }
+    } finally {
+        Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction Ignore
+    }
 }
 
-# ---- plan ----
-Write-Host "[deploy] scanning sources..." -ForegroundColor Cyan
-$daemonFiles = if ($wantDaemon) { Resolve-SourceSet $daemonSpecs } else { @() }
-$trayFiles   = if ($wantTray)   { Resolve-SourceSet $traySpecs }   else { @() }
-
-$daemonFp = if ($wantDaemon) { Compute-Fingerprint $daemonFiles } else { $null }
-$trayFp   = if ($wantTray)   { Compute-Fingerprint $trayFiles }   else { $null }
-
-$stamp = Read-Stamp
-
-$daemonBuildFp  = $stamp["daemon_build"]
-$daemonDeployFp = $stamp["daemon_deploy"]
-$trayBuildFp    = $stamp["tray_build"]
-$trayDeployFp   = $stamp["tray_deploy"]
-
-$daemonDistOk = (Test-Path (Join-Path $root "dist\halbot-daemon\halbot-daemon.exe"))
-$trayDistOk   = (Test-Path (Join-Path $root "dist\halbot-tray\halbot-tray.exe"))
-
-# Build?  Yes if: -Force, dist missing, or fingerprint changed vs last build stamp.
-$buildDaemon = $wantDaemon -and (-not $NoBuild) -and ($Force -or -not $daemonDistOk -or ($daemonFp -ne $daemonBuildFp))
-$buildTray   = $wantTray   -and (-not $NoBuild) -and ($Force -or -not $trayDistOk   -or ($trayFp   -ne $trayBuildFp))
-
-# Deploy? Yes if: -Force, or fingerprint differs vs last deploy stamp, or dist newer than deploy stamp.
-$deployDaemon = $wantDaemon -and (-not $BuildOnly) -and ($Force -or ($daemonFp -ne $daemonDeployFp))
-$deployTray   = $wantTray   -and (-not $BuildOnly) -and ($Force -or ($trayFp   -ne $trayDeployFp))
-
-function Reason-Build($will, $want, $noBuild, $force, $distOk, $fpNow, $fpStamp) {
-    if (-not $want)  { return "skip (target not selected)" }
-    if ($noBuild)    { return "skip (-NoBuild)" }
-    if (-not $will)  { return "skip (up to date)" }
-    if ($force)      { return "build (-Force)" }
-    if (-not $distOk){ return "build (dist missing)" }
-    if ($fpNow -ne $fpStamp) { return "build (source changed)" }
-    return "build"
-}
-function Reason-Deploy($will, $want, $buildOnly, $force, $fpNow, $fpStamp) {
-    if (-not $want)   { return "skip (target not selected)" }
-    if ($buildOnly)   { return "skip (-BuildOnly)" }
-    if (-not $will)   { return "skip (up to date)" }
-    if ($force)       { return "deploy (-Force)" }
-    if ($fpNow -ne $fpStamp) { return "deploy (source changed)" }
-    return "deploy"
+function Bounce-Tray {
+    if ($NoTrayBounce) { return }
+    Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -like "$InstallRoot\.venv\*"
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    $cmd = Join-Path $InstallRoot "halbot-tray.cmd"
+    if (Test-Path $cmd) {
+        Start-Process -FilePath $cmd -WindowStyle Hidden
+    }
 }
 
-Write-Host ""
-Write-Host "Plan:" -ForegroundColor Yellow
-Write-Host ("  daemon  files={0,4}  {1,-32}  {2}" -f `
-    (@($daemonFiles).Count), `
-    (Reason-Build  $buildDaemon  $wantDaemon $NoBuild $Force $daemonDistOk $daemonFp $daemonBuildFp), `
-    (Reason-Deploy $deployDaemon $wantDaemon $BuildOnly $Force $daemonFp $daemonDeployFp))
-Write-Host ("  tray    files={0,4}  {1,-32}  {2}" -f `
-    (@($trayFiles).Count), `
-    (Reason-Build  $buildTray  $wantTray $NoBuild $Force $trayDistOk $trayFp $trayBuildFp), `
-    (Reason-Deploy $deployTray $wantTray $BuildOnly $Force $trayFp $trayDeployFp))
-Write-Host ""
+# --- main ---------------------------------------------------------------
+
+if (-not (Test-Path (Join-Path $InstallRoot ".venv\Scripts\python.exe"))) {
+    throw "no install at $InstallRoot. Run scripts\install.ps1 first."
+}
 
 if ($DryRun) {
-    Write-Host ("  fingerprints: daemon={0} tray={1}" -f $daemonFp, $trayFp) -ForegroundColor DarkGray
-    Write-Host ("  last build:   daemon={0} tray={1}" -f $daemonBuildFp, $trayBuildFp) -ForegroundColor DarkGray
-    Write-Host ("  last deploy:  daemon={0} tray={1}" -f $daemonDeployFp, $trayDeployFp) -ForegroundColor DarkGray
-    Write-Host "[deploy] -DryRun: exiting without running anything." -ForegroundColor Cyan
-    Finish-Deploy 0
+    $lockChanged = Test-LockChanged
+    Write-Host "[deploy] dry-run plan:"
+    Write-Host "  build:           $([bool](-not $NoBuild))"
+    Write-Host "  stop service:    yes"
+    Write-Host "  mirror sources:  yes"
+    Write-Host "  uv sync:         $lockChanged"
+    Write-Host "  start service:   yes"
+    Write-Host "  bounce tray:     $([bool](-not $NoTrayBounce))"
+    Pop-Location
     return
 }
 
-# ---- build ----
-if ($buildDaemon -or $buildTray) {
-    $buildTarget =
-        if     ($buildDaemon -and $buildTray) { "all" }
-        elseif ($buildDaemon)                 { "daemon" }
-        else                                  { "tray" }
-    # Hashtable splat (not array) — array splat treats "-Target" as a
-    # positional value, which hits build.ps1's ValidateSet on $Target and
-    # errors with "-Target does not belong to the set all,daemon,tray".
-    $buildArgs = @{ Target = $buildTarget }
-    if ($Clean) { $buildArgs.Clean = $true }
-    Write-Host "[deploy] building ($buildTarget)..." -ForegroundColor Cyan
-    if ($global:_elevatedLog) {
-        # Elevated child: native cmd output (uv/pyinstaller/npm/robocopy)
-        # bypasses Write-Host and would never reach the parent tail. Merge
-        # all streams (*>&1) and pipe each line through the mirror so the
-        # parent sees everything. Build.ps1 Write-Host calls already mirror.
-        & (Join-Path $PSScriptRoot "build.ps1") @buildArgs *>&1 | ForEach-Object {
-            $line = "$_"
-            Write-MirrorLine $line
-            $_
-        }
-    } else {
-        & (Join-Path $PSScriptRoot "build.ps1") @buildArgs
-    }
-    if ($LASTEXITCODE -ne 0) { throw "build failed" }
+$total = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # Stamp only what we built. If fingerprint recomputes the same it's a
-    # no-op; but if build rewrote _build_info.py we don't want that change to
-    # bust our stamp (we already excluded it).
-    if ($buildDaemon) { $stamp["daemon_build"] = $daemonFp }
-    if ($buildTray)   { $stamp["tray_build"]   = $trayFp }
-    Write-Stamp $stamp
-
-    # Refresh dist presence after build — pre-build values are stale for the deploy gate.
-    $daemonDistOk = (Test-Path (Join-Path $root "dist\halbot-daemon\halbot-daemon.exe"))
-    $trayDistOk   = (Test-Path (Join-Path $root "dist\halbot-tray\halbot-tray.exe"))
-} else {
-    Write-Host "[deploy] build: nothing to do." -ForegroundColor DarkGray
+if (-not $NoBuild) {
+    Time-Stage "build" { & (Join-Path $PSScriptRoot "build.ps1") }
 }
 
-# ---- pre-deploy safety gate ----
-# Never deploy a target whose dist output is absent or whose fingerprint
-# drifted from the latest build stamp (means build failed silently, or
-# someone edited sources between build and deploy).
-function Verify-Deployable($target, $want, $distOk, $fpNow, $buildFp) {
-    if (-not $want) { return $true }
-    if (-not $distOk) {
-        Write-Host "[deploy] ABORT: $target requested for deploy but dist\ output is missing." -ForegroundColor Red
-        return $false
-    }
-    if ($fpNow -ne $buildFp) {
-        Write-Host "[deploy] ABORT: $target source fingerprint ($fpNow) does not match last build ($buildFp). Rerun without -NoBuild." -ForegroundColor Red
-        return $false
-    }
-    return $true
+$lockChanged = Test-LockChanged
+Write-Host "[deploy] lock changed: $lockChanged"
+
+Time-Stage "stop service" { Stop-HalbotService }
+Time-Stage "mirror sources" { Mirror-Sources }
+if ($lockChanged) {
+    Time-Stage "uv sync" { Sync-Venv }
 }
+Time-Stage "start service" { Start-HalbotService }
+Time-Stage "bounce tray" { Bounce-Tray }
 
-if (-not $BuildOnly) {
-    $ok = $true
-    if ($deployDaemon) {
-        if (-not (Verify-Deployable "daemon" $true $daemonDistOk $daemonFp $stamp["daemon_build"])) { $ok = $false }
-    }
-    if ($deployTray) {
-        if (-not (Verify-Deployable "tray" $true $trayDistOk $trayFp $stamp["tray_build"])) { $ok = $false }
-    }
-    if (-not $ok) { throw "deploy gate failed" }
-}
-
-# ---- deploy ----
-if ($BuildOnly) {
-    Write-Host "[deploy] -BuildOnly: skipping deploy step." -ForegroundColor Cyan
-    Finish-Deploy 0
-    return
-}
-
-if (-not $deployDaemon -and -not $deployTray) {
-    Write-Host "[deploy] deploy: nothing to do." -ForegroundColor DarkGray
-    Finish-Deploy 0
-    return
-}
-
-$deployDaemonPath = if ($deployDaemon) { Join-Path $root "dist\halbot-daemon" } else { "" }
-$deployTrayPath   = if ($deployTray)   { Join-Path $root "dist\halbot-tray"   } else { "" }
-
-# ---- elevated swap with streamed output ----
-# Child writes to $logFile, creates $doneFile when finished. Parent tails
-# $logFile until $doneFile shows up, preserving exit code via $exitFile.
-$logFile   = Join-Path $env:TEMP ("halbot-deploy-{0}.log" -f ([Guid]::NewGuid().ToString("N").Substring(0,8)))
-$doneFile  = "$logFile.done"
-$exitFile  = "$logFile.exit"
-$childPs1  = "$logFile.ps1"
-
-$childBody = @"
-`$ErrorActionPreference = 'Stop'
-`$code = 0
-`$script:LogFile = '$logFile'
-
-function Log {
-    param([string]`$msg)
-    # Append to log file unbuffered so the parent tailer sees it immediately.
-    `$fs = [System.IO.File]::Open(`$script:LogFile, 'Append', 'Write', 'ReadWrite')
-    `$sw = New-Object System.IO.StreamWriter(`$fs)
-    `$sw.WriteLine(`$msg)
-    `$sw.Flush(); `$sw.Close(); `$fs.Close()
-    # Also emit to local console so user sees it if the window is visible.
-    Write-Host `$msg
-}
-
-function Run-Native {
-    param([string]`$exe, [string[]]`$exeArgs)
-    Log "> `$exe `$(`$exeArgs -join ' ')"
-    `$psi = New-Object System.Diagnostics.ProcessStartInfo
-    `$psi.FileName = `$exe
-    `$psi.Arguments = (`$exeArgs | ForEach-Object {
-        if (`$_ -match '\s') { '"' + `$_ + '"' } else { `$_ }
-    }) -join ' '
-    `$psi.RedirectStandardOutput = `$true
-    `$psi.RedirectStandardError  = `$true
-    `$psi.UseShellExecute = `$false
-    `$psi.CreateNoWindow = `$true
-    `$p = [System.Diagnostics.Process]::Start(`$psi)
-    while (-not `$p.StandardOutput.EndOfStream) { Log `$p.StandardOutput.ReadLine() }
-    `$err = `$p.StandardError.ReadToEnd()
-    `$p.WaitForExit()
-    if (`$err) { Log `$err.TrimEnd() }
-    return `$p.ExitCode
-}
-
-try {
-    `$deployDaemon = [bool]::Parse('$deployDaemon')
-    `$deployTray   = [bool]::Parse('$deployTray')
-    `$daemonSrc    = '$deployDaemonPath'
-    `$traySrc      = '$deployTrayPath'
-    `$daemonDst    = Join-Path `$env:ProgramFiles 'Halbot\daemon'
-    `$trayDst      = Join-Path `$env:ProgramFiles 'Halbot\tray'
-
-    Log "[elevated] running as `$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-
-    if (`$deployDaemon) {
-        Log "[elevated] stopping service halbot..."
-        Run-Native 'sc.exe' @('stop','halbot') | Out-Null
-        for (`$i = 0; `$i -lt 20; `$i++) {
-            Start-Sleep -Milliseconds 500
-            `$q = & sc.exe query halbot 2>&1
-            if (`$q -match 'STATE.*STOPPED') { break }
-        }
-    }
-    if (`$deployTray) {
-        Log "[elevated] killing halbot-tray.exe..."
-        Get-Process -Name halbot-tray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
-    }
-
-    if (`$deployDaemon) {
-        Log "[elevated] swapping daemon bundle -> `$daemonDst"
-        if (-not (Test-Path `$daemonDst)) { New-Item -ItemType Directory -Force -Path `$daemonDst | Out-Null }
-        # robocopy mirror, multi-thread, quiet.
-        `$rc = Run-Native 'robocopy.exe' @(`$daemonSrc, `$daemonDst, '/MIR','/MT:16','/R:2','/W:1','/NFL','/NDL','/NP')
-        if (`$rc -ge 8) { throw "robocopy daemon failed exit=`$rc" }
-    }
-    if (`$deployTray) {
-        Log "[elevated] swapping tray bundle -> `$trayDst"
-        if (-not (Test-Path `$trayDst)) { New-Item -ItemType Directory -Force -Path `$trayDst | Out-Null }
-        `$rc = Run-Native 'robocopy.exe' @(`$traySrc, `$trayDst, '/MIR','/MT:16','/R:2','/W:1','/NFL','/NDL','/NP')
-        if (`$rc -ge 8) { throw "robocopy tray failed exit=`$rc" }
-    }
-
-    if (`$deployDaemon) {
-        Log "[elevated] starting service halbot..."
-        Run-Native 'sc.exe' @('start','halbot') | Out-Null
-    }
-    if (`$deployTray) {
-        Log "[elevated] relaunching tray..."
-        Start-Process -FilePath (Join-Path `$trayDst 'halbot-tray.exe')
-    }
-
-    Log "[elevated] done."
-} catch {
-    Log ""
-    Log "[elevated] ERROR: `$(`$_.Exception.Message)"
-    Log `$_.ScriptStackTrace
-    `$code = 1
-}
-Set-Content -Path '$exitFile' -Value `$code
-Set-Content -Path '$doneFile' -Value 'done'
-"@
-
-Set-Content -Path $childPs1 -Value $childBody -Encoding utf8
-
-# Pre-create empty log so our tailer has something to open.
-Set-Content -Path $logFile -Value "" -Encoding utf8
-
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-
-if ($isAdmin) {
-    Write-Host "[deploy] already elevated; running swap inline." -ForegroundColor Cyan
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $childPs1
-    $childExit = if (Test-Path $exitFile) { [int](Get-Content $exitFile -Raw).Trim() } else { $LASTEXITCODE }
-} else {
-    Write-Host "[deploy] elevating for service/ProgramFiles access; streaming log..." -ForegroundColor Cyan
-    $proc = Start-Process powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList @(
-        "-NoProfile","-ExecutionPolicy","Bypass","-File",$childPs1
-    )
-
-    # Tail loop.
-    $pos = 0
-    $timeoutSec = 180
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    while (-not (Test-Path $doneFile)) {
-        if ((Get-Date) -gt $deadline) {
-            Write-Host "[deploy] timeout waiting for elevated child (${timeoutSec}s)." -ForegroundColor Red
-            break
-        }
-        if (Test-Path $logFile) {
-            try {
-                $fs = [System.IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
-                if ($fs.Length -gt $pos) {
-                    $fs.Seek($pos, 'Begin') | Out-Null
-                    $sr = New-Object System.IO.StreamReader($fs)
-                    $chunk = $sr.ReadToEnd()
-                    $pos = $fs.Position
-                    $sr.Close()
-                    if ($chunk) { Write-Host $chunk -NoNewline }
-                }
-                $fs.Close()
-            } catch { }
-        }
-        Start-Sleep -Milliseconds 150
-    }
-    # Final flush.
-    if (Test-Path $logFile) {
-        try {
-            $fs = [System.IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
-            if ($fs.Length -gt $pos) {
-                $fs.Seek($pos, 'Begin') | Out-Null
-                $sr = New-Object System.IO.StreamReader($fs)
-                $chunk = $sr.ReadToEnd()
-                $sr.Close()
-                if ($chunk) { Write-Host $chunk -NoNewline }
-            }
-            $fs.Close()
-        } catch { }
-    }
-    Write-Host ""
-    $childExit = if (Test-Path $exitFile) { [int](Get-Content $exitFile -Raw).Trim() } else { 1 }
-}
-
-# Cleanup scratch files.
-Remove-Item -Force -ErrorAction Ignore $logFile, $doneFile, $exitFile, $childPs1, "$childPs1.inner.ps1"
-
-if ($childExit -ne 0) {
-    Finish-Deploy $childExit
-    throw "elevated swap failed (exit=$childExit)"
-}
-
-# ---- stamp deploy ----
-if ($deployDaemon) { $stamp["daemon_deploy"] = $daemonFp }
-if ($deployTray)   { $stamp["tray_deploy"]   = $trayFp }
-Write-Stamp $stamp
-
-Write-Host ""
-Write-Host "[deploy] OK." -ForegroundColor Green
-Finish-Deploy 0
+$total.Stop()
+Write-Host ("[deploy] done in {0:N1}s" -f $total.Elapsed.TotalSeconds)
+Pop-Location

@@ -92,14 +92,22 @@ v0.7 work: Discord embed flows
 ([017](docs/plans/017-wake-variants-impl.md)), transcript log
 ([018](docs/plans/018-transcript-capture-impl.md)).
 
-v0.8 in flight: `/halbot-stats` static snapshot publisher (plan
-[020](docs/plans/drafts/020-static-stats-publish.md), draft until merge).
-Discord slash command bakes the React dashboard into a frozen HTML page
-with live data injected as `window.__STATS_SNAPSHOT__`, uploads to
-Cloudflare R2 via boto3, replies with the public URL. Bucket + custom
-domain + S3-compat token provisioned via Terraform under
-`infra/cloudflare/`; secrets wired into HKLM by
-`scripts\apply-r2-secrets.ps1`.
+v0.8 shipped: `/halbot-stats` static snapshot publisher (plan
+[020](docs/plans/020-static-stats-publish-impl.md)). Discord slash
+command bakes the React dashboard into a frozen HTML page with live
+data injected as `window.__STATS_SNAPSHOT__`, uploads to Cloudflare
+R2 via boto3, replies with the public URL. Bucket + custom domain +
+S3-compat token provisioned via Terraform under `infra/cloudflare/`;
+secrets wired into HKLM by `scripts\apply-r2-secrets.ps1`.
+
+v0.9 shipped: dropped PyInstaller (plan
+[021](docs/plans/021-drop-pyinstaller-impl.md)). Daemon + tray now run
+as plain Python out of an installed venv at
+`%ProgramFiles%\Halbot\.venv\`. Build is `gen_proto + npm run build`
+(~10 s). Deploy is `stop service -> robocopy src -> uv sync if lock
+changed -> start` (~5 s source-only, ~30 s lock-changing). Same code
+runs in dev (`uv run python -m halbot.daemon`) and prod -- no spec
+files, no hidden imports, no `-Clean` ritual.
 
 Single-user private-server toy. Don't harden for public/multi-tenant.
 
@@ -142,139 +150,110 @@ halbot/                 daemon package
   mgmt_server.py        async gRPC server
   config.py             layered config, per-field Source tracking
   logging_setup.py      rotating file handler, runtime reconfigure()
-  installer.py          NSSM + HKLM registry + ACL grants
-  paths.py              data_dir(): %ProgramData%\Halbot (frozen) / ./_dev_data (source)
+  installer.py          NSSM service create + HKLM/ProgramData ACL grants
+  paths.py              data_dir(): installed -> %ProgramData%\Halbot, source -> ./_dev_data
 tray/                   tray package (pystray + grpc client)
-halbot_daemon_entry.py  PyInstaller entry shim (keeps package imports valid)
-halbot_tray_entry.py    ditto
 proto/mgmt.proto
-build_daemon.spec       PyInstaller onedir spec
-build_tray.spec
 frontend/               dashboard Vite/React app
   src/                  tokens.js, panels/, components/, fonts/
-  dist/                 built output (gitignored)
+  dist/                 built output (gitignored; needed by daemon for /halbot-stats)
 dashboard/              tray-side dashboard package
   app.py                pywebview entry
   bridge.py             js_api bridge
   log_stream.py         StreamLogs consumer
   paths.py              web_dir() resolver
 scripts/
-  deploy.ps1            one-shot smart build+deploy: fingerprint stale targets,
-                        build only what changed, swap both atomically,
-                        self-elevate + stream log back
-  build.ps1             full build: stamp _build_info.py, gen_proto, uv sync, pyinstaller, zip
+  install.ps1           one-time bootstrap of %ProgramFiles%\Halbot\
+                        (uv python install + venv + NSSM service)
+  deploy.ps1            stop service -> robocopy src -> uv sync if lock changed -> start
+  build.ps1             gen_proto + npm run build (no PyInstaller)
   gen_proto.ps1         regenerate halbot/_gen/ from proto/mgmt.proto
 docs/plans/             design + impl plans (see docs/plans/README.md for status)
 ```
 
-Runtime paths (frozen): `%ProgramFiles%\Halbot\{daemon,tray}\` binaries,
-`%ProgramData%\Halbot\logs\halbot.log` (+ `halbot-service.log` nssm
-stdout), `HKLM\SOFTWARE\Halbot\Config` registry.
+Install layout (`%ProgramFiles%\Halbot\`):
+
+```
+python\                 uv-managed standalone Python 3.12
+.venv\                  uv sync --frozen target (Lib\site-packages, Scripts\python.exe)
+src\                    mirror of repo: halbot/, tray/, dashboard/, frontend/dist/,
+                        proto/, pyproject.toml, uv.lock
+nssm.exe                service host
+halbot-tray.cmd         pythonw.exe -m tray launcher
+```
+
+Runtime paths: `%ProgramData%\Halbot\logs\halbot.log` (+
+`halbot-service.log` for nssm stdout), `HKLM\SOFTWARE\Halbot\Config`
+registry, `HKLM\SOFTWARE\Halbot\Secrets` for DPAPI blobs.
 
 ## Build
 
 ```powershell
-# Full build (default): proto stubs + uv sync + pyinstaller + zip, both targets.
-# Output: dist\halbot-daemon.zip, dist\halbot-tray.zip (nssm.exe bundled in daemon).
-scripts\build.ps1
-
-# Single target (faster iteration):
-scripts\build.ps1 -Target daemon
-scripts\build.ps1 -Target tray
-
-# Flags:
-#   -Target all|daemon|tray   default: all
-#   -Clean                    wipe analysis cache + dist output before build.
-#                             Default: incremental; keeps PyInstaller analysis
-#                             cache (daemon rebuild ~150s -> ~20-30s).
-#                             With -Target single (daemon|tray), -Clean is
-#                             per-target — only that target's build/ + dist/
-#                             output gets wiped, the other target's bundle
-#                             stays. -Target all + -Clean nukes both.
-#   -NoZip                    skip archive step (dist\halbot-{daemon,tray}\ only)
+scripts\build.ps1               # gen_proto + npm run build (~5-10s)
+scripts\build.ps1 -NoFrontend   # skip npm
+scripts\build.ps1 -Clean        # also wipe frontend\node_modules + dist
 ```
 
-Build uses 7zip when available (`winget install 7zip.7zip`); falls back
-to `Compress-Archive` (~10x slower on daemon bundle).
+That's it. No PyInstaller, no spec files, no onedir bundle, no `-Clean`
+ritual for cache invalidation. Whatever's under `halbot/`, `tray/`,
+`dashboard/` runs as-is at deploy time.
 
-**When to use `-Clean`:** default incremental build reuses PyInstaller
-analysis cache. Safe for pure Python edits. Pass `-Clean` when any of:
+## Deploy — first install (one-time)
 
-- `build_*.spec` edited (esp. hiddenimports / `collect_submodules` / datas)
-- `proto/mgmt.proto` or anything touching `halbot/_gen/`
-- `pyproject.toml` / `uv.lock` dep bumps that move import graph
-- Python interpreter upgrade
-- `frontend/src` changes needing fresh npm ci (rare — usually
-  incremental `npm run build` is enough)
-- `dashboard/` spec/datas changes (same rule as any PyInstaller datas
-  edit: cache invalidation unreliable)
-
-Symptom of skipping `-Clean` when you should have: daemon boots with
-`ModuleNotFoundError: No module named 'halbot.<x>'` despite the module
-clearly present in source. PyInstaller cache invalidation on spec
-changes is unreliable.
-
-## Deploy — one-time setup (first install)
-
-Run from **elevated** PowerShell:
+Run from **elevated** PowerShell at the repo root. uv must be on PATH
+(`winget install --id=astral-sh.uv -e`).
 
 ```powershell
-$src = "<repo>\dist"
-$dst = "$env:ProgramFiles\Halbot"
-New-Item -ItemType Directory -Force -Path "$dst\daemon","$dst\tray" | Out-Null
-Expand-Archive -Force -Path "$src\halbot-daemon.zip" -DestinationPath "$dst\daemon"
-Expand-Archive -Force -Path "$src\halbot-tray.zip"   -DestinationPath "$dst\tray"
-
-# Create NSSM service, grant current user ACLs on HKLM keys + ProgramData,
-# auto-start service.
-& "$dst\daemon\halbot-daemon.exe" setup --install
+scripts\install.ps1
 ```
 
-`setup --install` creates NSSM service, grants installing user `KEY_WRITE`
-on `HKLM\SOFTWARE\Halbot\{Config,Secrets}` (via win32api DACL), grants
-`SERVICE_START|STOP|QUERY_STATUS` via `sc sdset`, grants user modify on
-`%ProgramData%\Halbot` via icacls, auto-starts service.
+What `install.ps1` does:
 
-Launch tray (non-elevated, one-time — no autostart yet):
+1. Stops + removes any pre-existing `halbot` service (clean cut from
+   v0.8 PyInstaller install).
+2. Wipes legacy layout under `%ProgramFiles%\Halbot\{daemon,tray}\`.
+3. `uv python install 3.12` (idempotent — uv-managed standalone Python).
+4. Runs the build (gen_proto + npm) so frontend\dist\ exists.
+5. Robocopies source to `%ProgramFiles%\Halbot\src\`.
+6. Drops `nssm.exe` at the install root (fetches from nssm.cc once).
+7. `uv sync --frozen --project src` against `.venv\` next to it.
+8. Calls `halbot.installer:install()` (via the venv's python.exe) to
+   create the NSSM service, grant HKLM + ProgramData ACLs, register
+   service-control SDDL ACE, set auto-start.
+9. Writes `halbot-tray.cmd` (one-line `pythonw.exe -m tray` launcher).
+10. `Start-Service halbot`.
+
+Storing the Discord token (DPAPI):
 
 ```powershell
-& "$env:ProgramFiles\Halbot\tray\halbot-tray.exe"
+& "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --set-secret DISCORD_TOKEN <paste>
+```
+
+Tray launches manually for now (no per-user autostart):
+
+```powershell
+Start-Process "$env:ProgramFiles\Halbot\halbot-tray.cmd"
 ```
 
 ## Deploy — operational (update existing install)
 
-**One command, idiot-proof:**
-
 ```powershell
-scripts\deploy.ps1             # build whatever changed, swap both bundles
-scripts\deploy.ps1 -Daemon     # only touch daemon
-scripts\deploy.ps1 -Tray       # only touch tray
-scripts\deploy.ps1 -DryRun     # show plan, don't run
-scripts\deploy.ps1 -Force      # rebuild + redeploy regardless of stamp
-scripts\deploy.ps1 -NoBuild    # skip build (deploy whatever is in dist\)
-scripts\deploy.ps1 -BuildOnly  # build, skip swap
+scripts\deploy.ps1                # build + stop + mirror + uv sync (if lock changed) + start + bounce tray
+scripts\deploy.ps1 -NoBuild       # skip the build step
+scripts\deploy.ps1 -NoTrayBounce  # leave tray alone
+scripts\deploy.ps1 -DryRun        # print plan only
 ```
 
-What it does:
+Single deploy path. Same script for Claude and you. Self-elevates
+once via UAC. Brief outage during the stop -> mirror -> sync -> start
+window (~5 s source-only, ~30 s if `uv.lock` changed). No fingerprint
+stamp, no per-target flags, no incremental cache to invalidate.
 
-- Fingerprints `halbot/ proto/ build_daemon.spec halbot_daemon_entry.py
-  pyproject.toml uv.lock` for daemon, `tray/ dashboard/ frontend/src
-  build_tray.spec halbot_tray_entry.py pyproject.toml uv.lock` for tray.
-  Fingerprint = SHA256 of (relpath | size | mtime) per file.
-- Stamps last-successful build + deploy hashes in
-  `dist\.deploy-stamp.json`. Skips rebuild / redeploy of target whose
-  fingerprint matches stamp.
-- Refuses to deploy if target's dist\ output is missing or its source
-  fingerprint drifted from last build stamp (catches "edited file
-  between build and deploy" and "build silently failed for one target").
-- Self-elevates via UAC once. Elevated child streams log back to calling
-  window — no blind flash-and-disappear prompt.
-- Stops service → robocopy /MIR daemon → robocopy /MIR tray → starts
-  service → relaunches tray. Service restart only if daemon actually
-  changed.
+`uv sync` only runs when `pyproject.toml` or `uv.lock` differ from
+the install's copy. Source-only edits skip it.
 
-Service start/stop/restart day-to-day: use tray menu (user granted
-control ACL at install time).
+Service start/stop/restart day-to-day: use the tray menu (user got
+service-control ACL via `install.ps1`).
 
 ## Deploy — uninstall (**destructive: wipes all config + data**)
 
@@ -283,19 +262,17 @@ control ACL at install time).
 #   - NSSM service
 #   - HKLM\SOFTWARE\Halbot tree (Config + DPAPI-encrypted Secrets)
 #   - %ProgramData%\Halbot\ (logs, sqlite sounds.db, everything)
-# Does NOT remove: %ProgramFiles%\Halbot\ binaries — rm manually.
-& "$env:ProgramFiles\Halbot\daemon\halbot-daemon.exe" setup --uninstall
+& "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --uninstall
 Remove-Item -Recurse -Force "$env:ProgramFiles\Halbot"
 ```
 
-## Source run (no build)
+## Source run (no install)
 
 ```powershell
-uv sync --only-group daemon
+uv sync
 uv run python -m halbot.daemon run
 # Data dir becomes .\_dev_data\ (gitignored).
-# Source run cannot PersistConfig: HKLM write requires admin /
-# post-install ACL grant.
+# Source run cannot PersistConfig: HKLM write requires admin / install.ps1 ACL grant.
 ```
 
 ## Code conventions
@@ -311,14 +288,17 @@ uv run python -m halbot.daemon run
   state, refresh in background loop.
 - gRPC stubs committed under `halbot/_gen/`. Regenerate via
   `scripts\gen_proto.ps1` after editing `proto/mgmt.proto`.
-- PyInstaller entry scripts are shims at repo root
-  (`halbot_daemon_entry.py`, `halbot_tray_entry.py`). Pointing
-  PyInstaller directly at `halbot/daemon.py` breaks relative imports.
-- Build stamp: `scripts\build.ps1` writes `halbot/_build_info.py`
-  (gitignored) with local-timezone timestamp; exposed via
-  `Health().daemon_version`. Source run falls back to process-start
-  wall time with `(source)` suffix.
+- Run halbot as a module: `python -m halbot.daemon run`,
+  `pythonw.exe -m tray`. No entry shims, no PyInstaller bootstrap.
+- Build stamp: `install.ps1` and `deploy.ps1` write
+  `src\halbot\_build_info.py` with local-timezone timestamp; exposed via
+  `Health().daemon_version`. Source run falls back to process-start wall
+  time with `(source)` suffix.
 - Log file path from `halbot.paths.log_file()`. Never hardcode.
+- `paths._installed()` checks if the package lives under
+  `%ProgramFiles%\Halbot\`; everything else (data dir, frontend dist)
+  follows from there. No `sys.frozen` / `sys._MEIPASS` branching --
+  same Python in both modes.
 
 ## Common pitfalls
 
@@ -327,10 +307,11 @@ uv run python -m halbot.daemon run
   `Failed to add port to server`. Check
   `netsh interface ipv4 show excludedportrange protocol=tcp` before
   picking a new port.
-- **nssm.cc occasional 503.** Download of bundled nssm.exe in
-  `build.ps1` can transient-fail. Retry or cache `nssm.exe` next to
-  daemon.exe manually; installer resolves via `shutil.which("nssm")`
-  first, then `sys.executable`'s dir.
+- **nssm.cc occasional 503.** `install.ps1` fetches nssm-2.24.zip on
+  first install. If it fails, drop a copy of `nssm.exe` at
+  `%ProgramFiles%\Halbot\nssm.exe` manually before re-running.
+  `halbot.installer._find_nssm()` resolves via PATH first, then the
+  install root.
 - **Registry ACL grant uses `winreg.KEY_ALL_ACCESS`** constants, not
   `ntsecuritycon`. `ntsecuritycon.KEY_ALL_ACCESS` does not exist —
   earlier build raised "module has no attribute KEY_ALL_ACCESS".
@@ -340,36 +321,23 @@ uv run python -m halbot.daemon run
   but limit scope: one viewer window, destroy cleanly on close.
 - **`PermissionError: WinError 5` on PersistConfig from source** is
   expected: daemon runs under current user (not LocalSystem), user
-  lacks HKLM write until `setup --install` granted it (grant persisted
-  on the HKLM key, not the process).
-- **`build.ps1` directly leaves `dist\.deploy-stamp.json` stale.** The
-  fingerprint stamp gets written only by `deploy.ps1` after a successful
-  build phase. Running `scripts\build.ps1` standalone produces correct
-  bundles but doesn't bump the stamp. Subsequent `deploy.ps1 -NoBuild`
-  then aborts with `daemon source fingerprint ... does not match last
-  build ()`. Fix: rerun via `deploy.ps1` (lets it own the stamp), or
-  hand-write `dist\.deploy-stamp.json` with the four current
-  fingerprints from `deploy.ps1 -DryRun` output.
-- **nssm extract cache can go stale.** `build.ps1` caches
-  `%TEMP%\nssm-2.24{,.zip}`. If the extract dir exists but
-  `win64\nssm.exe` is gone (manual cleanup, antivirus quarantine), the
-  build fails with `Cannot find path '...\win64\nssm.exe'`. The fetch
-  stage now tests the exe (not just the dir) and refetches; if you see
-  the error on an old build.ps1, `Remove-Item -Recurse -Force
-  $env:TEMP\nssm-2.24*` and rerun.
-- **Elevated child mirror in `deploy.ps1`** uses `$global:_elevatedLog`,
-  not `$script:`. The shim is invoked from inside `build.ps1`'s child
-  scope, where `$script:` resolves against the inner script and goes
-  null. Native cmd output (uv, pyinstaller, robocopy) bypasses
-  Write-Host; the build call is wrapped in `*>&1 | ForEach-Object` so
-  every line is mirrored to the parent log file via `Write-MirrorLine`.
-  Keep both pieces in sync if you touch the mirror.
+  lacks HKLM write until `install.ps1` granted it (grant persisted on
+  the HKLM key, not the process).
+- **`uv sync` while service running** locks `.venv\Lib\site-packages\*.pyd`.
+  `deploy.ps1` always stops the service before sync. If you run
+  `uv sync` against the install dir manually, stop `halbot` first.
+- **`paths._installed()` resolves `%ProgramFiles%`** from the env. If
+  you redirect `$env:PROGRAMFILES` for a test, paths flip to dev mode
+  and write to `_dev_data\` next to the package source. Usually fine
+  for tests; surprising in the wild.
 
 ## Explicitly absent
 
 - Per-user tray autostart (HKCU Run / Startup shortcut). Tray must be
-  relaunched manually each login, or user pins exe into
-  `shell:startup`. Elevated installer cannot cleanly target invoking
-  user's HKCU — deferred indefinitely.
-- `README.md` describes v0.7 daemon+tray+dashboard architecture — keep
-  in sync with this file when build/deploy commands change.
+  relaunched manually each login, or user pins
+  `%ProgramFiles%\Halbot\halbot-tray.cmd` into `shell:startup`.
+  Elevated installer cannot cleanly target invoking user's HKCU —
+  deferred indefinitely.
+- `README.md` describes the current daemon+tray+dashboard architecture
+  (v0.9: uv-installed venv, no PyInstaller). Keep in sync with this
+  file when build/deploy commands change.
