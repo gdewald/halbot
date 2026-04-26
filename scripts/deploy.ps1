@@ -130,8 +130,11 @@ if (-not $isAdmin -and -not $ElevatedChild -and -not $DryRun -and -not $BuildOnl
 # redirected across Start-Process -Verb RunAs, so we intercept Write-Host
 # and wrap a Tee-like layer.
 if ($ElevatedChild -and $ElevatedLog) {
-    $script:_elevatedLog = $ElevatedLog
-    $script:_origWriteHost = Get-Command Write-Host -CommandType Cmdlet
+    # $global: not $script: -- the Write-Host shim is invoked from inside
+    # build.ps1's child scope, where $script:_elevatedLog resolves against
+    # build.ps1's script scope (null) instead of deploy.ps1's. Same trap for
+    # the .exit/.done sentinels used by Finish-Deploy and the trap below.
+    $global:_elevatedLog = $ElevatedLog
     function global:Write-Host {
         [CmdletBinding()]
         param(
@@ -144,13 +147,25 @@ if ($ElevatedChild -and $ElevatedLog) {
         )
         $text = ($Object | ForEach-Object { "$_" }) -join ' '
         try {
-            $fs = [System.IO.File]::Open($script:_elevatedLog, 'Append', 'Write', 'ReadWrite')
+            $fs = [System.IO.File]::Open($global:_elevatedLog, 'Append', 'Write', 'ReadWrite')
             $sw = New-Object System.IO.StreamWriter($fs)
             if ($NoNewline) { $sw.Write($text) } else { $sw.WriteLine($text) }
             $sw.Flush(); $sw.Close(); $fs.Close()
         } catch { }
-        # Local echo — invisible hidden window but harmless.
+        # Local echo -- invisible hidden window but harmless.
         Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+    }
+    # Mirror native-command stdout+stderr too. PyInstaller / uv / robocopy
+    # output goes through native streams, bypassing Write-Host. Without this
+    # the parent tail goes silent for minutes during the long stages and any
+    # red error block from a cmdlet-returning-error never reaches the log.
+    function global:Write-MirrorLine {
+        param([string]$Line)
+        try {
+            $fs = [System.IO.File]::Open($global:_elevatedLog, 'Append', 'Write', 'ReadWrite')
+            $sw = New-Object System.IO.StreamWriter($fs)
+            $sw.WriteLine($Line); $sw.Flush(); $sw.Close(); $fs.Close()
+        } catch { }
     }
     # Wrap the whole remainder so any uncaught exception still writes an
     # exit sentinel the parent can read.
@@ -158,10 +173,14 @@ if ($ElevatedChild -and $ElevatedLog) {
         try {
             Write-Host ""
             Write-Host "[elevated] ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            # Full ErrorRecord -- includes CategoryInfo, FullyQualifiedErrorId,
+            # the offending command line, caret markers. Plain $_ prints to the
+            # error stream which the Write-Host mirror doesn't see.
+            Write-Host ($_ | Out-String)
             Write-Host $_.ScriptStackTrace
         } catch { }
-        Set-Content -Path "$script:_elevatedLog.exit" -Value 1
-        Set-Content -Path "$script:_elevatedLog.done" -Value 'done'
+        Set-Content -Path "$global:_elevatedLog.exit" -Value 1
+        Set-Content -Path "$global:_elevatedLog.done" -Value 'done'
         exit 1
     }
 }
@@ -170,9 +189,9 @@ function Finish-Deploy([int]$code = 0) {
     # Normal exit. In the elevated child, hand back the exit code via the
     # sentinel files the parent tailer is watching. In a non-elevated run
     # it's just a Pop-Location.
-    if ($script:_elevatedLog) {
-        Set-Content -Path "$script:_elevatedLog.exit" -Value $code
-        Set-Content -Path "$script:_elevatedLog.done" -Value 'done'
+    if ($global:_elevatedLog) {
+        Set-Content -Path "$global:_elevatedLog.exit" -Value $code
+        Set-Content -Path "$global:_elevatedLog.done" -Value 'done'
     }
     Pop-Location
 }
@@ -360,7 +379,19 @@ if ($buildDaemon -or $buildTray) {
     $buildArgs = @{ Target = $buildTarget }
     if ($Clean) { $buildArgs.Clean = $true }
     Write-Host "[deploy] building ($buildTarget)..." -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot "build.ps1") @buildArgs
+    if ($global:_elevatedLog) {
+        # Elevated child: native cmd output (uv/pyinstaller/npm/robocopy)
+        # bypasses Write-Host and would never reach the parent tail. Merge
+        # all streams (*>&1) and pipe each line through the mirror so the
+        # parent sees everything. Build.ps1 Write-Host calls already mirror.
+        & (Join-Path $PSScriptRoot "build.ps1") @buildArgs *>&1 | ForEach-Object {
+            $line = "$_"
+            Write-MirrorLine $line
+            $_
+        }
+    } else {
+        & (Join-Path $PSScriptRoot "build.ps1") @buildArgs
+    }
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
     # Stamp only what we built. If fingerprint recomputes the same it's a
