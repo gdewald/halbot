@@ -31,6 +31,7 @@ material lives in `reference/`.
 | `016-voice-pipeline-benchmarks-impl.md` | completed | `benchmarks/` runner + multiple result sets under `benchmarks/_out/`. |
 | `017-wake-variants-impl.md` | completed | LLM-generated wake-variant dictionary + `/halbot-admin wake-variants` slash group. |
 | `018-transcript-capture-impl.md` | completed | Rotating JSONL transcript log, dashboard-toggleable. |
+| `020-static-stats-publish-impl.md` | completed | `/halbot-stats` snapshot publisher + Cloudflare R2 infra. v0.8.0. |
 
 ## Drafts (`docs/plans/drafts/`, gitignored)
 
@@ -43,7 +44,6 @@ sketches that may or may not become real plans.
 | `011-smoke-test-rpc.md` | incomplete | `SmokeTest` RPC not added; design still relevant. |
 | `012-persistent-llm-hooks.md` | incomplete | Persona-hook system not built. |
 | `019-capability-surfaces.md` | incomplete | Sketch only; no implementation started. |
-| `020-static-stats-publish.md` | incomplete | `/halbot-stats` snapshot pipeline + Cloudflare R2 infra deployed; promote to `020-static-stats-publish-impl.md` once committed to main. |
 
 Removed (delete from local checkouts if you have them):
 - `010-fast-build-deploy.md` — superseded by `scripts/deploy.ps1`.
