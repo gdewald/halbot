@@ -32,6 +32,14 @@ DEFAULTS: Dict[str, Any] = {
     "models_offline": "true",
     "llm_keepalive_minutes": "10",
     "llm_keepalive_interval_seconds": "240",
+    "stats_publisher": "s3",
+    "stats_s3_endpoint": "",
+    "stats_s3_bucket": "",
+    "stats_s3_region": "auto",
+    "stats_s3_key_prefix": "",
+    "stats_public_url": "",
+    "stats_min_publish_interval_seconds": "60",
+    "stats_user_id_treatment": "display_name",
 }
 
 
@@ -267,5 +275,45 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "NUMBER", "min": 0.0, "max": 3600.0, "step": 30.0,
         "description": "Background ping interval to keep LLM resident (0 disables)",
         "group": "llm", "label": "LLM_KEEPALIVE_INTERVAL_SECONDS",
+    },
+    "stats_publisher": {
+        "type": "SELECT", "options": ["s3", "filesystem", "github_pages"],
+        "description": "Backend that hosts the published static stats snapshot",
+        "group": "stats", "label": "STATS_PUBLISHER",
+    },
+    "stats_s3_endpoint": {
+        "type": "URL",
+        "description": "S3 endpoint URL (R2: https://<account>.r2.cloudflarestorage.com; AWS: leave empty)",
+        "group": "stats", "label": "STATS_S3_ENDPOINT",
+    },
+    "stats_s3_bucket": {
+        "type": "STRING",
+        "description": "Bucket name for stats uploads (empty disables /halbot-stats)",
+        "group": "stats", "label": "STATS_S3_BUCKET",
+    },
+    "stats_s3_region": {
+        "type": "STRING",
+        "description": "S3 region (R2 wants 'auto')",
+        "group": "stats", "label": "STATS_S3_REGION",
+    },
+    "stats_s3_key_prefix": {
+        "type": "STRING",
+        "description": "Optional path under bucket, e.g. 'halbot/'",
+        "group": "stats", "label": "STATS_S3_KEY_PREFIX",
+    },
+    "stats_public_url": {
+        "type": "URL",
+        "description": "Public URL base, e.g. https://stats.example.com/ (trailing slash recommended)",
+        "group": "stats", "label": "STATS_PUBLIC_URL",
+    },
+    "stats_min_publish_interval_seconds": {
+        "type": "NUMBER", "min": 0.0, "max": 3600.0, "step": 5.0,
+        "description": "Throttle floor; cached URL returned within this window",
+        "group": "stats", "label": "STATS_MIN_PUBLISH_INTERVAL_SECONDS",
+    },
+    "stats_user_id_treatment": {
+        "type": "SELECT", "options": ["display_name", "raw", "hash", "omit"],
+        "description": "How to render Discord user IDs in the public snapshot",
+        "group": "stats", "label": "STATS_USER_ID_TREATMENT",
     },
 }

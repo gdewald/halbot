@@ -41,3 +41,9 @@ def transcript_log_file() -> Path:
 
 def events_db() -> Path:
     return data_dir() / "events.db"
+
+
+def frontend_dist_dir() -> Path:
+    if _frozen():
+        return Path(sys._MEIPASS) / "halbot" / "web"
+    return Path(__file__).resolve().parent.parent / "frontend" / "dist"

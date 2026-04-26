@@ -12,12 +12,14 @@ Registered on the client's ``discord.app_commands.CommandTree`` via
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
 from discord import app_commands
 
 from . import db
+from . import stats_publisher
 from . import voice as _voice
 from .bot_ui import (
     EmbedField,
@@ -501,6 +503,52 @@ async def wake_variants_clear(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=emb, ephemeral=True)
 
 
+@app_commands.command(
+    name="halbot-stats",
+    description="Publish a public snapshot of Halbot's stats and reply with the URL.",
+)
+@app_commands.guild_only()
+async def halbot_stats(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(thinking=True)
+    client = interaction.client
+    user_id = int(getattr(interaction.user, "id", 0) or 0)
+    try:
+        result = await asyncio.to_thread(
+            stats_publisher.publish_now, client, user_id=user_id,
+        )
+    except Exception as e:
+        log.exception("[slash] /halbot-stats publish failed")
+        err_line = str(e).splitlines()[0] if str(e) else ""
+        emb = build_embed(ReplyPayload(
+            mode=Mode.ERROR,
+            title="Stats snapshot failed",
+            description=f"`{type(e).__name__}: {err_line[:300]}`",
+            subtext="halbot-stats · publish error",
+            footer="Check daemon logs for details.",
+        ))
+        await interaction.followup.send(embed=emb)
+        return
+
+    cached_tag = " (cached)" if result.cached else ""
+    payload = ReplyPayload(
+        mode=Mode.NOTED,
+        title="Halbot stats",
+        description=f"Snapshot ready:\n{result.url}",
+        subtext=f"halbot-stats · {result.file_count} files · {result.bytes_uploaded // 1024} KB",
+        footer=f"Generated {result.generated_at_utc}{cached_tag}",
+    )
+    # interaction.followup is a Webhook — bypass send_halbot_reply (which
+    # branches on Message/Messageable) and send directly so the subtext line
+    # still rides as a content prefix above the embed.
+    emb = build_embed(payload)
+    content = f"-# *{payload.subtext}*" if payload.subtext else None
+    await interaction.followup.send(content=content, embed=emb)
+    log.info(
+        "[slash] /halbot-stats by %s → %s%s",
+        interaction.user, result.url, cached_tag,
+    )
+
+
 def register_slash(client: discord.Client) -> app_commands.CommandTree:
     """Attach the slash tree + admin group to the client.
 
@@ -509,5 +557,9 @@ def register_slash(client: discord.Client) -> app_commands.CommandTree:
     """
     tree = app_commands.CommandTree(client)
     tree.add_command(admin_group)
-    log.info("[slash] command tree registered (/%s)", admin_group.name)
+    tree.add_command(halbot_stats)
+    log.info(
+        "[slash] command tree registered (/%s, /%s)",
+        admin_group.name, halbot_stats.name,
+    )
     return tree

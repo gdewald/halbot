@@ -34,6 +34,10 @@ daemon = [
     # it and the frozen bundle can't phonemize English. Installed from a wheel
     # URL because PyPI doesn't host spaCy models.
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    # /halbot-stats publishes a static snapshot of the dashboard to S3-compatible
+    # storage (Cloudflare R2 by default). boto3 because it's the canonical SDK
+    # and works across AWS S3 + R2 just by swapping endpoint_url.
+    "boto3>=1.34",
 ]
 tray = [
     "grpcio>=1.60",

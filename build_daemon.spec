@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller onedir spec for halbot-daemon.
 
+from pathlib import Path
+
 from PyInstaller.utils.hooks import (
     collect_all,
     collect_submodules,
@@ -28,6 +30,13 @@ for _p in _pkgs:
     datas += _d
     binaries += _b
     hidden += _h
+
+# Ship the built React dashboard so /halbot-stats can render a static snapshot
+# from inside the daemon. Mounted at halbot/web to avoid clashing with tray's
+# dashboard/web mount. paths.frontend_dist_dir() resolves the same target.
+_fe_dist = Path(SPECPATH) / "frontend" / "dist"
+if _fe_dist.exists():
+    datas.append((str(_fe_dist), "halbot/web"))
 
 a = Analysis(
     ["halbot_daemon_entry.py"],
