@@ -198,6 +198,18 @@ function Install-Service {
     if ($LASTEXITCODE -ne 0) { throw "halbot.installer:install failed exit=$LASTEXITCODE" }
 }
 
+function Grant-SrcAcl {
+    # Let the install user write to src\ without elevation. Source-only
+    # deploys (halbot/*.py, tray/*.py, frontend/dist/*) only need this
+    # grant; lock-changing deploys still need admin because uv sync
+    # writes into .venv\ which stays admin-only.
+    $user = $env:USERNAME
+    if (-not $user) { return }
+    $srcDst = Join-Path $InstallRoot "src"
+    Write-Host "[install] granting $user modify on $srcDst"
+    & icacls $srcDst /grant "${user}:(OI)(CI)M" /T /C | Out-Null
+}
+
 function Write-TrayLauncher {
     $cmd = Join-Path $InstallRoot "halbot-tray.cmd"
     $pyw = Join-Path $InstallRoot ".venv\Scripts\pythonw.exe"
@@ -220,6 +232,7 @@ Mirror-Sources
 Ensure-Nssm
 Sync-Venv
 Install-Service
+Grant-SrcAcl
 Write-TrayLauncher
 
 if (-not $SkipServiceStart) {
