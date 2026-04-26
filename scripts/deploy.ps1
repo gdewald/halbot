@@ -36,17 +36,33 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 
+# Title both the launching shell and the elevated child so the user sees
+# "halbot deploy" instead of an empty title bar while UAC + the elevated
+# PS window are open.
+try { $Host.UI.RawUI.WindowTitle = "halbot deploy" } catch { }
+
 # --- self-elevate -------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $DryRun) {
     Write-Host "[deploy] elevating via UAC..."
-    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
+    # -Command (not -File) so we can set the elevated window title BEFORE
+    # the script runs, and pause at the end so the user can read output
+    # before the window closes (deploys are usually fast enough that
+    # auto-close means you miss the [deploy] done line).
+    $passThru = @()
     foreach ($sw in @("NoBuild", "NoTrayBounce")) {
-        if ($PSBoundParameters[$sw]) { $argList += "-$sw" }
+        if ($PSBoundParameters[$sw]) { $passThru += "-$sw" }
     }
     if ($PSBoundParameters.ContainsKey("InstallRoot")) {
-        $argList += @("-InstallRoot", $InstallRoot)
+        $passThru += @("-InstallRoot", "'$InstallRoot'")
     }
+    $passThruStr = $passThru -join " "
+    $inner = "`$Host.UI.RawUI.WindowTitle = 'halbot deploy (elevated)'; " +
+             "& '$PSCommandPath' $passThruStr; " +
+             "`$code = `$LASTEXITCODE; " +
+             "Write-Host ''; Write-Host '[deploy] press enter to close' -ForegroundColor DarkGray; " +
+             "[void][System.Console]::ReadLine(); exit `$code"
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $inner)
     $proc = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
     Pop-Location
     exit $proc.ExitCode
