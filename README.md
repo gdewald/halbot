@@ -130,7 +130,9 @@ source mirror, and the NSSM service. Stores the Discord token.
 ```powershell
 scripts\install.ps1
 
-# Store Discord token (DPAPI, CRYPTPROTECT_LOCAL_MACHINE):
+# Store Discord token (DPAPI, CRYPTPROTECT_LOCAL_MACHINE) -- ONLY on a
+# fresh box. install.ps1 does not touch HKLM\SOFTWARE\Halbot\Secrets,
+# so existing tokens survive a reinstall.
 & "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --set-secret DISCORD_TOKEN <paste-token-here>
 
 # Launch tray (no autostart this phase — relaunch after each login, or pin to Startup):

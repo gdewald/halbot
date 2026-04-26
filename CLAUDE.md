@@ -223,7 +223,9 @@ What `install.ps1` does:
 9. Writes `halbot-tray.cmd` (one-line `pythonw.exe -m tray` launcher).
 10. `Start-Service halbot`.
 
-Storing the Discord token (DPAPI):
+Storing the Discord token (DPAPI) -- **only on a fresh box**.
+Re-running `install.ps1` does not touch `HKLM\SOFTWARE\Halbot\Secrets`,
+so existing tokens survive:
 
 ```powershell
 & "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --set-secret DISCORD_TOKEN <paste>
