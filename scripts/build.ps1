@@ -84,9 +84,23 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "syntax errors in $($pkgs -join ',')" }
     }
 
-    if ($Clean) {
+    if ($Clean -and ($buildDaemon -and $buildTray)) {
+        # Full -Clean for both targets -> nuke shared dirs.
         Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "build")
         Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "dist")
+    } elseif ($Clean) {
+        # -Clean for a single target -> only wipe that target's build cache +
+        # dist output. Don't bulldoze the other target's bundle.
+        if ($buildDaemon) {
+            Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "build\build_daemon")
+            Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "dist\halbot-daemon")
+            Remove-Item -Force -ErrorAction Ignore (Join-Path $root "dist\halbot-daemon.zip")
+        }
+        if ($buildTray) {
+            Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "build\build_tray")
+            Remove-Item -Recurse -Force -ErrorAction Ignore (Join-Path $root "dist\halbot-tray")
+            Remove-Item -Force -ErrorAction Ignore (Join-Path $root "dist\halbot-tray.zip")
+        }
     } else {
         # Per-target clean of dist output only; keep build/ cache.
         if ($buildDaemon) {
@@ -114,15 +128,20 @@ try {
         Time-Stage "fetch nssm" {
             $nssmDest = Join-Path $root "dist\halbot-daemon\nssm.exe"
             if (-not (Test-Path $nssmDest)) {
-                $tmp = Join-Path $env:TEMP "nssm-2.24.zip"
-                if (-not (Test-Path $tmp)) {
-                    Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $tmp
-                }
+                $tmp     = Join-Path $env:TEMP "nssm-2.24.zip"
                 $extract = Join-Path $env:TEMP "nssm-2.24"
-                if (-not (Test-Path $extract)) {
+                $exe     = Join-Path $extract "win64\nssm.exe"
+                if (-not (Test-Path $exe)) {
+                    # Stale/empty cache -> nuke and refetch.
+                    Remove-Item -Recurse -Force -ErrorAction Ignore $extract
+                    Remove-Item -Force -ErrorAction Ignore $tmp
+                    Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $tmp
                     Expand-Archive -Path $tmp -DestinationPath $env:TEMP -Force
+                    if (-not (Test-Path $exe)) {
+                        throw "nssm extract failed: $exe missing after Expand-Archive"
+                    }
                 }
-                Copy-Item -Path (Join-Path $extract "win64\nssm.exe") -Destination $nssmDest -Force
+                Copy-Item -Path $exe -Destination $nssmDest -Force
             }
         }
 
