@@ -27,33 +27,33 @@ expensive stages — see "Staleness gates" below.
 ```mermaid
 stateDiagram-v2
     [*] --> Idle: voice_join
-    Idle --> Capturing: VAD energy > 0.015 RMS
+    Idle --> Capturing: "VAD energy > 0.015 RMS"
     Capturing --> Capturing: 20ms frames, voiced
-    Capturing --> STT: 1.5s silence (segment complete)
+    Capturing --> STT: "1.5s silence (segment complete)"
 
-    STT --> Idle: STALE_PRE_STT (queue_wait > 12s)
+    STT --> Idle: "STALE_PRE_STT (queue_wait > 12s)"
     STT --> WakeFilter: transcript ready
 
-    WakeFilter --> VoiceTrigger: keyword_voice phrase match (ambient)
+    WakeFilter --> VoiceTrigger: "keyword_voice phrase match (ambient)"
     VoiceTrigger --> WakeFilter: trigger fan-out
 
     WakeFilter --> Idle: no wake token
-    WakeFilter --> IntentParse: substring hit in wake_variant_tokens()
+    WakeFilter --> IntentParse: "substring hit in wake_variant_tokens()"
 
-    IntentParse --> Idle: STALE_PRE_INTENT (age > 15s)
-    IntentParse --> VoicePlay: action=voice_play
-    IntentParse --> ConversationFast: action=conversation + reply field
-    IntentParse --> ConversationFull: action=conversation, no reply
-    IntentParse --> Unknown: action=unknown
+    IntentParse --> Idle: "STALE_PRE_INTENT (age > 15s)"
+    IntentParse --> VoicePlay: "action=voice_play"
+    IntentParse --> ConversationFast: "action=conversation + reply field"
+    IntentParse --> ConversationFull: "action=conversation, no reply"
+    IntentParse --> Unknown: "action=unknown"
 
-    VoicePlay --> Speak: sound miss → customize_response
-    VoicePlay --> Playback: sound hit → session.play_sound
-    ConversationFast --> Speak: passthrough text (1 LLM call total)
-    ConversationFull --> Speak: answer_voice_conversation_async (2nd LLM call)
+    VoicePlay --> Speak: "sound miss -> customize_response"
+    VoicePlay --> Playback: "sound hit -> session.play_sound"
+    ConversationFast --> Speak: "passthrough text (1 LLM call total)"
+    ConversationFull --> Speak: "answer_voice_conversation_async (2nd LLM call)"
     Unknown --> Speak: customize_response_async
 
-    Speak --> Idle: STALE_PRE_PLAY (age > 25s)
-    Speak --> Synth: TTS engine.synth(text)
+    Speak --> Idle: "STALE_PRE_PLAY (age > 25s)"
+    Speak --> Synth: "TTS engine.synth(text)"
     Synth --> Playback: ffmpeg PCMVolumeTransformer
     Playback --> Idle: vc.play complete
 
