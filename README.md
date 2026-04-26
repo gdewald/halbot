@@ -148,11 +148,16 @@ Day-to-day Start / Stop / Restart: use the **tray menu** (no elevation
 needed — ACL granted at install time).
 
 ```powershell
-scripts\deploy.ps1                 # build + stop + mirror + (sync) + start + bounce tray
+scripts\deploy.ps1                 # everything: mirror, restart daemon, bounce tray
+scripts\deploy.ps1 -Daemon         # daemon only: mirror halbot\, proto\, restart service
+scripts\deploy.ps1 -Tray           # tray only: mirror tray\, dashboard\, frontend\dist\; daemon untouched
 scripts\deploy.ps1 -NoBuild        # skip the gen_proto + npm step
-scripts\deploy.ps1 -NoTrayBounce   # leave the tray alone
 scripts\deploy.ps1 -DryRun         # show plan only
 ```
+
+`deploy.ps1` self-elevates only when it has to (lock file changed,
+or first deploy before `install.ps1` granted `src\` ACL). `-Tray`
+deploys typically run unelevated and never restart the daemon.
 
 Run `scripts\build.ps1` standalone if you want gen_proto + frontend
 without touching the install. There's no PyInstaller, no spec files,

@@ -240,19 +240,26 @@ Start-Process "$env:ProgramFiles\Halbot\halbot-tray.cmd"
 ## Deploy — operational (update existing install)
 
 ```powershell
-scripts\deploy.ps1                # build + stop + mirror + uv sync (if lock changed) + start + bounce tray
-scripts\deploy.ps1 -NoBuild       # skip the build step
+scripts\deploy.ps1                # build + mirror everything + restart daemon + bounce tray
+scripts\deploy.ps1 -Daemon        # mirror halbot\ + proto\; stop+start service
+scripts\deploy.ps1 -Tray          # mirror tray\ + dashboard\ + frontend\dist\; service untouched
+scripts\deploy.ps1 -NoBuild       # skip gen_proto + npm
 scripts\deploy.ps1 -NoTrayBounce  # leave tray alone
 scripts\deploy.ps1 -DryRun        # print plan only
 ```
 
-Single deploy path. Same script for Claude and you. Self-elevates
-once via UAC. Brief outage during the stop -> mirror -> sync -> start
-window (~5 s source-only, ~30 s if `uv.lock` changed). No fingerprint
-stamp, no per-target flags, no incremental cache to invalidate.
+Single deploy path. Self-elevates **only when needed** (lock file
+changed -> uv sync writes to admin-only `.venv\`; or `src\` ACL was
+never granted). Pure source iterations run unelevated and silently:
+
+- `-Tray` after a tray/dashboard tweak: mirrors files, kills + relaunches
+  pythonw, daemon never blinks. ~2 s, no UAC.
+- `-Daemon` after a halbot/ edit: stops + starts the service (~5 s
+  outage), no UAC unless lock changed.
+- Default (both): full mirror + service bounce + tray bounce.
 
 `uv sync` only runs when `pyproject.toml` or `uv.lock` differ from
-the install's copy. Source-only edits skip it.
+the install's copy.
 
 Service start/stop/restart day-to-day: use the tray menu (user got
 service-control ACL via `install.ps1`).
