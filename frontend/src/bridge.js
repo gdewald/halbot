@@ -1,7 +1,14 @@
 // Thin wrapper over window.pywebview.api.*.
-// Works in-browser dev (returns stub data) and inside pywebview.
+// Three modes:
+//   1. Static snapshot — index.html injected `window.__STATS_SNAPSHOT__`
+//      by halbot.stats_publisher. Returns pre-computed data, mutations no-op.
+//   2. pywebview — bot operator's tray dashboard.
+//   3. Browser dev — STUB returns empty data.
 
 const api = () => window.pywebview?.api;
+const SNAPSHOT = (typeof window !== 'undefined') ? window.__STATS_SNAPSHOT__ : null;
+
+export const IS_SNAPSHOT = !!SNAPSHOT;
 
 const STUB = {
   health: async () => ({ uptime_seconds: 0, daemon_version: 'dev', llm_reachable: false, whisper_loaded: false, tts_loaded: false }),
@@ -29,8 +36,37 @@ const STUB = {
   window_close: async () => null,
 };
 
+function makeSnapshotBridge(S) {
+  const A = S.analytics || {};
+  // Returns the pre-baked aggregate matching (kind, group_by). Args ts_from
+  // etc. are ignored — the snapshot was frozen with a single 30d window.
+  const queryStats = async (kind = '', _user = 0, _target = '',
+                            _from = 0, _to = 0, group_by = '', _limit = 100) => {
+    if (kind === 'soundboard_play' && group_by === 'target') return A.top_sounds || { total_count: 0, rows: [] };
+    if (!kind && group_by === 'user_id') return A.top_users || { total_count: 0, rows: [] };
+    if (kind === 'cmd_invoke' && group_by === 'target') return A.top_commands || { total_count: 0, rows: [] };
+    if (!kind && group_by === 'kind') return A.kind_mix || { total_count: 0, rows: [] };
+    return { total_count: 0, rows: [] };
+  };
+  return {
+    ...STUB,
+    health: async () => ({
+      uptime_seconds: 0,
+      daemon_version: `static snapshot · ${S.generated_at_utc || ''}`,
+      llm_reachable: false, whisper_loaded: false, tts_loaded: false,
+    }),
+    get_stats: async () => S.stats || { mock: true },
+    soundboard_list: async () => S.soundboard || [],
+    emoji_list: async () => S.emoji || [],
+    query_stats: queryStats,
+  };
+}
+
+const SNAPSHOT_BRIDGE = SNAPSHOT ? makeSnapshotBridge(SNAPSHOT) : null;
+
 function make(name) {
   return async (...args) => {
+    if (SNAPSHOT_BRIDGE) return SNAPSHOT_BRIDGE[name](...args);
     const a = api();
     if (!a) return STUB[name](...args);
     return a[name](...args);
@@ -62,3 +98,11 @@ export const b = {
   maximize: make('window_maximize'),
   close: make('window_close'),
 };
+
+export const SNAPSHOT_META = SNAPSHOT
+  ? {
+      generated_at_utc: SNAPSHOT.generated_at_utc || '',
+      schema_version: SNAPSHOT.schema_version || 0,
+      window_seconds: SNAPSHOT.window_seconds || 0,
+    }
+  : null;

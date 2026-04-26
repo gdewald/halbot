@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { T } from '../tokens.js';
-import { b } from '../bridge.js';
+import { b, IS_SNAPSHOT } from '../bridge.js';
 import { StatCard, MiniBar, SectionHeader } from './stats/StatCard.jsx';
 import { LatencyCard } from './stats/LatencyCard.jsx';
 
@@ -94,6 +94,9 @@ export function StatsPanel() {
       }
     };
     refresh();
+    if (IS_SNAPSHOT) {
+      return () => { cancelled = true; };
+    }
     const iv = setInterval(refresh, REFRESH_MS);
     return () => { cancelled = true; clearInterval(iv); };
   }, []);

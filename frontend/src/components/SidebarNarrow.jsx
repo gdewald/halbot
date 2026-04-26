@@ -1,7 +1,7 @@
 import { T } from '../tokens.js';
 import { NAV_ITEMS } from './navItems.jsx';
 
-export function SidebarNarrow({ active, onChange }) {
+export function SidebarNarrow({ active, onChange, items = NAV_ITEMS }) {
   return (
     <div style={{
       width: 52, height: '100%', background: T.surface,
@@ -9,7 +9,7 @@ export function SidebarNarrow({ active, onChange }) {
       display: 'flex', flexDirection: 'column', alignItems: 'center',
       paddingTop: 10, gap: 2, flexShrink: 0,
     }}>
-      {NAV_ITEMS.map(n => {
+      {items.map(n => {
         const a = active === n.id;
         return (
           <button key={n.id} onClick={() => onChange(n.id)} title={n.label} style={{

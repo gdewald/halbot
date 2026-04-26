@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { T } from '../tokens.js';
-import { b } from '../bridge.js';
+import { b, IS_SNAPSHOT } from '../bridge.js';
 
 const WINDOWS = [
   { key: '24h', label: '24h', seconds: 86400 },
@@ -228,12 +228,16 @@ export function AnalyticsPanel() {
       }
     };
     refresh();
+    if (IS_SNAPSHOT) {
+      return () => { cancelled = true; };
+    }
     const iv = setInterval(refresh, 10_000);
     return () => { cancelled = true; clearInterval(iv); };
   }, [tsFrom, kindFilter, userFilter]);
 
-  // Live feed.
+  // Live feed (skipped in snapshot mode — there is no event stream there).
   useEffect(() => {
+    if (IS_SNAPSHOT) return;
     let cancelled = false;
     let iv;
     (async () => {
@@ -291,38 +295,41 @@ export function AnalyticsPanel() {
         pointerEvents: empty ? 'none' : 'auto',
       }}>
 
-        {/* Toolbar */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14,
-          padding: '10px 12px', background: T.surface,
-          border: `1px solid ${T.border}`, borderRadius: 9,
-        }}>
-          <span style={{
-            fontSize: 9, fontWeight: 600, color: T.dim,
-            textTransform: 'uppercase', letterSpacing: '0.1em',
-          }}>Window</span>
-          {WINDOWS.map(w => (
-            <Pill key={w.key} active={windowKey === w.key} color={T.blurple}
-                  onClick={() => setWindowKey(w.key)}>
-              {w.label}
-            </Pill>
-          ))}
-          <div style={{ flex: 1 }} />
-          {filterLabel ? (
-            <>
-              <span style={{
-                fontSize: 10, color: T.yellow, fontFamily: 'JetBrains Mono',
-              }}>filter: {filterLabel}</span>
-              <Pill active color={T.yellow} onClick={clearFilters} title="Clear all filters">
-                ✕ clear
+        {/* Toolbar — window picker + filter affordances are tray-only.
+             Snapshot is frozen at 30d and has no per-row data to filter against. */}
+        {!IS_SNAPSHOT && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14,
+            padding: '10px 12px', background: T.surface,
+            border: `1px solid ${T.border}`, borderRadius: 9,
+          }}>
+            <span style={{
+              fontSize: 9, fontWeight: 600, color: T.dim,
+              textTransform: 'uppercase', letterSpacing: '0.1em',
+            }}>Window</span>
+            {WINDOWS.map(w => (
+              <Pill key={w.key} active={windowKey === w.key} color={T.blurple}
+                    onClick={() => setWindowKey(w.key)}>
+                {w.label}
               </Pill>
-            </>
-          ) : (
-            <span style={{ fontSize: 10, color: T.dim, fontStyle: 'italic' }}>
-              click a kind or user to filter
-            </span>
-          )}
-        </div>
+            ))}
+            <div style={{ flex: 1 }} />
+            {filterLabel ? (
+              <>
+                <span style={{
+                  fontSize: 10, color: T.yellow, fontFamily: 'JetBrains Mono',
+                }}>filter: {filterLabel}</span>
+                <Pill active color={T.yellow} onClick={clearFilters} title="Clear all filters">
+                  ✕ clear
+                </Pill>
+              </>
+            ) : (
+              <span style={{ fontSize: 10, color: T.dim, fontStyle: 'italic' }}>
+                click a kind or user to filter
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Summary strip */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
@@ -334,7 +341,7 @@ export function AnalyticsPanel() {
 
         {/* Event kind mix — interactive filter */}
         <Section title={`Event type mix — ${windowKey}`}
-                 right={<span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to filter</span>}>
+                 right={!IS_SNAPSHOT && <span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to filter</span>}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: 8,
@@ -345,8 +352,8 @@ export function AnalyticsPanel() {
               <Pill key={r.key}
                     active={kindFilter === r.key}
                     color={kindColor(r.key)}
-                    onClick={() => toggleKind(r.key)}
-                    title={kindFilter === r.key ? 'Click to clear filter' : `Filter to ${r.key}`}>
+                    onClick={IS_SNAPSHOT ? undefined : () => toggleKind(r.key)}
+                    title={IS_SNAPSHOT ? r.key : (kindFilter === r.key ? 'Click to clear filter' : `Filter to ${r.key}`)}>
                 <span>{kindEmoji(r.key)}</span>
                 <span>{r.key}</span>
                 <span style={{ color: kindColor(r.key), fontWeight: 600 }}>{r.count}</span>
@@ -387,9 +394,10 @@ export function AnalyticsPanel() {
           </div>
         </Section>
 
-        {/* Top users — clickable to filter */}
+        {/* Top users — clickable to filter (tray only). Snapshot has the user
+             id pre-resolved to a display name in the `key` field. */}
         <Section title={`Top users by activity — ${windowKey}`}
-                 right={<span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to drill down</span>}>
+                 right={!IS_SNAPSHOT && <span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to drill down</span>}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, overflow: 'hidden',
@@ -397,18 +405,18 @@ export function AnalyticsPanel() {
             {topUsers.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity in window</div>
             ) : topUsers.rows.map((r, i) => (
-              <BarRow key={r.key} rank={i + 1}
-                label={`user ${shortUser(r.key)}`}
+              <BarRow key={`${r.key}-${i}`} rank={i + 1}
+                label={IS_SNAPSHOT ? (r.key || '—') : `user ${shortUser(r.key)}`}
                 count={r.count} max={maxUser} last={r.last_ts_unix}
                 accent={T.green} mono
-                onClick={() => toggleUser(r.key)}
-                active={String(userFilter) === String(r.key)} />
+                onClick={IS_SNAPSHOT ? undefined : () => toggleUser(r.key)}
+                active={!IS_SNAPSHOT && String(userFilter) === String(r.key)} />
             ))}
           </div>
         </Section>
 
-        {/* Live feed */}
-        <Section title={`Live event feed${filterLabel ? ` (filtered: ${filterLabel})` : ''}`}
+        {/* Live feed — only meaningful when wired to a live event stream. */}
+        {!IS_SNAPSHOT && <Section title={`Live event feed${filterLabel ? ` (filtered: ${filterLabel})` : ''}`}
                  right={<span style={{ fontSize: 9, color: T.dim, fontFamily: 'JetBrains Mono' }}>
                    {feedFiltered.length}/{feed.length}
                  </span>}>
@@ -456,7 +464,7 @@ export function AnalyticsPanel() {
               );
             })}
           </div>
-        </Section>
+        </Section>}
 
         <div style={{ height: 8 }} />
       </div>
