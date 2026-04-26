@@ -84,6 +84,18 @@ Config panel to start writing every STT input + LLM reply + TTS
 string to `%ProgramData%\Halbot\logs\transcripts.jsonl` as one
 JSON object per line (rotating, 20 MB × 20 files).
 
+### Public Stats Snapshot
+`/halbot-stats` (any server member) bakes the current dashboard into
+a static HTML snapshot, uploads to Cloudflare R2 via boto3, replies
+with the public URL. Same React build, live data injected as
+`window.__STATS_SNAPSHOT__`; no API server, no auth surface — URL is
+the secret. Throttled by `stats_min_publish_interval_seconds`
+(default 60). Bucket + custom domain provisioned via Terraform under
+`infra/cloudflare/`; runtime credentials pushed to HKLM by
+`scripts\apply-r2-secrets.ps1`. See
+[infra/cloudflare/README.md](infra/cloudflare/README.md) for the
+one-time setup.
+
 ## Requirements
 
 - Windows 10/11 (DPAPI, NSSM, pywin32 hard dependencies)
@@ -172,6 +184,12 @@ these changed:
 If the daemon crashes on startup with `ModuleNotFoundError: No module
 named 'halbot.<something>'` after a rebuild, that's the cache-staleness
 symptom — rerun with `-Clean`.
+
+`-Clean` is per-target when combined with `-Target`: e.g.
+`scripts\build.ps1 -Target tray -Clean` only wipes the tray's
+`build\build_tray\` + `dist\halbot-tray\`, leaving the daemon bundle
+intact. `-Target all -Clean` (the default if `-Target` is omitted)
+nukes both.
 
 Other flags: `-NoZip` skips the archive step (leaves
 `dist\halbot-{daemon,tray}\` only — handy when iterating locally).

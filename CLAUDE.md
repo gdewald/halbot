@@ -63,6 +63,14 @@
   privacy-policy surfaces. Skip the whole conversation.
 - Retention knobs (`analytics_retention_days` etc.) are operational,
   not privacy — keep those.
+- **`/halbot-stats` public URL is not an opt-out surface.** It
+  publishes a static snapshot of the same dashboard data already
+  collected — same analytics, same user IDs (resolved to display
+  names), same SQLite rows. The URL is the secret; sharing it is the
+  consent model. Don't add per-user exclude lists, "hide me from
+  stats" toggles, or scrubbing logic to the snapshot pipeline.
+  Throttle (`stats_min_publish_interval_seconds`) is operational, not
+  privacy.
 
 ## Project state
 
@@ -83,6 +91,15 @@ v0.7 work: Discord embed flows
 ([016](docs/plans/016-voice-pipeline-benchmarks-impl.md)), wake-variants
 ([017](docs/plans/017-wake-variants-impl.md)), transcript log
 ([018](docs/plans/018-transcript-capture-impl.md)).
+
+v0.8 in flight: `/halbot-stats` static snapshot publisher (plan
+[020](docs/plans/drafts/020-static-stats-publish.md), draft until merge).
+Discord slash command bakes the React dashboard into a frozen HTML page
+with live data injected as `window.__STATS_SNAPSHOT__`, uploads to
+Cloudflare R2 via boto3, replies with the public URL. Bucket + custom
+domain + S3-compat token provisioned via Terraform under
+`infra/cloudflare/`; secrets wired into HKLM by
+`scripts\apply-r2-secrets.ps1`.
 
 Single-user private-server toy. Don't harden for public/multi-tenant.
 
@@ -167,9 +184,13 @@ scripts\build.ps1 -Target tray
 
 # Flags:
 #   -Target all|daemon|tray   default: all
-#   -Clean                    wipe build/ + dist/ first (default: incremental;
-#                             keeps PyInstaller analysis cache — daemon rebuild
-#                             drops from ~150s to ~20-30s)
+#   -Clean                    wipe analysis cache + dist output before build.
+#                             Default: incremental; keeps PyInstaller analysis
+#                             cache (daemon rebuild ~150s -> ~20-30s).
+#                             With -Target single (daemon|tray), -Clean is
+#                             per-target — only that target's build/ + dist/
+#                             output gets wiped, the other target's bundle
+#                             stays. -Target all + -Clean nukes both.
 #   -NoZip                    skip archive step (dist\halbot-{daemon,tray}\ only)
 ```
 
@@ -321,6 +342,28 @@ uv run python -m halbot.daemon run
   expected: daemon runs under current user (not LocalSystem), user
   lacks HKLM write until `setup --install` granted it (grant persisted
   on the HKLM key, not the process).
+- **`build.ps1` directly leaves `dist\.deploy-stamp.json` stale.** The
+  fingerprint stamp gets written only by `deploy.ps1` after a successful
+  build phase. Running `scripts\build.ps1` standalone produces correct
+  bundles but doesn't bump the stamp. Subsequent `deploy.ps1 -NoBuild`
+  then aborts with `daemon source fingerprint ... does not match last
+  build ()`. Fix: rerun via `deploy.ps1` (lets it own the stamp), or
+  hand-write `dist\.deploy-stamp.json` with the four current
+  fingerprints from `deploy.ps1 -DryRun` output.
+- **nssm extract cache can go stale.** `build.ps1` caches
+  `%TEMP%\nssm-2.24{,.zip}`. If the extract dir exists but
+  `win64\nssm.exe` is gone (manual cleanup, antivirus quarantine), the
+  build fails with `Cannot find path '...\win64\nssm.exe'`. The fetch
+  stage now tests the exe (not just the dir) and refetches; if you see
+  the error on an old build.ps1, `Remove-Item -Recurse -Force
+  $env:TEMP\nssm-2.24*` and rerun.
+- **Elevated child mirror in `deploy.ps1`** uses `$global:_elevatedLog`,
+  not `$script:`. The shim is invoked from inside `build.ps1`'s child
+  scope, where `$script:` resolves against the inner script and goes
+  null. Native cmd output (uv, pyinstaller, robocopy) bypasses
+  Write-Host; the build call is wrapped in `*>&1 | ForEach-Object` so
+  every line is mirrored to the parent log file via `Write-MirrorLine`.
+  Keep both pieces in sync if you touch the mirror.
 
 ## Explicitly absent
 
