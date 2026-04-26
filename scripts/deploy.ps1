@@ -131,12 +131,18 @@ function Sync-Venv {
 
 function Bounce-Tray {
     if ($NoTrayBounce) { return }
+    # Kill the old pythonw spawn (if any) before relaunching. Match by
+    # path so we don't kill unrelated pythonw processes.
     Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object {
         $_.Path -like "$InstallRoot\.venv\*"
     } | Stop-Process -Force -ErrorAction SilentlyContinue
-    $cmd = Join-Path $InstallRoot "halbot-tray.cmd"
-    if (Test-Path $cmd) {
-        Start-Process -FilePath $cmd -WindowStyle Hidden
+    # pythonw.exe -m tray, NOT the uv [project.gui-scripts] launcher.
+    # uv-trampoline-gui leaks a console window on Win11 (subsystem 2 but
+    # AllocConsole still happens). pythonw direct is clean.
+    $pyw = Join-Path $InstallRoot ".venv\Scripts\pythonw.exe"
+    $src = Join-Path $InstallRoot "src"
+    if (Test-Path $pyw) {
+        Start-Process -FilePath $pyw -ArgumentList @("-m", "tray") -WorkingDirectory $src -WindowStyle Hidden
     }
 }
 

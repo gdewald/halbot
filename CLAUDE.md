@@ -179,7 +179,7 @@ python\                 uv-managed standalone Python 3.12
 src\                    mirror of repo: halbot/, tray/, dashboard/, frontend/dist/,
                         proto/, pyproject.toml, uv.lock
 nssm.exe                service host
-halbot-tray.cmd         pythonw.exe -m tray launcher
+.venv\Scripts\halbot-{daemon,tray,dashboard}.exe   uv-generated entry-point launchers
 ```
 
 Runtime paths: `%ProgramData%\Halbot\logs\halbot.log` (+
@@ -220,7 +220,9 @@ What `install.ps1` does:
 8. Calls `halbot.installer:install()` (via the venv's python.exe) to
    create the NSSM service, grant HKLM + ProgramData ACLs, register
    service-control SDDL ACE, set auto-start.
-9. Writes `halbot-tray.cmd` (one-line `pythonw.exe -m tray` launcher).
+9. Creates Start Menu shortcut **Halbot \ Halbot Tray** ->
+   `.venv\Scripts\halbot-tray.exe` (uv-generated GUI-subsystem launcher;
+   no console window in the call chain).
 10. `Start-Service halbot`.
 
 Storing the Discord token (DPAPI) -- **only on a fresh box**.
@@ -234,7 +236,8 @@ so existing tokens survive:
 Tray launches manually for now (no per-user autostart):
 
 ```powershell
-Start-Process "$env:ProgramFiles\Halbot\halbot-tray.cmd"
+# Start Menu -> Halbot -> Halbot Tray  (or directly:)
+& "$env:ProgramFiles\Halbot\.venv\Scripts\halbot-tray.exe"
 ```
 
 ## Deploy — operational (update existing install)
@@ -343,8 +346,8 @@ uv run python -m halbot.daemon run
 ## Explicitly absent
 
 - Per-user tray autostart (HKCU Run / Startup shortcut). Tray must be
-  relaunched manually each login, or user pins
-  `%ProgramFiles%\Halbot\halbot-tray.cmd` into `shell:startup`.
+  relaunched manually each login, or user copies the Start Menu
+  shortcut into `shell:startup` (or pins it from the Start Menu).
   Elevated installer cannot cleanly target invoking user's HKCU —
   deferred indefinitely.
 - `README.md` describes the current daemon+tray+dashboard architecture

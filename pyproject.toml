@@ -6,9 +6,18 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
+# Console-attached launcher; opens a console for stdout/stderr.
+# NSSM points at halbot-daemon.exe directly. uv-trampoline's console
+# variant works correctly (subsystem 3, inherits/creates a console as
+# expected for a CLI tool).
 halbot-daemon = "halbot.daemon:main"
-halbot-tray = "tray.tray:main"
-halbot-dashboard = "dashboard.app:main"
+
+# No [project.gui-scripts]. uv-trampoline's GUI variant (subsystem 2)
+# allocates a console anyway on Win11 -- a bug in the trampoline that
+# leaks a visible ConsoleWindowClass through pythonw. We bypass it by
+# spawning pythonw.exe -m tray / pythonw.exe -m dashboard.app
+# directly. Start Menu shortcut + deploy.ps1 + tray.py all use that
+# form; no console ever appears.
 
 [dependency-groups]
 daemon = [

@@ -65,16 +65,21 @@ def main() -> int:
         if p is not None and p.poll() is None:
             return  # already running
         try:
-            if getattr(sys, "frozen", False):
-                cmd = [sys.executable, "--dashboard"]
-            else:
-                cmd = [sys.executable, "-m", "dashboard.app"]
-            flags = 0
-            if os.name == "nt":
-                flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
-            _dashboard_proc["p"] = subprocess.Popen(
-                cmd, close_fds=True, creationflags=flags,
-            )
+            # Spawn pythonw.exe -m dashboard.app. NOT the uv
+            # [project.gui-scripts] launcher (that trampoline allocates a
+            # console window on Win11 even though it's subsystem 2).
+            # sys.executable here is pythonw if the tray was launched
+            # correctly; otherwise we swap to pythonw next door.
+            exe = sys.executable
+            if os.name == "nt" and exe.lower().endswith("python.exe"):
+                pyw = exe[:-len("python.exe")] + "pythonw.exe"
+                if os.path.isfile(pyw):
+                    exe = pyw
+            cmd = [exe, "-m", "dashboard.app"]
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE — Windows Terminal creates console hidden
+            _dashboard_proc["p"] = subprocess.Popen(cmd, close_fds=True, startupinfo=si)
         except Exception as e:
             _notify(icon, "Halbot", f"dashboard spawn failed: {e}")
 

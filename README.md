@@ -19,7 +19,9 @@ Halbot runs as plain Python out of an installed venv on Windows:
   view logs, toggle log level, trigger reconnect, unload VRAM-heavy models,
   launch the pywebview **dashboard** (Stats / Logs / Daemon / Config /
   Analytics panels). Pure gRPC client — no bot logic. Launcher:
-  `%ProgramFiles%\Halbot\halbot-tray.cmd` (`pythonw.exe -m tray`).
+  `%ProgramFiles%\Halbot\.venv\Scripts\halbot-tray.exe`
+  (uv-generated [project.gui-scripts] entry-point, no console window).
+  Discoverable via Start Menu \ Halbot \ Halbot Tray.
 
 Both share `%ProgramFiles%\Halbot\.venv\` (one set of deps, no duplication).
 The full repo source mirror lives at `%ProgramFiles%\Halbot\src\`.
@@ -135,8 +137,9 @@ scripts\install.ps1
 # so existing tokens survive a reinstall.
 & "$env:ProgramFiles\Halbot\.venv\Scripts\python.exe" -m halbot.daemon setup --set-secret DISCORD_TOKEN <paste-token-here>
 
-# Launch tray (no autostart this phase — relaunch after each login, or pin to Startup):
-Start-Process "$env:ProgramFiles\Halbot\halbot-tray.cmd"
+# Launch tray (no autostart this phase — relaunch after each login,
+# or pin the Start Menu shortcut into shell:startup):
+& "$env:ProgramFiles\Halbot\.venv\Scripts\halbot-tray.exe"
 ```
 
 ### Update existing install (operational)

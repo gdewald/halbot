@@ -210,12 +210,37 @@ function Grant-SrcAcl {
     & icacls $srcDst /grant "${user}:(OI)(CI)M" /T /C | Out-Null
 }
 
-function Write-TrayLauncher {
-    $cmd = Join-Path $InstallRoot "halbot-tray.cmd"
+function Write-TrayShortcut {
+    # Start Menu shortcut -> pythonw.exe -m tray. We do NOT use uv's
+    # [project.gui-scripts] launcher (halbot-tray.exe) because its
+    # GUI-mode trampoline leaks a visible ConsoleWindowClass on Win11
+    # via the spawned pythonw. pythonw.exe directly is clean.
     $pyw = Join-Path $InstallRoot ".venv\Scripts\pythonw.exe"
-    $body = "@echo off`r`nstart `"`" `"$pyw`" -m tray`r`n"
-    [System.IO.File]::WriteAllText($cmd, $body)
-    Write-Host "[install] tray launcher: $cmd"
+    $src = Join-Path $InstallRoot "src"
+    if (-not (Test-Path $pyw)) {
+        Write-Warning "pythonw.exe missing at $pyw -- skipping shortcut"
+        return
+    }
+    $startMenu = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Halbot"
+    New-Item -ItemType Directory -Force -Path $startMenu | Out-Null
+    $lnk = Join-Path $startMenu "Halbot Tray.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($lnk)
+    $sc.TargetPath       = $pyw
+    $sc.Arguments        = "-m tray"
+    $sc.WorkingDirectory = $src
+    $sc.WindowStyle      = 7    # minimized (tray uses no window anyway)
+    $sc.Description      = "Halbot tray icon + log viewer + dashboard launcher"
+    $sc.Save()
+    Write-Host "[install] start-menu shortcut: $lnk"
+
+    # Clean up legacy launchers from earlier v0.9.x installs.
+    foreach ($legacy in @("halbot-tray.cmd",
+                          ".venv\Scripts\halbot-tray.exe",
+                          ".venv\Scripts\halbot-dashboard.exe")) {
+        $p = Join-Path $InstallRoot $legacy
+        if (Test-Path $p) { Remove-Item -Force $p -ErrorAction Ignore }
+    }
 }
 
 # --- main ---------------------------------------------------------------
@@ -233,7 +258,7 @@ Ensure-Nssm
 Sync-Venv
 Install-Service
 Grant-SrcAcl
-Write-TrayLauncher
+Write-TrayShortcut
 
 if (-not $SkipServiceStart) {
     Write-Host "[install] starting halbot service"
@@ -242,5 +267,6 @@ if (-not $SkipServiceStart) {
 
 Write-Host ""
 Write-Host "[install] done. Service auto-starts at boot."
-Write-Host "[install] tray: $(Join-Path $InstallRoot 'halbot-tray.cmd')"
+Write-Host "[install] tray: Start Menu -> Halbot -> Halbot Tray"
+Write-Host "[install]       (or run $(Join-Path $InstallRoot '.venv\Scripts\halbot-tray.exe') directly)"
 Pop-Location

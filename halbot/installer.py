@@ -36,12 +36,13 @@ def _install_root() -> Path:
 
 
 def _service_exe() -> Path:
-    """Path to the venv's python.exe NSSM points at."""
-    return _install_root() / ".venv" / "Scripts" / "python.exe"
+    """halbot-daemon.exe entry-point launcher (uv sync builds it from
+    [project.scripts] in pyproject.toml -> .venv\\Scripts\\)."""
+    return _install_root() / ".venv" / "Scripts" / "halbot-daemon.exe"
 
 
 def _service_workdir() -> Path:
-    """`AppDirectory` for NSSM (so `python -m halbot.daemon` resolves)."""
+    """`AppDirectory` for NSSM (cwd for the daemon's relative imports)."""
     return _install_root() / "src"
 
 
@@ -131,10 +132,10 @@ def install() -> int:
         print("setup --install requires elevated shell", file=sys.stderr)
         return 1
 
-    py_exe = _service_exe()
+    daemon_exe = _service_exe()
     workdir = _service_workdir()
-    if not py_exe.exists():
-        raise RuntimeError(f"venv python missing: {py_exe} -- run install.ps1 first")
+    if not daemon_exe.exists():
+        raise RuntimeError(f"daemon launcher missing: {daemon_exe} -- run install.ps1 first")
     if not workdir.exists():
         raise RuntimeError(f"src dir missing: {workdir} -- run install.ps1 first")
     nssm = _find_nssm()
@@ -143,8 +144,9 @@ def install() -> int:
     _create_data_dirs()
     _grant_programdata(user)
 
-    # NSSM service create. `python.exe -m halbot.daemon run` from src/.
-    _run([nssm, "install", SERVICE_NAME, str(py_exe), "-m", "halbot.daemon", "run"])
+    # NSSM service create. halbot-daemon.exe = uv-generated entry-point
+    # launcher, runs halbot.daemon:main directly (no -m shim).
+    _run([nssm, "install", SERVICE_NAME, str(daemon_exe), "run"])
     _run([nssm, "set", SERVICE_NAME, "AppDirectory", str(workdir)])
     _run([nssm, "set", SERVICE_NAME, "AppThrottle", "1500"])
     _run([nssm, "set", SERVICE_NAME, "AppRestartDelay", "30000"])

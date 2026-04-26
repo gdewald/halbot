@@ -2,16 +2,46 @@
 
 from __future__ import annotations
 
-import logging
-import threading
-from pathlib import Path
+# Pre-allocate a hidden console BEFORE importing webview / pywebview.
+# pywebview pulls in pythonnet -> CLR, and CLR's Console class calls
+# AllocConsole() if no console exists. On Win11 22H2+ Windows Terminal
+# is the default terminal app and intercepts AllocConsole via COM,
+# creating a visible CASCADIA_HOSTING_WINDOW_CLASS frame.
+#
+# Fix: pre-allocate the console ourselves, hide it, and keep it.
+# CLR finds a console already present and skips AllocConsole entirely.
+# Windows Terminal creates this console hidden because the tray spawns
+# this process with STARTUPINFO.wShowWindow=SW_HIDE (see tray/tray.py).
+def _suppress_console() -> None:
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        u32 = ctypes.windll.user32
+        if not k32.GetConsoleWindow():
+            k32.AllocConsole()
+        hwnd = k32.GetConsoleWindow()
+        if hwnd:
+            u32.ShowWindow(hwnd, 0)  # SW_HIDE
+        # DON'T FreeConsole: CLR reuses this one instead of calling AllocConsole.
+    except Exception:
+        pass
 
-import webview
 
-from .bridge import JsApi
-from .event_stream import EventStream
-from .log_stream import LogStream
-from .paths import web_dir
+_suppress_console()
+
+import logging  # noqa: E402
+import threading  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import webview  # noqa: E402
+
+from .bridge import JsApi  # noqa: E402
+from .event_stream import EventStream  # noqa: E402
+from .log_stream import LogStream  # noqa: E402
+from .paths import web_dir  # noqa: E402
 
 log = logging.getLogger(__name__)
 

@@ -3,6 +3,8 @@
 Routes the optional `--dashboard` flag to the pywebview window
 (spawned from the tray menu in a separate subprocess) and otherwise
 launches the pystray icon.
+
+Always invoked via `pythonw.exe -m tray`.
 """
 
 from __future__ import annotations
