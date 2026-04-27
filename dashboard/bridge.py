@@ -332,7 +332,11 @@ class JsApi:
         return {
             "total_count": int(r.total_count),
             "rows": [
-                {"key": x.key, "count": int(x.count), "last_ts_unix": int(x.last_ts_unix), "label": x.label}
+                {
+                    "key": x.key, "count": int(x.count),
+                    "last_ts_unix": int(x.last_ts_unix),
+                    "label": x.label, "emoji": x.emoji,
+                }
                 for x in r.rows
             ],
         }

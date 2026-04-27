@@ -58,6 +58,11 @@ _discord_state: str = "DISCONNECTED"
 # so without this cache analytics rows fell through to a `sound_<id>`
 # placeholder.
 _default_sound_names: dict[int, str] = {}
+# Sound name → unicode emoji shown next to the name in Discord's UI
+# (🐸 for "quack", 🥁 for "ba dum tss", etc.). Built off the same
+# fetch_soundboard_default_sounds() call. Used by mgmt_server.QueryStats
+# to enrich top-soundboard rows with the real icon.
+_default_sound_emojis: dict[str, str] = {}
 
 
 def _set_discord_state(state: str) -> None:
@@ -265,12 +270,25 @@ async def _refresh_default_sound_names() -> None:
         log.exception("[soundboard] fetch_soundboard_default_sounds failed")
         return
     _default_sound_names.clear()
+    _default_sound_emojis.clear()
     for s in defaults or []:
         sid = int(getattr(s, "id", 0) or 0)
         name = getattr(s, "name", "") or ""
         if sid and name:
             _default_sound_names[sid] = name
-    log.info("[soundboard] cached %d Discord default sound names", len(_default_sound_names))
+        emoji = getattr(s, "emoji", None)
+        emoji_str = ""
+        if emoji is not None:
+            # PartialEmoji or unicode-emoji shim; str(emoji) == "🐸" for
+            # unicode emoji or "<:name:id>" for custom (defaults are all unicode).
+            try:
+                emoji_str = str(emoji)
+            except Exception:
+                emoji_str = ""
+        if name and emoji_str:
+            _default_sound_emojis[name] = emoji_str
+    log.info("[soundboard] cached %d Discord default sound names (%d with emoji)",
+             len(_default_sound_names), len(_default_sound_emojis))
 
 
 def _backfill_default_sound_targets() -> None:

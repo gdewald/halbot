@@ -68,9 +68,15 @@ function Section({ title, right, children }) {
   );
 }
 
-function BarRow({ rank, label, count, max, last, accent, mono, onClick, active, avatar }) {
+function BarRow({ rank, label, count, max, last, accent, mono, onClick, active, avatar, emoji }) {
   const pct = max > 0 ? Math.max(4, (count / max) * 100) : 0;
-  const cols = avatar !== undefined ? '26px 22px 1fr 110px 86px' : '26px 1fr 110px 86px';
+  // Custom Discord emoji like `<:name:id>` would render as raw text in
+  // the avatar slot — drop those and only show plain unicode emoji.
+  // (Looking up the image by id needs the full emoji index; future
+  // refinement can plumb that in.)
+  const renderableEmoji = (emoji && !emoji.startsWith('<')) ? emoji : '';
+  const hasIcon = renderableEmoji || avatar !== undefined;
+  const cols = hasIcon ? '26px 22px 1fr 110px 86px' : '26px 1fr 110px 86px';
   return (
     <div
       onClick={onClick}
@@ -84,7 +90,13 @@ function BarRow({ rank, label, count, max, last, accent, mono, onClick, active, 
       }}
     >
       <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'center' }}>#{rank}</span>
-      {avatar !== undefined && (
+      {renderableEmoji ? (
+        <span style={{
+          fontSize: 14, justifySelf: 'center', flexShrink: 0,
+          lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 18, height: 18,
+        }}>{renderableEmoji}</span>
+      ) : avatar !== undefined && (
         <span style={{
           width: 18, height: 18, borderRadius: '50%',
           background: avatarColor(String(avatar)),
@@ -346,6 +358,7 @@ export function AnalyticsPanel() {
             ) : soundsPg.sliced.map((r, i) => (
               <BarRow key={r.key} rank={soundsPg.page * soundsPg.pageSize + i + 1} label={r.key || '—'}
                 count={r.count} max={maxSound} last={r.last_ts_unix}
+                emoji={r.emoji || ''}
                 accent={T.blurple} mono />
             ))}
             <Pagination

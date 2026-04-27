@@ -215,6 +215,7 @@ message StatsRow {
   int64  count        = 2;
   int64  last_ts_unix = 3;
   string label        = 4;   // resolved display name; only set when group_by=user_id
+  string emoji        = 5;   // sound emoji; only set when group_by=target AND kind=soundboard_play
 }
 
 message QueryStatsReply {

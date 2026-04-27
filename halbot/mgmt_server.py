@@ -390,6 +390,21 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         if request.group_by == "user_id":
             rows = [r for r in rows if str(r["key"] or "").isdigit()
                     and int(r["key"]) > 0]
+        # Build sound-name → emoji map for soundboard_play rows (top
+        # sounds list in Analytics). Two sources: saved_sounds DB
+        # (user uploads) + Discord default sounds (cached at on_ready).
+        sound_emoji: dict[str, str] = {}
+        if request.group_by == "target" and request.kind == "soundboard_play":
+            sound_emoji.update(getattr(_bot, "_default_sound_emojis", {}) or {})
+            try:
+                from . import db as _sounds_db
+                for r in _sounds_db.db_list():
+                    nm = (r.get("name") or "").strip()
+                    em = (r.get("emoji") or "").strip()
+                    if nm and em:
+                        sound_emoji[nm] = em
+            except Exception:
+                log.exception("QueryStats: sounds_db enrichment failed")
         reply = mgmt_pb2.QueryStatsReply(total_count=total)
         # Pre-resolve user_id → display_name via the async resolver, which
         # walks Member/User caches AND falls through to bounded HTTP
@@ -416,8 +431,10 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                     label = stats_publisher._user_label(_bot.client, int(r["key"]), label_cache)
                 except Exception:
                     pass
+            emoji = sound_emoji.get(r["key"], "") if sound_emoji else ""
             reply.rows.add(
-                key=r["key"], count=r["count"], last_ts_unix=r["last_ts_unix"], label=label
+                key=r["key"], count=r["count"], last_ts_unix=r["last_ts_unix"],
+                label=label, emoji=emoji,
             )
         return reply
 

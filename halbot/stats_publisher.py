@@ -361,6 +361,27 @@ def snapshot_stats(client: Any,
     kinds_30d = _query(ts_from=ts_30d, group_by="kind", limit=12)
 
     users_30d["rows"] = _treat_user_rows(client, users_30d.get("rows", []), user_cache)
+    # Enrich top-sounds rows with emoji icons. Same two sources as
+    # mgmt_server.QueryStats: saved_sounds (user uploads) + Discord
+    # built-in defaults (cached at on_ready in bot.py).
+    sound_emoji: Dict[str, str] = {}
+    try:
+        from . import bot as _bot
+        sound_emoji.update(getattr(_bot, "_default_sound_emojis", {}) or {})
+    except Exception:
+        log.exception("[stats_publisher] default-sound emoji map unavailable")
+    try:
+        for r in sounds_db.db_list():
+            nm = (r.get("name") or "").strip()
+            em = (r.get("emoji") or "").strip()
+            if nm and em:
+                sound_emoji[nm] = em
+    except Exception:
+        log.exception("[stats_publisher] saved_sounds emoji enrichment failed")
+    for row in sounds_30d.get("rows", []):
+        em = sound_emoji.get(row.get("key") or "", "")
+        if em:
+            row["emoji"] = em
 
     soundboard = _soundboard_table()
     ref_ids, ref_names = _referenced_emoji_keys(soundboard)
