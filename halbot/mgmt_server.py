@@ -382,6 +382,14 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             group_by=request.group_by,
             limit=request.limit,
         )
+        # Drop unattributed-events row (user_id == 0) from user
+        # leaderboards — those are bot-self / system events with no
+        # Discord user behind them. They rendered as a literal "0" in
+        # the dashboard. Snapshot pipeline already filters them via
+        # `_treat_user_rows`; mirror that here for parity.
+        if request.group_by == "user_id":
+            rows = [r for r in rows if str(r["key"] or "").isdigit()
+                    and int(r["key"]) > 0]
         reply = mgmt_pb2.QueryStatsReply(total_count=total)
         # Pre-resolve user_id → display_name via the async resolver, which
         # walks Member/User caches AND falls through to bounded HTTP
@@ -390,8 +398,7 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         # polls don't re-fire HTTP fetch_member (rate-limit hit).
         label_cache: dict[int, str] = dict(_USER_LABEL_CACHE)
         if request.group_by == "user_id":
-            user_ids = [int(r["key"]) for r in rows
-                        if str(r["key"] or "").isdigit() and int(r["key"]) > 0]
+            user_ids = [int(r["key"]) for r in rows]
             missing = [uid for uid in user_ids if uid not in _USER_LABEL_CACHE]
             if missing:
                 try:
