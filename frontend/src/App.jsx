@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { T } from './tokens.js';
 import { IS_SNAPSHOT } from './bridge.js';
+import { WinTitleBar } from './components/WinTitleBar.jsx';
 import { SidebarWide } from './components/SidebarWide.jsx';
 import { StatusBar } from './components/StatusBar.jsx';
 import { NAV_ITEMS } from './components/navItems.jsx';
@@ -11,6 +12,15 @@ import { StatsPanel } from './panels/Stats.jsx';
 import { AnalyticsPanel } from './panels/Analytics.jsx';
 import { EmojisPanel } from './panels/Emojis.jsx';
 import { SnapshotBanner } from './SnapshotBanner.jsx';
+
+const SUBTITLE = {
+  logs: '· Live log stream',
+  daemon: '· Service control',
+  config: '· Runtime configuration',
+  stats: '· Activity & stats',
+  analytics: '· Interaction analytics',
+  emojis: '· Custom emojis',
+};
 
 // In snapshot mode (public URL) the live/control panels are dead — only the
 // data panels carry signal.
@@ -32,6 +42,7 @@ export function App() {
       width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column',
       background: T.bg, overflow: 'hidden',
     }}>
+      {!IS_SNAPSHOT && <WinTitleBar title="halbot" subtitle={SUBTITLE[panel]} />}
       {IS_SNAPSHOT && <SnapshotBanner />}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
         <SidebarWide active={panel} onChange={onChange}

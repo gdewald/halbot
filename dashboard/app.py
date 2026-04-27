@@ -45,40 +45,6 @@ from .paths import web_dir  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-
-def _apply_dark_titlebar(window) -> None:
-    """Force DWM immersive-dark mode on the window's title bar.
-
-    Win11 22H2+ paints the native title bar dark when this attribute is set.
-    Earlier Win10 builds used attr 19 (the pre-release number); we try both
-    for compatibility. No-op if dwmapi rejects the attribute.
-    """
-    import sys
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        native = getattr(window, "native", None)
-        hwnd = int(getattr(native, "Handle", 0)) if native is not None else 0
-        if not hwnd:
-            return
-        dwm = ctypes.windll.dwmapi
-        value = ctypes.c_int(1)
-        for attr in (20, 19):  # 20: DWMWA_USE_IMMERSIVE_DARK_MODE (22H2+)
-            try:
-                dwm.DwmSetWindowAttribute(
-                    hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)
-                )
-            except Exception:
-                pass
-        # Force non-client repaint so the bar updates without a resize.
-        u32 = ctypes.windll.user32
-        SWP_NOMOVE, SWP_NOSIZE, SWP_FRAMECHANGED = 0x0002, 0x0001, 0x0020
-        u32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED)
-    except Exception:
-        pass
-
-
 _window_lock = threading.Lock()
 _window = None
 
@@ -101,21 +67,21 @@ def open_window() -> None:
         if not index.exists():
             raise FileNotFoundError(f"no dashboard HTML found at {index}")
 
-        # Native chrome (frameless=False) so the user gets resize edges and
-        # system min/max/close buttons. EdgeChromium frameless windows have
-        # no WM_NCHITTEST handling in pywebview 6.x -- they can't be resized
-        # at all. We force DWM immersive-dark on the HWND below so the
-        # native title bar paints dark instead of the default white.
+        # Frameless: no native chrome (the white title bar looks out of
+        # place against the dark UI). Trade-off: pywebview 6.x has no
+        # WM_NCHITTEST hook for frameless EdgeChromium windows, so the
+        # window can't be edge-resized. Custom WinTitleBar provides the
+        # min/max/close buttons via js_api.
         window = webview.create_window(
             title="halbot",
             url=index.as_uri(),
             js_api=api,
             width=1080, height=680,
             min_size=(720, 480),
-            resizable=True,
+            frameless=True,
+            easy_drag=True,
             background_color="#0c0c0f",
         )
-        window.events.shown += lambda: _apply_dark_titlebar(window)
         api.bind_window(window)
         _window = window
 
