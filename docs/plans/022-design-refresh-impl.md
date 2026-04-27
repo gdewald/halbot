@@ -1,5 +1,23 @@
 # 022 — Design refresh: dashboard + share Stats/Analytics
 
+## Status: shipped 2026-04-26
+
+Commits landed on main:
+
+- `701e533` feat(proto): expand Health with pid/rss/cpu/guilds
+- `dcaaa4e` feat(stats): daemon health banner + missing-data drawer
+- `4314c45` feat(stats): wake-word history table
+- `fce1004` feat(analytics): chrome refresh — identity header + avatars
+- `bcbd495` fix(dashboard): native chrome for resize edges + default to wide sidebar
+  (orthogonal to plan but discovered during impl; merged here)
+- `3baea56` feat(daemon): single-source stats from Health + Guilds card
+- `6bb4b1a` feat(logs): multi-select level capsule
+
+Commit 7 (Config MODIFIED badge + dirty tint) was a no-op — the
+existing Config panel already had the badge, dirty row tint, and
+dirty `●` dot. Plan complete.
+
+
 ## Problem
 
 User-supplied mockup (`Downloads/halbot(1).html`, ~1360 lines) is a refreshed
