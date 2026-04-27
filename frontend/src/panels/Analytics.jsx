@@ -44,6 +44,17 @@ function shortUser(id) {
   return `…${s.slice(-4)}`;
 }
 
+const AVATAR_COLORS = ['#5865F2', '#23d18b', '#faa61a', '#eb459e', '#4fc3f7'];
+function avatarColor(s) {
+  let h = 0;
+  for (let i = 0; i < (s || '').length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+}
+function avatarLetter(s) {
+  const cleaned = String(s || '').replace(/[^a-z0-9]/gi, '');
+  return cleaned ? cleaned.charAt(0).toUpperCase() : '?';
+}
+
 function parseMeta(raw) {
   if (!raw) return null;
   try { return JSON.parse(raw); } catch { return null; }
@@ -87,13 +98,14 @@ function Section({ title, right, children }) {
   );
 }
 
-function BarRow({ rank, label, count, max, last, accent, mono, onClick, active }) {
+function BarRow({ rank, label, count, max, last, accent, mono, onClick, active, avatar }) {
   const pct = max > 0 ? Math.max(4, (count / max) * 100) : 0;
+  const cols = avatar !== undefined ? '26px 22px 1fr 110px 86px' : '26px 1fr 110px 86px';
   return (
     <div
       onClick={onClick}
       style={{
-        display: 'grid', gridTemplateColumns: '26px 1fr 110px 86px',
+        display: 'grid', gridTemplateColumns: cols,
         alignItems: 'center', gap: 8, padding: '6px 12px',
         borderBottom: `1px solid ${T.border}`,
         cursor: onClick ? 'pointer' : 'default',
@@ -102,6 +114,15 @@ function BarRow({ rank, label, count, max, last, accent, mono, onClick, active }
       }}
     >
       <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim, textAlign: 'center' }}>#{rank}</span>
+      {avatar !== undefined && (
+        <span style={{
+          width: 18, height: 18, borderRadius: '50%',
+          background: avatarColor(String(avatar)),
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          color: '#fff', fontSize: 9, fontWeight: 700, fontFamily: 'DM Sans',
+          justifySelf: 'center', flexShrink: 0,
+        }}>{avatarLetter(avatar)}</span>
+      )}
       <span style={{
         fontFamily: mono ? 'JetBrains Mono' : 'DM Sans',
         fontSize: 12, color: T.text, overflow: 'hidden',
@@ -295,6 +316,18 @@ export function AnalyticsPanel() {
         pointerEvents: empty ? 'none' : 'auto',
       }}>
 
+        {/* Identity header — distinguishes Analytics from Stats */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>
+            Who's using halbot, what they're doing
+          </div>
+          <div style={{ fontSize: 11, color: T.sub, marginTop: 3, fontFamily: 'JetBrains Mono' }}>
+            {IS_SNAPSHOT
+              ? 'Aggregated event history · static 30-day snapshot'
+              : 'Aggregated event history · click any pill to filter'}
+          </div>
+        </div>
+
         {/* Toolbar — window picker + filter affordances are tray-only.
              Snapshot is frozen at 30d and has no per-row data to filter against. */}
         {!IS_SNAPSHOT && (
@@ -404,14 +437,17 @@ export function AnalyticsPanel() {
           }}>
             {topUsers.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity in window</div>
-            ) : topUsers.rows.map((r, i) => (
+            ) : topUsers.rows.map((r, i) => {
+              const label = IS_SNAPSHOT ? (r.key || '—') : `user ${shortUser(r.key)}`;
+              return (
               <BarRow key={`${r.key}-${i}`} rank={i + 1}
-                label={IS_SNAPSHOT ? (r.key || '—') : `user ${shortUser(r.key)}`}
+                label={label} avatar={label}
                 count={r.count} max={maxUser} last={r.last_ts_unix}
-                accent={T.green} mono
+                accent={T.green} mono={!IS_SNAPSHOT}
                 onClick={IS_SNAPSHOT ? undefined : () => toggleUser(r.key)}
                 active={!IS_SNAPSHOT && String(userFilter) === String(r.key)} />
-            ))}
+              );
+            })}
           </div>
         </Section>
 
