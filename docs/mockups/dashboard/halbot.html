@@ -779,6 +779,17 @@ function StatsPanel(){
             <span style={{fontFamily:'JetBrains Mono',fontSize:10,color:T.dim,textAlign:'right'}}>{s.size}</span>
           </div>
         ))}
+        {/* pagination footer — 10/page, static demo of page 1 of 3 */}
+        <div style={{display:'flex',alignItems:'center',gap:10,padding:'8px 14px',
+          borderTop:`1px solid ${T.border}`,fontSize:10,color:T.dim,fontFamily:'JetBrains Mono'}}>
+          <span>1–10 of 24</span>
+          <div style={{flex:1}}/>
+          <button disabled style={{background:'transparent',border:`1px solid ${T.border}`,color:T.dim,
+            borderRadius:5,padding:'3px 9px',fontFamily:'JetBrains Mono',fontSize:11,opacity:0.4}}>prev</button>
+          <span style={{color:T.sub}}>1 / 3</span>
+          <button style={{background:'transparent',border:`1px solid ${T.border}`,color:T.sub,
+            borderRadius:5,padding:'3px 9px',fontFamily:'JetBrains Mono',fontSize:11,cursor:'pointer'}}>next</button>
+        </div>
       </div>
 
       {/* ── Voice Playback ────────────────────────── */}

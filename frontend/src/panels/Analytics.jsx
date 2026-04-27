@@ -1,14 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { T } from '../tokens.js';
 import { b, IS_SNAPSHOT } from '../bridge.js';
+import { Pagination, usePagination } from './stats/Pagination.jsx';
 
 const WINDOWS = [
   { key: '24h', label: '24h', seconds: 86400 },
   { key: '7d',  label: '7 days', seconds: 7 * 86400 },
   { key: '30d', label: '30 days', seconds: 30 * 86400 },
 ];
-const MAX_FEED = 200;
-
 // kind → color / emoji. Fallback blurple/•.
 const KIND_META = {
   soundboard_play: { c: T.blurple, e: '🔊' },
@@ -32,11 +31,6 @@ function fmtRelative(unix) {
   return `${Math.floor(s/86400)}d ago`;
 }
 
-function fmtTime(ns) {
-  const ms = Math.floor(ns / 1_000_000);
-  return new Date(ms).toLocaleTimeString([], { hour12: false });
-}
-
 function shortUser(id) {
   if (!id) return '';
   const s = String(id);
@@ -53,30 +47,6 @@ function avatarColor(s) {
 function avatarLetter(s) {
   const cleaned = String(s || '').replace(/[^a-z0-9]/gi, '');
   return cleaned ? cleaned.charAt(0).toUpperCase() : '?';
-}
-
-function parseMeta(raw) {
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-function metaSummary(meta, kind) {
-  if (!meta) return '';
-  const parts = [];
-  if (typeof meta.latency_ms === 'number') parts.push(`${meta.latency_ms}ms`);
-  if (typeof meta.bytes === 'number' && meta.bytes > 0) {
-    const kb = meta.bytes / 1024;
-    parts.push(kb >= 1024 ? `${(kb/1024).toFixed(1)}MB` : `${Math.round(kb)}KB`);
-  }
-  if (typeof meta.chars === 'number' && kind === 'tts_request') parts.push(`${meta.chars}ch`);
-  if (typeof meta.audio_seconds === 'number' && kind === 'stt_request') parts.push(`${meta.audio_seconds}s`);
-  if (typeof meta.lock_wait_ms === 'number' && meta.lock_wait_ms > 0) parts.push(`wait=${meta.lock_wait_ms}ms`);
-  if (typeof meta.concurrency_peak === 'number' && meta.concurrency_peak > 1) parts.push(`peak=${meta.concurrency_peak}`);
-  if (meta.trigger) parts.push(meta.trigger);
-  if (meta.source) parts.push(meta.source);
-  if (meta.status && meta.status !== 'ok') parts.push(meta.status);
-  if (typeof meta.action_count === 'number' && meta.action_count !== 1) parts.push(`×${meta.action_count}`);
-  return parts.join(' · ');
 }
 
 function Section({ title, right, children }) {
@@ -213,10 +183,7 @@ export function AnalyticsPanel() {
   const [topUsers,  setTopUsers]  = useState({ total: 0, rows: [] });
   const [topCmds,   setTopCmds]   = useState({ total: 0, rows: [] });
   const [kindMix,   setKindMix]   = useState({ total: 0, rows: [] });
-  const [feed,      setFeed]      = useState([]);
   const [loaded,    setLoaded]    = useState(false);
-
-  const feedRef = useRef([]);
 
   const windowSec = useMemo(
     () => (WINDOWS.find(w => w.key === windowKey) || WINDOWS[2]).seconds,
@@ -256,44 +223,16 @@ export function AnalyticsPanel() {
     return () => { cancelled = true; clearInterval(iv); };
   }, [tsFrom, kindFilter, userFilter]);
 
-  // Live feed (skipped in snapshot mode — there is no event stream there).
-  useEffect(() => {
-    if (IS_SNAPSHOT) return;
-    let cancelled = false;
-    let iv;
-    (async () => {
-      try {
-        const back = await b.backlogEvents(100);
-        if (!cancelled && Array.isArray(back) && back.length) {
-          feedRef.current = back.slice(-MAX_FEED);
-          setFeed(feedRef.current.slice().reverse());
-        }
-      } catch { /* stub */ }
-      iv = setInterval(async () => {
-        try {
-          const batch = await b.popEventBatch(100);
-          if (!cancelled && Array.isArray(batch) && batch.length) {
-            feedRef.current = feedRef.current.concat(batch).slice(-MAX_FEED);
-            setFeed(feedRef.current.slice().reverse());
-          }
-        } catch { /* stub */ }
-      }, 500);
-    })();
-    return () => { cancelled = true; if (iv) clearInterval(iv); };
-  }, []);
-
   const maxSound = Math.max(1, ...topSounds.rows.map(r => r.count));
   const maxUser  = Math.max(1, ...topUsers.rows.map(r => r.count));
   const maxCmd   = Math.max(1, ...topCmds.rows.map(r => r.count));
   const totalEvents = kindMix.total;
 
-  const empty = loaded && totalEvents === 0 && !kindFilter && !userFilter;
+  const soundsPg = usePagination(topSounds.rows, 10);
+  const usersPg  = usePagination(topUsers.rows, 10);
+  const cmdsPg   = usePagination(topCmds.rows, 10);
 
-  const feedFiltered = useMemo(() => feed.filter(ev => {
-    if (kindFilter && ev.kind !== kindFilter) return false;
-    if (userFilter && String(ev.user_id) !== String(userFilter)) return false;
-    return true;
-  }), [feed, kindFilter, userFilter]);
+  const empty = loaded && totalEvents === 0 && !kindFilter && !userFilter;
 
   const toggleKind = useCallback((k) => {
     setKindFilter(prev => prev === k ? '' : k);
@@ -400,15 +339,20 @@ export function AnalyticsPanel() {
         <Section title={`Top soundboard plays — ${windowKey}`}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, overflow: 'auto', maxHeight: 360,
+            borderRadius: 9, overflow: 'hidden',
           }}>
             {topSounds.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no soundboard plays in window</div>
-            ) : topSounds.rows.map((r, i) => (
-              <BarRow key={r.key} rank={i + 1} label={r.key || '—'}
+            ) : soundsPg.sliced.map((r, i) => (
+              <BarRow key={r.key} rank={soundsPg.page * soundsPg.pageSize + i + 1} label={r.key || '—'}
                 count={r.count} max={maxSound} last={r.last_ts_unix}
                 accent={T.blurple} mono />
             ))}
+            <Pagination
+              page={soundsPg.page} totalPages={soundsPg.totalPages}
+              onChange={soundsPg.setPage}
+              totalRows={soundsPg.total} pageSize={soundsPg.pageSize}
+            />
           </div>
         </Section>
 
@@ -416,15 +360,20 @@ export function AnalyticsPanel() {
         <Section title={`Top commands invoked — ${windowKey}`}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, overflow: 'auto', maxHeight: 360,
+            borderRadius: 9, overflow: 'hidden',
           }}>
             {topCmds.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no commands invoked in window</div>
-            ) : topCmds.rows.map((r, i) => (
-              <BarRow key={r.key} rank={i + 1} label={r.key || 'unknown'}
+            ) : cmdsPg.sliced.map((r, i) => (
+              <BarRow key={r.key} rank={cmdsPg.page * cmdsPg.pageSize + i + 1} label={r.key || 'unknown'}
                 count={r.count} max={maxCmd} last={r.last_ts_unix}
                 accent={T.cyan} mono />
             ))}
+            <Pagination
+              page={cmdsPg.page} totalPages={cmdsPg.totalPages}
+              onChange={cmdsPg.setPage}
+              totalRows={cmdsPg.total} pageSize={cmdsPg.pageSize}
+            />
           </div>
         </Section>
 
@@ -434,14 +383,14 @@ export function AnalyticsPanel() {
                  right={!IS_SNAPSHOT && <span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to drill down</span>}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, overflow: 'auto', maxHeight: 360,
+            borderRadius: 9, overflow: 'hidden',
           }}>
             {topUsers.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity in window</div>
-            ) : topUsers.rows.map((r, i) => {
+            ) : usersPg.sliced.map((r, i) => {
               const label = IS_SNAPSHOT ? (r.key || '—') : (r.label || shortUser(r.key) || '—');
               return (
-              <BarRow key={`${r.key}-${i}`} rank={i + 1}
+              <BarRow key={`${r.key}-${i}`} rank={usersPg.page * usersPg.pageSize + i + 1}
                 label={label} avatar={label}
                 count={r.count} max={maxUser} last={r.last_ts_unix}
                 accent={T.green} mono={!IS_SNAPSHOT}
@@ -449,59 +398,13 @@ export function AnalyticsPanel() {
                 active={!IS_SNAPSHOT && String(userFilter) === String(r.key)} />
               );
             })}
+            <Pagination
+              page={usersPg.page} totalPages={usersPg.totalPages}
+              onChange={usersPg.setPage}
+              totalRows={usersPg.total} pageSize={usersPg.pageSize}
+            />
           </div>
         </Section>
-
-        {/* Live feed — only meaningful when wired to a live event stream. */}
-        {!IS_SNAPSHOT && <Section title={`Live event feed${filterLabel ? ` (filtered: ${filterLabel})` : ''}`}
-                 right={<span style={{ fontSize: 9, color: T.dim, fontFamily: 'JetBrains Mono' }}>
-                   {feedFiltered.length}/{feed.length}
-                 </span>}>
-          <div style={{
-            background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, maxHeight: 360, overflow: 'auto',
-          }}>
-            {feedFiltered.length === 0 ? (
-              <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>
-                {feed.length === 0 ? 'waiting for events…' : 'no events match current filter'}
-              </div>
-            ) : feedFiltered.map((ev, i) => {
-              const meta = parseMeta(ev.meta_json);
-              const metaLine = metaSummary(meta, ev.kind);
-              return (
-                <div key={`${ev.ts_ns}-${i}`} style={{
-                  display: 'grid', gridTemplateColumns: '68px 22px 128px 1fr 130px 80px',
-                  alignItems: 'center', gap: 8, padding: '5px 12px',
-                  borderBottom: i < feedFiltered.length - 1 ? `1px solid ${T.border}` : 'none',
-                  fontSize: 11,
-                }}>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.dim }}>{fmtTime(ev.ts_ns)}</span>
-                  <span style={{ textAlign: 'center' }}>{kindEmoji(ev.kind)}</span>
-                  <span style={{ fontFamily: 'JetBrains Mono', color: kindColor(ev.kind), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
-                        onClick={() => toggleKind(ev.kind)}
-                        title={`Filter to ${ev.kind}`}>
-                    {ev.kind}
-                  </span>
-                  <span style={{ color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {ev.target || <span style={{ color: T.dim, fontStyle: 'italic' }}>—</span>}
-                  </span>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: T.sub, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {metaLine}
-                  </span>
-                  <span
-                    onClick={() => ev.user_id && toggleUser(ev.user_id)}
-                    title={ev.user_id ? `Filter to user ${ev.user_id}` : ''}
-                    style={{
-                      fontFamily: 'JetBrains Mono', fontSize: 10, color: T.sub,
-                      textAlign: 'right', cursor: ev.user_id ? 'pointer' : 'default',
-                    }}>
-                    {ev.user_id ? (ev.user_label || shortUser(ev.user_id)) : ''}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </Section>}
 
         <div style={{ height: 8 }} />
       </div>

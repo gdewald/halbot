@@ -5,6 +5,7 @@ import { StatCard, MiniBar, SectionHeader } from './stats/StatCard.jsx';
 import { LatencyCard } from './stats/LatencyCard.jsx';
 import { HealthBanner } from './stats/HealthBanner.jsx';
 import { MissingDataDrawer } from './stats/MissingDataDrawer.jsx';
+import { Pagination, usePagination } from './stats/Pagination.jsx';
 
 const dash = (v) => (v ? v : '—');
 
@@ -176,6 +177,8 @@ export function StatsPanel() {
   const tts = stats.tts;
   const llm = stats.llm;
 
+  const sbPagination = usePagination(displayRows, 10);
+
   const falsePct = ww.detections_today > 0
     ? `${((ww.false_positives_today / ww.detections_today) * 100).toFixed(1)}%`
     : '—';
@@ -200,7 +203,7 @@ export function StatsPanel() {
           <StatCard label="Last saved"         value={fmtRelative(sb.last_sync_unix)} sub={sb.last_sync_unix ? new Date(sb.last_sync_unix * 1000).toLocaleString() : 'no data'} accent={T.cyan} />
           <StatCard label="New last 24h"       value={sb.new_since_last}    sub="rows added"             accent={T.green} />
         </div>
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, marginBottom: 18, display: 'flex', flexDirection: 'column', maxHeight: 460 }}>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, marginBottom: 18, display: 'flex', flexDirection: 'column' }}>
           <div style={{
             padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
             display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px', gap: 8,
@@ -210,12 +213,12 @@ export function StatsPanel() {
             <span /><span>Name</span><span>Metadata</span><span>Plays (30d)</span><span>Last played</span>
             <span style={{ textAlign: 'right' }}>Size</span>
           </div>
-          <div style={{ overflow: 'auto', flex: 1 }}>
+          <div>
           {sounds.length === 0 ? (
             <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>
               no soundboard rows — save some sounds first
             </div>
-          ) : displayRows.slice(0, 30).map(({ row: s, depth }, i, arr) => {
+          ) : sbPagination.sliced.map(({ row: s, depth }, i, arr) => {
             const isChild = depth > 0;
             const effects = isChild ? parseEffects(s.effects) : '';
             const metaDisplay = s.metadata
@@ -224,7 +227,7 @@ export function StatsPanel() {
               <div key={s.id || s.name || i} style={{
                 display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px',
                 alignItems: 'center', gap: 8, padding: '6px 14px',
-                borderBottom: i < Math.min(arr.length, 30) - 1 ? `1px solid ${T.border}` : 'none',
+                borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : 'none',
                 background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)',
               }}>
                 <span style={{ fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}>
@@ -249,6 +252,11 @@ export function StatsPanel() {
             );
           })}
           </div>
+          <Pagination
+            page={sbPagination.page} totalPages={sbPagination.totalPages}
+            onChange={sbPagination.setPage}
+            totalRows={sbPagination.total} pageSize={sbPagination.pageSize}
+          />
         </div>
 
         {/* Voice playback. */}
