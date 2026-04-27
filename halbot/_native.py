@@ -1,14 +1,16 @@
 """Native-binary discovery for voice path: libopus + ffmpeg.exe.
 
-Frozen PyInstaller bundle ships pyav's DLLs under _internal/av.libs/ with
-content-hash-suffixed filenames (e.g. libopus-0-fb6521a3...dll). discord.py's
-auto-load (ctypes.util.find_library("opus")) never sees them, so inbound
-voice-recv blows up with OpusNotLoaded on the first RTP packet.
+Post-PyInstaller (v0.9+) the daemon runs out of an installed venv at
+%ProgramFiles%\\Halbot\\.venv\\. discord.py bundles libopus-0.x64.dll
+under discord/bin/, and pyav vendors its own under site-packages/av.libs/
+with content-hash-suffixed filenames (libopus-0-<hash>.dll). Neither is
+on the LocalSystem PATH, so ctypes.util.find_library("opus") misses both
+and inbound voice-recv blows up with OpusNotLoaded on the first RTP packet.
 
-ffmpeg.exe is not bundled at all — pyav vendors the codec DLLs but not the
-CLI wrapper. Under NSSM/LocalSystem PATH omits the installing user's
-WinGet shim dir, so discord.py's FFmpegPCMAudio subprocess spawn fails
-with "ffmpeg was not found."
+ffmpeg.exe is not vendored anywhere -- pyav ships codec DLLs but not the
+CLI. NSSM/LocalSystem PATH omits the installing user's WinGet shim dir,
+so discord.py's FFmpegPCMAudio subprocess spawn fails with
+"ffmpeg was not found."
 
 Both resolvers cache their result. Safe to call repeatedly.
 """
@@ -32,6 +34,11 @@ def _bundle_roots() -> list[Path]:
     exe_dir = Path(sys.executable).parent
     roots.append(exe_dir)
     roots.append(exe_dir / "_internal")
+    try:
+        import sysconfig
+        roots.append(Path(sysconfig.get_paths()["purelib"]))
+    except Exception:
+        pass
     return [r for r in roots if r.is_dir()]
 
 
@@ -50,21 +57,28 @@ def load_opus() -> bool:
         _opus_loaded = True
         return True
 
-    candidates: list[str] = []
-    for root in _bundle_roots():
-        candidates += glob.glob(str(root / "av.libs" / "libopus-0*.dll"))
-        candidates += glob.glob(str(root / "libopus-0*.dll"))
-        candidates += glob.glob(str(root / "libopus.dll"))
-
-    # Source run: also let discord.py's own find_library fire first.
+    # First: let discord.opus's own default loader fire. On Windows it
+    # picks discord/bin/libopus-0.x{32,64}.dll based on Python bitness --
+    # the right thing in a venv install.
     try:
-        _opus.load_opus("opus")
+        if hasattr(_opus, "_load_default"):
+            _opus._load_default()
+        else:
+            _opus.load_opus("opus")
         if _opus.is_loaded():
             _opus_loaded = True
             log.info("[opus] loaded via discord.opus default resolution")
             return True
     except Exception:
         pass
+
+    candidates: list[str] = []
+    for root in _bundle_roots():
+        candidates += glob.glob(str(root / "av.libs" / "libopus-0*.dll"))
+        candidates += glob.glob(str(root / "discord" / "bin" / "libopus-0.x64.dll"))
+        candidates += glob.glob(str(root / "discord" / "bin" / "libopus-0.x86.dll"))
+        candidates += glob.glob(str(root / "libopus-0*.dll"))
+        candidates += glob.glob(str(root / "libopus.dll"))
 
     for path in candidates:
         try:
