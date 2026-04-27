@@ -438,7 +438,7 @@ export function AnalyticsPanel() {
             {topUsers.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity in window</div>
             ) : topUsers.rows.map((r, i) => {
-              const label = IS_SNAPSHOT ? (r.key || '—') : `user ${shortUser(r.key)}`;
+              const label = IS_SNAPSHOT ? (r.key || '—') : (r.label || shortUser(r.key) || '—');
               return (
               <BarRow key={`${r.key}-${i}`} rank={i + 1}
                 label={label} avatar={label}
@@ -494,7 +494,7 @@ export function AnalyticsPanel() {
                       fontFamily: 'JetBrains Mono', fontSize: 10, color: T.sub,
                       textAlign: 'right', cursor: ev.user_id ? 'pointer' : 'default',
                     }}>
-                    {ev.user_id ? shortUser(ev.user_id) : ''}
+                    {ev.user_id ? (ev.user_label || shortUser(ev.user_id)) : ''}
                   </span>
                 </div>
               );

@@ -192,6 +192,7 @@ message Event {
   uint64 user_id       = 4;
   string target        = 5;   // sound name / command / model, empty if n/a
   string meta_json     = 6;   // free-form, may be empty
+  string user_label    = 7;   // resolved display name; empty if user_id=0 or unresolved
 }
 
 message QueryStatsRequest {
@@ -208,6 +209,7 @@ message StatsRow {
   string key          = 1;   // grouping key (target/user_id/kind as string)
   int64  count        = 2;
   int64  last_ts_unix = 3;
+  string label        = 4;   // resolved display name; only set when group_by=user_id
 }
 
 message QueryStatsReply {

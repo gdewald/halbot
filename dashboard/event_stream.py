@@ -53,6 +53,7 @@ class EventStream:
                             "kind": ev.kind,
                             "guild_id": int(ev.guild_id),
                             "user_id": int(ev.user_id),
+                            "user_label": ev.user_label,
                             "target": ev.target,
                             "meta_json": ev.meta_json,
                         }

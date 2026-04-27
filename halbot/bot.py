@@ -285,6 +285,15 @@ async def on_voice_channel_effect(effect: "discord.VoiceChannelEffect") -> None:
                             name = getattr(s, "name", "") or ""
                 except Exception:
                     pass
+        if not name and guild is not None and sound_id:
+            try:
+                await guild.fetch_soundboard_sounds()
+                for s in getattr(guild, "soundboard_sounds", []) or []:
+                    if getattr(s, "id", 0) == sound_id:
+                        name = getattr(s, "name", "") or ""
+                        break
+            except Exception:
+                pass
         analytics.record(
             "soundboard_play",
             user_id=user_id,

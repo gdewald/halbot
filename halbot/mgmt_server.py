@@ -359,7 +359,7 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         )
 
     async def QueryStats(self, request, context):
-        from . import analytics
+        from . import analytics, stats_publisher, bot as _bot
         total, rows = await asyncio.to_thread(
             analytics.query_stats,
             kind=request.kind,
@@ -371,9 +371,16 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             limit=request.limit,
         )
         reply = mgmt_pb2.QueryStatsReply(total_count=total)
+        label_cache: dict[int, str] = {}
         for r in rows:
+            label = ""
+            if request.group_by == "user_id":
+                try:
+                    label = stats_publisher._user_label(_bot.client, int(r["key"]), label_cache)
+                except Exception:
+                    pass
             reply.rows.add(
-                key=r["key"], count=r["count"], last_ts_unix=r["last_ts_unix"]
+                key=r["key"], count=r["count"], last_ts_unix=r["last_ts_unix"], label=label
             )
         return reply
 
@@ -392,7 +399,7 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         return reply
 
     async def StreamEvents(self, request, context):
-        from . import analytics
+        from . import analytics, stats_publisher, bot as _bot
         kind = request.kind or ""
         uid = int(request.user_id or 0)
         q = analytics.subscribe(
@@ -400,6 +407,7 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             kind=kind,
             user_id=uid,
         )
+        label_cache: dict[int, str] = {}
         try:
             while True:
                 rec = await q.get()
@@ -407,6 +415,12 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                     continue
                 if uid and rec.user_id != uid:
                     continue
+                user_label = ""
+                if rec.user_id:
+                    try:
+                        user_label = stats_publisher._user_label(_bot.client, rec.user_id, label_cache)
+                    except Exception:
+                        pass
                 yield mgmt_pb2.Event(
                     ts_unix_nanos=rec.ts_ns,
                     kind=rec.kind,
@@ -414,6 +428,7 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                     user_id=rec.user_id,
                     target=rec.target,
                     meta_json=rec.meta_json,
+                    user_label=user_label,
                 )
         finally:
             analytics.unsubscribe(q)
