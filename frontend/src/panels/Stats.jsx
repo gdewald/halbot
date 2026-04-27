@@ -8,7 +8,7 @@ const REFRESH_MS = 10_000;
 const EMPTY_STATS = {
   mock: true,
   soundboard: { sounds_backed_up: 0, storage_bytes: 0, last_sync_unix: 0, new_since_last: 0 },
-  voice_playback: { played_today: 0, played_all_time: 0, session_seconds_today: 0, avg_response_ms: 0 },
+  voice_playback: { played_today: 0, played_all_time: 0, session_seconds_today: 0 },
   wake_word: { detections_today: 0, detections_all_time: 0, false_positives_today: 0, avg_join_latency_ms: 0 },
   stt: { avg_ms: 0, p95_ms: 0, count_today: 0 },
   tts: { avg_ms: 0, p95_ms: 0, count_today: 0 },
@@ -29,10 +29,12 @@ function fmtRelative(unix) {
 }
 
 function fmtBytes(n) {
-  if (!n) return '0';
+  if (!n) return { value: '0', unit: 'B' };
   const mb = n / (1024 * 1024);
-  if (mb >= 1) return `${mb.toFixed(1)}`;
-  return `${(n / 1024).toFixed(0)}`;
+  if (mb >= 1) return { value: mb.toFixed(1), unit: 'MB' };
+  const kb = n / 1024;
+  if (kb >= 1) return { value: kb.toFixed(0), unit: 'KB' };
+  return { value: String(n), unit: 'B' };
 }
 
 function fmtByteCol(n) {
@@ -187,7 +189,9 @@ export function StatsPanel() {
         <SectionHeader label="Soundboard Backup" icon="💾" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 12 }}>
           <StatCard label="Sounds backed up"   value={sb.sounds_backed_up}  sub="in saved_sounds table"   accent={T.blurple} />
-          <StatCard label="Storage used"       value={fmtBytes(sb.storage_bytes)} unit="MB" sub="audio blob total"    accent={T.blurple} />
+          {(() => { const sz = fmtBytes(sb.storage_bytes); return (
+            <StatCard label="Storage used"     value={sz.value} unit={sz.unit} sub="audio blob total" accent={T.blurple} />
+          ); })()}
           <StatCard label="Last saved"         value={fmtRelative(sb.last_sync_unix)} sub={sb.last_sync_unix ? new Date(sb.last_sync_unix * 1000).toLocaleString() : 'no data'} accent={T.cyan} />
           <StatCard label="New last 24h"       value={sb.new_since_last}    sub="rows added"             accent={T.green} />
         </div>
@@ -239,13 +243,14 @@ export function StatsPanel() {
           })}
         </div>
 
-        {/* Voice playback */}
+        {/* Voice playback. "Avg response time" was a duplicate of TTS avg
+            mislabeled "today" — drop it until a true voice round-trip metric
+            is wired. */}
         <SectionHeader label="Voice Playback" icon="🔊" />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 18 }}>
           <StatCard label="Sounds played today" value={vp.played_today}    sub="soundboard_play events"  accent={T.cyan} />
           <StatCard label="Total all-time"      value={vp.played_all_time.toLocaleString()}  sub="since analytics start"   accent={T.cyan} />
           <StatCard label="Session time today"  value={fmtDuration(vp.session_seconds_today)} sub="voice_join proxy × 60s"  accent={T.yellow} />
-          <StatCard label="Avg response time"   value={vp.avg_response_ms} unit="ms" sub="avg TTS latency today" accent={T.green} />
         </div>
 
         {/* Wake word */}
@@ -260,7 +265,7 @@ export function StatsPanel() {
         {/* STT */}
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub="not yet emitted" />
+          <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub={stt.avg_ms ? `30d sample · ${stt.count_today} today` : 'not yet emitted'} />
           <LatencyCard label="Chunk processing time" avg={0}          p95={0}          unit="ms" color={T.cyan} sub="not yet emitted" />
           <StatCard    label="Segments today"    value={stt.count_today}    sub="stt_segment events"      accent={T.cyan} />
           <StatCard    label="Avg utterance len" value={0}  unit="s" sub="not yet emitted" accent={T.dim} />

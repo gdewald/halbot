@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import tempfile
 import threading
@@ -90,9 +91,97 @@ def _user_label(client: Any, user_id: int, cache: Dict[int, str]) -> str:
     return label
 
 
+_FETCH_MEMBER_BUDGET = 25  # match bot.py:1378 — avoid rate-limit
+
+
+async def resolve_user_labels(client: Any, user_ids: List[int]) -> Dict[int, str]:
+    """Async pre-resolve user IDs → display names for the snapshot.
+
+    Three-tier resolution per Discord's nickname/global-name model:
+
+      1. `guild.get_member(uid)` — cached per-guild Member; gives nickname
+         (the user-set per-server name shown in chat).
+      2. `client.get_user(uid)` — cached global User; gives global_name
+         (the user-set cross-server display name) or login name.
+      3. `guild.fetch_member(uid)` (HTTP, bounded to _FETCH_MEMBER_BUDGET);
+         returns a Member with nickname. Bot's existing stats handler
+         uses this same pattern (bot.py:1378).
+      4. `client.fetch_user(uid)` (HTTP) — last resort, returns User with
+         no nickname info.
+
+    The sync `_user_label` only walks (1)+(2). Slash callers prefill
+    this cache via `await resolve_user_labels(...)` before handing the
+    snapshot to a worker thread; otherwise tier-3/4 never run and rows
+    fall through to the `user_NNNN` placeholder.
+    """
+    out: Dict[int, str] = {}
+    if not client or not user_ids:
+        return out
+    uids = sorted({int(u) for u in user_ids if u})
+    guilds = list(getattr(client, "guilds", []))
+    needs_fetch: list[int] = []
+
+    def _label_of(u: Any) -> str:
+        return (
+            getattr(u, "display_name", None)
+            or getattr(u, "global_name", None)
+            or getattr(u, "name", None)
+            or ""
+        )
+
+    # Tier 1+2: cache walk
+    for uid in uids:
+        u = None
+        for g in guilds:
+            m = g.get_member(uid)
+            if m is not None:
+                u = m
+                break
+        if u is None and hasattr(client, "get_user"):
+            u = client.get_user(uid)
+        if u is not None:
+            lab = _label_of(u)
+            if lab:
+                out[uid] = lab
+                continue
+        needs_fetch.append(uid)
+
+    # Tier 3+4: HTTP, bounded
+    for uid in needs_fetch[:_FETCH_MEMBER_BUDGET]:
+        u = None
+        for g in guilds:
+            try:
+                u = await g.fetch_member(uid)
+                if u is not None:
+                    break
+            except Exception:
+                continue  # not a member here; try next guild or fall through
+        if u is None and hasattr(client, "fetch_user"):
+            try:
+                u = await client.fetch_user(uid)
+            except Exception as e:
+                log.debug("[stats_publisher] fetch_user(%s) failed: %s", uid, e)
+                u = None
+        if u is not None:
+            lab = _label_of(u)
+            if lab:
+                out[uid] = lab
+
+    if needs_fetch and len(needs_fetch) > _FETCH_MEMBER_BUDGET:
+        log.info(
+            "[stats_publisher] resolve_user_labels: budget exhausted (%d > %d)",
+            len(needs_fetch), _FETCH_MEMBER_BUDGET,
+        )
+    return out
+
+
 def _treat_user_rows(client: Any, rows: List[Dict[str, Any]],
                      cache: Dict[int, str]) -> List[Dict[str, Any]]:
-    """Replace ``key`` (user_id string) with display-name per config."""
+    """Replace ``key`` (user_id string) with display-name per config.
+
+    Drops rows with user_id == 0 (system / bot self) entirely — they
+    aren't a user and cluttered the leaderboard with a bare "0" entry.
+    """
     treatment = (config.get("stats_user_id_treatment") or "display_name").strip()
     out: List[Dict[str, Any]] = []
     for r in rows:
@@ -102,7 +191,9 @@ def _treat_user_rows(client: Any, rows: List[Dict[str, Any]],
             uid = int(raw)
         except ValueError:
             uid = 0
-        if treatment == "raw" or not uid:
+        if not uid:
+            continue  # skip system/null user rows
+        if treatment == "raw":
             pass
         elif treatment == "omit":
             new["key"] = ""
@@ -175,7 +266,19 @@ def _soundboard_table() -> List[Dict[str, Any]]:
     return out
 
 
-def _emoji_table() -> List[Dict[str, Any]]:
+_CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):(\d+)>")
+
+
+def _emoji_table(referenced_ids: Optional[set] = None,
+                 referenced_names: Optional[set] = None) -> List[Dict[str, Any]]:
+    """Emoji rollup; only includes rows referenced by visible soundboard rows.
+
+    `emoji_id` emitted as a string because Discord snowflakes (~1e18) exceed
+    JS Number.MAX_SAFE_INTEGER (~9e15) and silently lose precision when
+    parsed by the browser. Image bytes are inlined as base64 only for rows
+    we ship — unreferenced emojis would balloon the snapshot (~1.7 MB
+    saved on a typical bot).
+    """
     import base64
     try:
         rows = sounds_db.emoji_db_list_full()
@@ -184,12 +287,21 @@ def _emoji_table() -> List[Dict[str, Any]]:
         return []
     out: List[Dict[str, Any]] = []
     for r in rows:
+        emoji_id = str(r.get("emoji_id") or "")
+        name = r.get("name") or ""
+        if referenced_ids is not None or referenced_names is not None:
+            if (emoji_id and referenced_ids and emoji_id in referenced_ids):
+                pass
+            elif (name and referenced_names and name in referenced_names):
+                pass
+            else:
+                continue
         img = r.get("image") or b""
         mime = "image/gif" if img[:4] == b"GIF8" else "image/png"
         b64 = base64.b64encode(img).decode("ascii") if img else ""
         out.append({
-            "emoji_id": int(r.get("emoji_id") or 0),
-            "name": r.get("name") or "",
+            "emoji_id": emoji_id,
+            "name": name,
             "animated": bool(r.get("animated")),
             "description": r.get("description") or "",
             "image_data_url": f"data:{mime};base64,{b64}" if b64 else "",
@@ -198,10 +310,36 @@ def _emoji_table() -> List[Dict[str, Any]]:
     return out
 
 
-def snapshot_stats(client: Any) -> Dict[str, Any]:
-    """Build the dict that becomes ``window.__STATS_SNAPSHOT__``."""
+def _referenced_emoji_keys(soundboard: List[Dict[str, Any]]) -> tuple[set, set]:
+    """Extract custom Discord emoji IDs + names referenced by soundboard rows.
+
+    Returns (ids, names) — both used by `_emoji_table` to filter the bundled
+    rows. `names` mirrors Stats.jsx's `byName` fallback, which kicks in when
+    an emoji was re-uploaded with a new ID but the same name.
+    Unicode emoji cells (no `<:name:id>` form) need no lookup row.
+    """
+    ids: set = set()
+    names: set = set()
+    for row in soundboard:
+        raw = row.get("emoji") or ""
+        m = _CUSTOM_EMOJI_RE.search(raw)
+        if m:
+            names.add(m.group(1))
+            ids.add(m.group(2))
+    return ids, names
+
+
+def snapshot_stats(client: Any,
+                   user_label_cache: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
+    """Build the dict that becomes ``window.__STATS_SNAPSHOT__``.
+
+    `user_label_cache` is a pre-resolved {user_id: display_name} map.
+    Pass results from `await resolve_user_labels(...)` here so the sync
+    snapshot path doesn't fall back to `user_NNNN` for IDs not in
+    discord.py's caches.
+    """
     now = int(time.time())
-    user_cache: Dict[int, str] = {}
+    user_cache: Dict[int, str] = dict(user_label_cache or {})
     # Match the four aggregates the Analytics panel renders against the 30d window.
     ts_30d = now - 30 * 86400
 
@@ -212,6 +350,8 @@ def snapshot_stats(client: Any) -> Dict[str, Any]:
 
     users_30d["rows"] = _treat_user_rows(client, users_30d.get("rows", []), user_cache)
 
+    soundboard = _soundboard_table()
+    ref_ids, ref_names = _referenced_emoji_keys(soundboard)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
@@ -223,9 +363,35 @@ def snapshot_stats(client: Any) -> Dict[str, Any]:
             "top_commands": cmds_30d,
             "kind_mix": kinds_30d,
         },
-        "soundboard": _soundboard_table(),
-        "emoji": _emoji_table(),
+        "soundboard": soundboard,
+        "emoji": _emoji_table(referenced_ids=ref_ids, referenced_names=ref_names),
     }
+
+
+def collect_user_ids_for_resolution() -> List[int]:
+    """Return the user_ids that will appear in the next snapshot's top_users.
+
+    Used by the slash handler to pre-resolve display names async before
+    handing control to the sync `publish_now` thread.
+    """
+    now = int(time.time())
+    ts_30d = now - 30 * 86400
+    try:
+        _total, rows = analytics.query_stats(
+            ts_from=ts_30d, group_by="user_id", limit=20,
+        )
+    except Exception as e:
+        log.warning("[stats_publisher] collect_user_ids failed: %s", e)
+        return []
+    out: List[int] = []
+    for r in rows:
+        try:
+            uid = int(r.get("key") or 0)
+        except (TypeError, ValueError):
+            continue
+        if uid:
+            out.append(uid)
+    return out
 
 
 # ── HTML injection ────────────────────────────────────────────
@@ -291,7 +457,8 @@ def _record_event(*, latency_ms: int, bytes_uploaded: int, file_count: int,
         pass
 
 
-def publish_now(client: Any, *, force: bool = False, user_id: int = 0) -> PublishResult:
+def publish_now(client: Any, *, force: bool = False, user_id: int = 0,
+                user_label_cache: Optional[Dict[int, str]] = None) -> PublishResult:
     """Build a snapshot, upload it via the configured publisher, return URL.
 
     Throttled by ``stats_min_publish_interval_seconds``. Thread-safe: only one
@@ -334,7 +501,7 @@ def publish_now(client: Any, *, force: bool = False, user_id: int = 0) -> Publis
         dist_root = paths.frontend_dist_dir()
 
         snap_t0 = time.monotonic()
-        snapshot = snapshot_stats(client)
+        snapshot = snapshot_stats(client, user_label_cache=user_label_cache)
         snap_ms = int((time.monotonic() - snap_t0) * 1000)
 
         with tempfile.TemporaryDirectory(prefix="halbot-stats-") as tmpdir:

@@ -512,9 +512,18 @@ async def halbot_stats(interaction: discord.Interaction) -> None:
     await interaction.response.defer(thinking=True)
     client = interaction.client
     user_id = int(getattr(interaction.user, "id", 0) or 0)
+    # Pre-resolve user labels async so the sync snapshot path doesn't
+    # fall back to `user_NNNN` for IDs not in discord.py's caches.
+    try:
+        uids = stats_publisher.collect_user_ids_for_resolution()
+        user_labels = await stats_publisher.resolve_user_labels(client, uids)
+    except Exception as e:
+        log.warning("[slash] /halbot-stats label pre-resolve failed: %s", e)
+        user_labels = {}
     try:
         result = await asyncio.to_thread(
-            stats_publisher.publish_now, client, user_id=user_id,
+            stats_publisher.publish_now, client,
+            user_id=user_id, user_label_cache=user_labels,
         )
     except Exception as e:
         log.exception("[slash] /halbot-stats publish failed")
