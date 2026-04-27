@@ -3,6 +3,10 @@ import { T } from '../tokens.js';
 import { b, IS_SNAPSHOT } from '../bridge.js';
 import { StatCard, MiniBar, SectionHeader } from './stats/StatCard.jsx';
 import { LatencyCard } from './stats/LatencyCard.jsx';
+import { HealthBanner } from './stats/HealthBanner.jsx';
+import { MissingDataDrawer } from './stats/MissingDataDrawer.jsx';
+
+const dash = (v) => (v ? v : '—');
 
 const REFRESH_MS = 10_000;
 const EMPTY_STATS = {
@@ -185,6 +189,8 @@ export function StatsPanel() {
         pointerEvents: (mock || empty) ? 'none' : 'auto',
       }}>
 
+        <HealthBanner stats={stats} />
+
         {/* Soundboard */}
         <SectionHeader label="Soundboard Backup" icon="💾" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 12 }}>
@@ -259,32 +265,32 @@ export function StatsPanel() {
           <StatCard label="Detections today" value={ww.detections_today}  sub="voice LLM parses"        accent={T.green} />
           <StatCard label="Total all-time"   value={ww.detections_all_time} sub="since analytics start" accent={T.green} />
           <StatCard label="False positives"  value={ww.false_positives_today} unit="today" sub={falsePct} accent={T.yellow} />
-          <StatCard label="Avg join latency" value={ww.avg_join_latency_ms} unit="ms" sub="not yet emitted" accent={T.blurple} />
+          <StatCard label="Avg join latency" value={dash(ww.avg_join_latency_ms)} unit={ww.avg_join_latency_ms ? 'ms' : ''} sub="wake → audio" accent={T.blurple} />
         </div>
 
         {/* STT */}
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub={stt.avg_ms ? `30d sample · ${stt.count_today} today` : 'not yet emitted'} />
-          <LatencyCard label="Chunk processing time" avg={0}          p95={0}          unit="ms" color={T.cyan} sub="not yet emitted" />
+          <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub={stt.avg_ms ? `30d sample · ${stt.count_today} today` : ''} />
+          <LatencyCard label="Chunk processing time" avg={0}          p95={0}          unit="ms" color={T.cyan} />
           <StatCard    label="Segments today"    value={stt.count_today}    sub="stt_segment events"      accent={T.cyan} />
-          <StatCard    label="Avg utterance len" value={0}  unit="s" sub="not yet emitted" accent={T.dim} />
+          <StatCard    label="Avg utterance len" value="—"  accent={T.dim} />
         </div>
 
         {/* TTS */}
         <SectionHeader label="Text-to-Speech (TTS)" icon="🗣" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
           <LatencyCard label="Full render time"  avg={tts.avg_ms} p95={tts.p95_ms} unit="ms" color={T.yellow} sub="engine.synth latency" />
-          <LatencyCard label="First audio chunk" avg={0}          p95={0}          unit="ms" color={T.yellow} sub="not yet emitted" />
+          <LatencyCard label="First audio chunk" avg={0}          p95={0}          unit="ms" color={T.yellow} />
           <StatCard    label="Renders today"     value={tts.count_today}    sub="tts_request events"         accent={T.yellow} />
-          <StatCard    label="Engine fallback"   value={0} unit="today" sub="not yet emitted" accent={T.red} />
+          <StatCard    label="Engine fallback"   value="—" sub="kokoro→edge fallback" accent={T.red} />
         </div>
 
         {/* LLM */}
         <SectionHeader label="Text LLM" icon="🧠" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 10 }}>
           <LatencyCard label="Response latency"    avg={llm.response_avg_ms} p95={llm.response_p95_ms} unit="ms" color={T.blurple} sub="full completion time" />
-          <LatencyCard label="Time to first token" avg={llm.ttft_avg_ms}     p95={llm.ttft_p95_ms}     unit="ms" color={T.blurple} sub="not yet emitted" />
+          <LatencyCard label="Time to first token" avg={llm.ttft_avg_ms}     p95={llm.ttft_p95_ms}     unit="ms" color={T.blurple} sub="TTFT — key for streaming" />
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, padding: '12px 14px', position: 'relative', overflow: 'hidden',
@@ -295,18 +301,21 @@ export function StatsPanel() {
             }} />
             <div style={{ fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.09em', marginBottom: 4 }}>Throughput</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-              <span style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>{llm.tokens_per_sec}</span>
-              <span style={{ fontSize: 11, color: T.sub }}>tok/s</span>
+              <span style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>{dash(llm.tokens_per_sec)}</span>
+              {llm.tokens_per_sec ? <span style={{ fontSize: 11, color: T.sub }}>tok/s</span> : null}
             </div>
-            <div style={{ fontSize: 9, color: T.dim, marginTop: 5 }}>not yet emitted</div>
+            <div style={{ fontSize: 9, color: T.dim, marginTop: 5 }}>avg generation speed</div>
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 }}>
           <StatCard label="Requests today" value={llm.requests_today} sub="llm_call events" accent={T.blurple} />
-          <StatCard label="Avg tokens out" value={llm.avg_tokens_out}  sub="not yet emitted"  accent={T.blurple} />
-          <StatCard label="Context usage"  value={llm.context_usage_pct}  unit="%" sub="not yet emitted" accent={T.yellow} />
+          <StatCard label="Avg tokens out" value={dash(llm.avg_tokens_out)}  sub="per completion" accent={T.blurple} />
+          <StatCard label="Context usage"  value={dash(llm.context_usage_pct)} unit={llm.context_usage_pct ? '%' : ''} sub="avg window fill" accent={T.yellow} />
           <StatCard label="Timeouts today" value={llm.timeouts_today} sub={`of ${llm.requests_today} requests`} accent={T.red} />
         </div>
+
+        <MissingDataDrawer />
+
         <div style={{ height: 8 }} />
       </div>
 
