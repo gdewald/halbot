@@ -33,6 +33,7 @@ material lives in `reference/`.
 | `018-transcript-capture-impl.md` | completed | Rotating JSONL transcript log, dashboard-toggleable. |
 | `020-static-stats-publish-impl.md` | completed | `/halbot-stats` snapshot publisher + Cloudflare R2 infra. v0.8.0. |
 | `021-drop-pyinstaller-impl.md` | completed | Replaced PyInstaller bundles with uv-installed venv at `%ProgramFiles%\Halbot\.venv\`. Build 6.5min -> ~2s; deploy minutes -> ~5s source-only. v0.9.0. |
+| `023-dashboard-dev-mode-impl.md` | completed | Localhost FastAPI transport for the dashboard + Playwright smoke suite. Lets Claude verify UI changes without driving pywebview. Pywebview tray flow untouched. |
 
 ## Drafts (`docs/plans/drafts/`, gitignored)
 

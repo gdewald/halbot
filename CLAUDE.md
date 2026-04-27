@@ -44,12 +44,66 @@
   - Voice-path changes needing real Discord: only case you can't fully
     verify without user. Say so explicitly, still do every other
     verification first.
+  - Dashboard / React UI changes: run the Playwright suite via the
+    localhost dev server (see "Dev mode for UI verification" below).
+    `uv run pytest tests/dashboard -v` after `scripts\dev-dashboard.ps1`
+    has been run at least once to populate `frontend/dist/`. The tests
+    spawn their own server.
 - Never tell user "test this and report back" before exhausting your
   own verification channels.
 - **Commit as you go.** Topic-scoped commits per finished chunk —
   don't let work tree pile up 15+ modified files across unrelated
   features. Style: `feat(scope): …` / `fix(scope): …`, ~1-sentence
   why in body.
+
+## Dev mode for UI verification
+
+Plan [023](docs/plans/023-dashboard-dev-mode-impl.md) shipped a
+localhost HTTP transport for the React dashboard so Claude+Playwright
+can verify UI changes without driving the pywebview window. Production
+tray flow is untouched — `dashboard.app.open_window` still loads
+`frontend/dist/index.html` over `file://`.
+
+**Iteration loop:**
+
+```powershell
+# 1. Start the dev server (builds frontend if missing).
+scripts\dev-dashboard.ps1            # serves http://127.0.0.1:51199
+
+# 2. After editing JSX, rebuild + restart server.
+npm --prefix frontend run build      # ~1s incremental
+# (Ctrl-C the dev server, re-run scripts\dev-dashboard.ps1)
+
+# 3. Run the Playwright suite (spawns its own server on a free port).
+uv run pytest tests/dashboard -v     # ~7s, headless chromium
+```
+
+Daemon up → live tests against real bridge → daemon RPCs.
+Daemon down → tests still pass (panels render error/empty states
+because `bridge.py` calls catch and return `{}` / `[]` on gRPC
+failure). Live-only tests opt in via `@pytest.mark.live`.
+
+**Transport detection** (`frontend/src/bridge.js`): protocol-based, no
+runtime race. `file://` → pywebview, `http(s)://` → fetch
+`/api/{method}`, `window.__STATS_SNAPSHOT__` set → frozen snapshot
+bridge.
+
+**Bind 127.0.0.1 only.** No auth on `service_stop`, `update_config`,
+`persist_config` — the dev server inherits pywebview's same-process
+trust model. Never bind a routable interface.
+
+**Port 51199.** Mirrors daemon's 50199 for memorability. Outside the
+http.sys excluded ranges (50000-50059, 50200-50699, 50736-50935 — verify
+with `netsh interface ipv4 show excludedportrange protocol=tcp`).
+Override via `HALBOT_DASHBOARD_DEV_PORT` env or `-Port` flag on the
+launch script.
+
+**Visual verification gap.** Claude cannot drive the pywebview window
+itself — only the HTTP path. After bridge or window-chrome edits, ask
+the user to confirm the tray-launched window still renders. Code-level
+verification: pywebview branch in `bridge.js` is preserved
+(`location.protocol === 'file:'` keeps `IS_HTTP` false; falls through
+to `window.pywebview.api`).
 
 ## Privacy policy (analytics / data collection features)
 
@@ -314,9 +368,10 @@ uv run python -m halbot.daemon run
 
 ## Common pitfalls
 
-- **Port 50199, not 50051/50737.** Surrounding range `50736-50935`
-  excluded by `http.sys` on dev box — grpc bind to 50737 fails with
-  `Failed to add port to server`. Check
+- **Port 50199 (daemon gRPC), 51199 (dashboard dev HTTP).** Surrounding
+  ranges 50000-50059, 50200-50699, 50736-50935 are excluded by
+  `http.sys` on this box — bind to anything inside fails with
+  `Failed to add port to server` or `WinError 10013`. Check
   `netsh interface ipv4 show excludedportrange protocol=tcp` before
   picking a new port.
 - **nssm.cc occasional 503.** `install.ps1` fetches nssm-2.24.zip on
