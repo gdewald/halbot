@@ -33,6 +33,14 @@ _TYPE_MAP = {
 
 _RESTART_DISCORD_MIN_INTERVAL = 10.0
 
+# Persistent user_id -> display_name cache shared across QueryStats RPCs.
+# Without this, every dashboard refresh / filter click re-fired
+# fetch_member HTTP for the same user_ids, hammering Discord's rate
+# limit. Display names rarely change so cache lifetime tied to process
+# lifetime is fine; on display-name change the user re-launches the
+# tray to clear it. Bounded growth: aggregates only return top-N IDs.
+_USER_LABEL_CACHE: dict[int, str] = {}
+
 
 def _state_msg() -> mgmt_pb2.ConfigState:
     snap = config.snapshot()
@@ -377,16 +385,20 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         reply = mgmt_pb2.QueryStatsReply(total_count=total)
         # Pre-resolve user_id → display_name via the async resolver, which
         # walks Member/User caches AND falls through to bounded HTTP
-        # fetch_member when the cache misses. The sync `_user_label` skips
-        # tier-3 HTTP and almost always returns the `user_NNNN` placeholder
-        # — pre-fetching here gives the dashboard real Discord names.
-        label_cache: dict[int, str] = {}
+        # fetch_member when the cache misses. Module-level
+        # `_USER_LABEL_CACHE` persists across RPCs so repeated dashboard
+        # polls don't re-fire HTTP fetch_member (rate-limit hit).
+        label_cache: dict[int, str] = dict(_USER_LABEL_CACHE)
         if request.group_by == "user_id":
             user_ids = [int(r["key"]) for r in rows
                         if str(r["key"] or "").isdigit() and int(r["key"]) > 0]
-            if user_ids:
+            missing = [uid for uid in user_ids if uid not in _USER_LABEL_CACHE]
+            if missing:
                 try:
-                    resolved = await stats_publisher.resolve_user_labels(_bot.client, user_ids)
+                    resolved = await stats_publisher.resolve_user_labels(
+                        _bot.client, missing, known=_USER_LABEL_CACHE,
+                    )
+                    _USER_LABEL_CACHE.update(resolved)
                     label_cache.update(resolved)
                 except Exception:
                     log.exception("QueryStats: resolve_user_labels failed")

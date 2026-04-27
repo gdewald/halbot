@@ -94,7 +94,9 @@ def _user_label(client: Any, user_id: int, cache: Dict[int, str]) -> str:
 _FETCH_MEMBER_BUDGET = 25  # match bot.py:1378 — avoid rate-limit
 
 
-async def resolve_user_labels(client: Any, user_ids: List[int]) -> Dict[int, str]:
+async def resolve_user_labels(client: Any, user_ids: List[int],
+                              *, known: Optional[Dict[int, str]] = None,
+                              ) -> Dict[int, str]:
     """Async pre-resolve user IDs → display names for the snapshot.
 
     Three-tier resolution per Discord's nickname/global-name model:
@@ -113,11 +115,21 @@ async def resolve_user_labels(client: Any, user_ids: List[int]) -> Dict[int, str
     this cache via `await resolve_user_labels(...)` before handing the
     snapshot to a worker thread; otherwise tier-3/4 never run and rows
     fall through to the `user_NNNN` placeholder.
+
+    `known` is a pre-populated {uid: label} cache; IDs in `known` are
+    skipped entirely (no cache walk, no HTTP). Callers that hold a
+    persistent cache pass it here to avoid re-fetching names every
+    request — fetch_member is rate-limited and Discord display names
+    rarely change.
     """
     out: Dict[int, str] = {}
     if not client or not user_ids:
         return out
-    uids = sorted({int(u) for u in user_ids if u})
+    known_map = known or {}
+    uids = sorted({int(u) for u in user_ids
+                   if u and int(u) not in known_map})
+    if not uids:
+        return out
     guilds = list(getattr(client, "guilds", []))
     needs_fetch: list[int] = []
 
