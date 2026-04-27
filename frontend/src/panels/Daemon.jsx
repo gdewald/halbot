@@ -85,7 +85,6 @@ function saveLocalEvents(events) {
 export function DaemonPanel() {
   const [svc, setSvc] = useState({ state: 'unknown', pid: 0 });
   const [health, setHealth] = useState(null);
-  const [proc, setProc] = useState({ memory_mb: 0, cpu_pct: 0 });
   const [loading, setLoading] = useState(false);
   const [autoRestart, setAutoRestart] = useState(null);
   const [events, setEvents] = useState(() => loadLocalEvents());
@@ -119,20 +118,6 @@ export function DaemonPanel() {
     const t = setInterval(refresh, POLL_MS);
     return () => clearInterval(t);
   }, [refresh]);
-
-  useEffect(() => {
-    if (!running || !svc.pid) { setProc({ memory_mb: 0, cpu_pct: 0 }); return; }
-    let alive = true;
-    const tick = async () => {
-      try {
-        const p = await b.procStats(svc.pid);
-        if (alive) setProc(p);
-      } catch {}
-    };
-    tick();
-    const t = setInterval(tick, POLL_MS);
-    return () => { alive = false; clearInterval(t); };
-  }, [running, svc.pid]);
 
   useEffect(() => {
     (async () => { try { setAutoRestart(await b.nssmGet()); } catch { setAutoRestart(null); } })();
@@ -318,11 +303,12 @@ export function DaemonPanel() {
       </div>
 
       {/* Stats grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
         {[
           { label: 'Uptime', value: running ? fmtUptime(health?.uptime_seconds) : '—', mono: true },
-          { label: 'Memory', value: running ? String(proc.memory_mb) : '—', unit: 'MB' },
-          { label: 'CPU',    value: running ? proc.cpu_pct.toFixed(1)  : '—', unit: '%' },
+          { label: 'Memory', value: running && health?.rss_bytes ? (health.rss_bytes / (1024 * 1024)).toFixed(0) : '—', unit: running && health?.rss_bytes ? 'MB' : '' },
+          { label: 'CPU',    value: running && (health?.cpu_percent ?? null) !== null ? Number(health.cpu_percent).toFixed(1) : '—', unit: running && (health?.cpu_percent ?? null) !== null ? '%' : '' },
+          { label: 'Guilds', value: running ? String(health?.guild_count ?? 0) : '—', mono: true },
         ].map(s => (
           <div key={s.label} style={{
             background: T.surface, border: `1px solid ${T.border}`,
