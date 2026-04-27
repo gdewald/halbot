@@ -34,7 +34,9 @@ def test_panel_renders(page: Page, dashboard: dict, label: str, expected_text: r
     expect(nav_button).to_be_visible(timeout=10_000)
     nav_button.click()
 
-    expect(page.get_by_text(expected_text).first).to_be_visible(timeout=8_000)
+    # Logs is always-mounted (hidden via display:none when inactive) so the
+    # log rows still match any text query. Filter to visible matches only.
+    expect(page.get_by_text(expected_text).locator("visible=true").first).to_be_visible(timeout=8_000)
     page.wait_for_timeout(400)
 
     fatal = [e for e in errors if "404" not in e and "500" not in e]

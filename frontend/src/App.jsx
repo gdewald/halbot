@@ -48,8 +48,16 @@ export function App() {
         <SidebarWide active={panel} onChange={onChange}
                      items={IS_SNAPSHOT ? NAV_FOR_SNAPSHOT : NAV_ITEMS} />
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ flex: 1, overflow: 'hidden' }}>
-            {panel === 'logs'   && <LogsPanel />}
+          <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+            {/* Logs stays mounted so filter/wrap/tail/scroll survive tab
+                switches. The panel polls /api/pop_log_batch every 250ms even
+                while hidden — single-user tool, cost is negligible. Other
+                panels still mount lazily. */}
+            {!IS_SNAPSHOT && (
+              <div style={{ position: 'absolute', inset: 0, display: panel === 'logs' ? 'block' : 'none' }}>
+                <LogsPanel />
+              </div>
+            )}
             {panel === 'daemon' && <DaemonPanel />}
             {panel === 'config' && <ConfigPanel />}
             {panel === 'stats'  && <StatsPanel />}
