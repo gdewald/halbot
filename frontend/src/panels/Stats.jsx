@@ -14,12 +14,11 @@ const EMPTY_STATS = {
   mock: true,
   soundboard: { sounds_backed_up: 0, storage_bytes: 0, last_sync_unix: 0, new_since_last: 0 },
   voice_playback: { played_today: 0, played_all_time: 0, session_seconds_today: 0 },
-  wake_word: { detections_today: 0, detections_all_time: 0, false_positives_today: 0, avg_join_latency_ms: 0 },
-  stt: { avg_ms: 0, p95_ms: 0, count_today: 0 },
+  wake_word: { detections_today: 0, detections_all_time: 0, false_positives_today: 0 },
+  stt: { avg_ms: 0, p95_ms: 0, count_today: 0, chunk_avg_ms: 0, chunk_p95_ms: 0, avg_audio_seconds: 0 },
   tts: { avg_ms: 0, p95_ms: 0, count_today: 0 },
   llm: {
-    response_avg_ms: 0, response_p95_ms: 0,
-    ttft_avg_ms: 0, ttft_p95_ms: 0, tokens_per_sec: 0,
+    response_avg_ms: 0, response_p95_ms: 0, tokens_per_sec: 0,
     requests_today: 0, avg_tokens_out: 0, context_usage_pct: 0, timeouts_today: 0,
   },
 };
@@ -250,23 +249,21 @@ export function StatsPanel() {
           })}
         </div>
 
-        {/* Voice playback. "Avg response time" was a duplicate of TTS avg
-            mislabeled "today" — drop it until a true voice round-trip metric
-            is wired. */}
+        {/* Voice playback. */}
         <SectionHeader label="Voice Playback" icon="🔊" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 18 }}>
           <StatCard label="Sounds played today" value={vp.played_today}    sub="soundboard_play events"  accent={T.cyan} />
           <StatCard label="Total all-time"      value={vp.played_all_time.toLocaleString()}  sub="since analytics start"   accent={T.cyan} />
-          <StatCard label="Session time today"  value={fmtDuration(vp.session_seconds_today)} sub="voice_join proxy × 60s"  accent={T.yellow} />
+          <StatCard label="Session time today"  value={fmtDuration(vp.session_seconds_today)} sub="sum of voice_leave durations" accent={T.yellow} />
         </div>
 
-        {/* Wake word */}
+        {/* Wake word. Avg-join-latency was dropped: bot joins channel
+            BEFORE wake detection runs, so there's no measurable gap. */}
         <SectionHeader label="Wake Word" icon="🎙" />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 18 }}>
           <StatCard label="Detections today" value={ww.detections_today}  sub="voice LLM parses"        accent={T.green} />
           <StatCard label="Total all-time"   value={ww.detections_all_time} sub="since analytics start" accent={T.green} />
           <StatCard label="False positives"  value={ww.false_positives_today} unit="today" sub={falsePct} accent={T.yellow} />
-          <StatCard label="Avg join latency" value={dash(ww.avg_join_latency_ms)} unit={ww.avg_join_latency_ms ? 'ms' : ''} sub="wake → audio" accent={T.blurple} />
         </div>
         <WakeHistory />
 
@@ -274,25 +271,25 @@ export function StatsPanel() {
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
           <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub={stt.avg_ms ? `30d sample · ${stt.count_today} today` : ''} />
-          <LatencyCard label="Chunk processing time" avg={0}          p95={0}          unit="ms" color={T.cyan} />
-          <StatCard    label="Segments today"    value={stt.count_today}    sub="stt_segment events"      accent={T.cyan} />
-          <StatCard    label="Avg utterance len" value="—"  accent={T.dim} />
+          <LatencyCard label="Chunk decode time" avg={stt.chunk_avg_ms} p95={stt.chunk_p95_ms} unit="ms" color={T.cyan} sub="whisper decode only" />
+          <StatCard    label="Segments today"    value={stt.count_today}    sub="stt_request events"     accent={T.cyan} />
+          <StatCard    label="Avg utterance len" value={stt.avg_audio_seconds ? stt.avg_audio_seconds.toFixed(1) : '—'} unit={stt.avg_audio_seconds ? 's' : ''} sub="audio captured" accent={T.cyan} />
         </div>
 
-        {/* TTS */}
+        {/* TTS. First-audio-chunk + engine-fallback dropped: kokoro
+            synth is blocking (no streaming chunks) and there is no
+            secondary TTS engine to fall back to. */}
         <SectionHeader label="Text-to-Speech (TTS)" icon="🗣" />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10, marginBottom: 18 }}>
           <LatencyCard label="Full render time"  avg={tts.avg_ms} p95={tts.p95_ms} unit="ms" color={T.yellow} sub="engine.synth latency" />
-          <LatencyCard label="First audio chunk" avg={0}          p95={0}          unit="ms" color={T.yellow} />
           <StatCard    label="Renders today"     value={tts.count_today}    sub="tts_request events"         accent={T.yellow} />
-          <StatCard    label="Engine fallback"   value="—" sub="kokoro→edge fallback" accent={T.red} />
         </div>
 
-        {/* LLM */}
+        {/* LLM. TTFT card dropped — Ollama calls are blocking, so TTFT
+            equals total response latency (no streaming). */}
         <SectionHeader label="Text LLM" icon="🧠" />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10, marginBottom: 10 }}>
           <LatencyCard label="Response latency"    avg={llm.response_avg_ms} p95={llm.response_p95_ms} unit="ms" color={T.blurple} sub="full completion time" />
-          <LatencyCard label="Time to first token" avg={llm.ttft_avg_ms}     p95={llm.ttft_p95_ms}     unit="ms" color={T.blurple} sub="TTFT — key for streaming" />
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, padding: '12px 14px', position: 'relative', overflow: 'hidden',

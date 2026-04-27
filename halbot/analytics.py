@@ -427,6 +427,27 @@ def _latency_bundle(conn: sqlite3.Connection, kind: str,
     return {"avg_ms": int(avg), "p95_ms": int(p95), "count_today": count_today}
 
 
+def _meta_field_floats(conn: sqlite3.Connection, kind: str, field_name: str,
+                       since_unix: int, limit: int = 2000,
+                       require_positive: bool = True) -> List[float]:
+    """Pull non-null numeric values of meta_json.<field_name> for `kind` events.
+
+    Returns most-recent-first (capped at `limit`) — order does not matter to
+    callers that compute avg/p95.
+    """
+    extract = f"json_extract(meta_json,'$.{field_name}')"
+    where = f"kind = ? AND {extract} IS NOT NULL"
+    if require_positive:
+        where += f" AND CAST({extract} AS REAL) > 0"
+    cur = conn.execute(
+        f"SELECT CAST({extract} AS REAL) FROM events "
+        f"WHERE {where} AND ts_unix >= ? "
+        f"ORDER BY ts_unix DESC LIMIT ?",
+        (kind, since_unix, limit),
+    )
+    return [float(r[0]) for r in cur.fetchall() if r[0] is not None]
+
+
 def compute_dashboard_stats() -> Dict[str, Any]:
     """Roll up events DB into the StatsReply shape. All-numeric, never raises."""
     now = int(time.time())
@@ -438,13 +459,14 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         "voice_playback": {"played_today": 0, "played_all_time": 0,
                            "session_seconds_today": 0, "avg_response_ms": 0},
         "wake_word": {"detections_today": 0, "detections_all_time": 0,
-                      "false_positives_today": 0, "avg_join_latency_ms": 0},
-        "stt": {"avg_ms": 0, "p95_ms": 0, "count_today": 0},
+                      "false_positives_today": 0},
+        "stt": {"avg_ms": 0, "p95_ms": 0, "count_today": 0,
+                "chunk_avg_ms": 0, "chunk_p95_ms": 0, "avg_audio_seconds": 0.0},
         "tts": {"avg_ms": 0, "p95_ms": 0, "count_today": 0},
         "llm": {"response_avg_ms": 0, "response_p95_ms": 0,
-                "ttft_avg_ms": 0, "ttft_p95_ms": 0, "tokens_per_sec": 0,
-                "requests_today": 0, "avg_tokens_out": 0,
-                "context_usage_pct": 0, "timeouts_today": 0},
+                "tokens_per_sec": 0, "requests_today": 0,
+                "avg_tokens_out": 0, "context_usage_pct": 0,
+                "timeouts_today": 0},
         "mock": False,
     }
     try:
@@ -465,13 +487,15 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         out["voice_playback"]["played_all_time"] = int(sb_all[0] if sb_all else 0)
         out["voice_playback"]["played_today"] = int(sb_today[0] if sb_today else 0)
 
-        # Voice session seconds today: sum gaps between voice_join events per-guild
-        # cheap proxy: count voice_join events today × 60s (placeholder).
-        vj_today = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE kind = 'voice_join' AND ts_unix >= ?",
+        # Voice session seconds today: sum voice_leave.duration_seconds for
+        # sessions that ended today. Sessions still in progress are NOT
+        # included until they emit voice_leave on disconnect.
+        vl_dur = conn.execute(
+            "SELECT COALESCE(SUM(CAST(json_extract(meta_json,'$.duration_seconds') AS INTEGER)), 0) "
+            "FROM events WHERE kind = 'voice_leave' AND ts_unix >= ?",
             (t_today,),
         ).fetchone()
-        out["voice_playback"]["session_seconds_today"] = int(vj_today[0] if vj_today else 0) * 60
+        out["voice_playback"]["session_seconds_today"] = int(vl_dur[0] if vl_dur else 0)
 
         # Avg voice response ms = avg TTS latency today (soundboard playback is sync)
         tts_today = _latency_bundle(conn, "tts_request", t_today)
@@ -503,11 +527,64 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         out["llm"]["response_avg_ms"] = llm_today["avg_ms"]
         out["llm"]["response_p95_ms"] = llm_today["p95_ms"]
         out["llm"]["requests_today"] = llm_today["count_today"]
-        # No ttft / tokens emitted yet; leave 0.
 
-        # STT latency
+        # LLM tokens / throughput / context — sampled from same 30d window
+        # as latency. tokens_out is averaged; tokens_per_sec is the avg of
+        # per-event ratios (more representative than total/total when calls
+        # vary widely in size); context_usage_pct uses configured window.
+        since30 = t_today - 30 * 86400
+        toks_out = _meta_field_floats(conn, "llm_call", "tokens_out", since30)
+        if toks_out:
+            out["llm"]["avg_tokens_out"] = int(sum(toks_out) / len(toks_out))
+        # Per-event throughput: pull (tokens_out, latency_ms) pairs.
+        cur = conn.execute(
+            "SELECT CAST(json_extract(meta_json,'$.tokens_out') AS REAL), "
+            "       CAST(json_extract(meta_json,'$.latency_ms') AS REAL) "
+            "FROM events WHERE kind = 'llm_call' "
+            "  AND json_extract(meta_json,'$.tokens_out') IS NOT NULL "
+            "  AND CAST(json_extract(meta_json,'$.tokens_out') AS REAL) > 0 "
+            "  AND CAST(json_extract(meta_json,'$.latency_ms') AS REAL) > 0 "
+            "  AND ts_unix >= ? "
+            "ORDER BY ts_unix DESC LIMIT 2000",
+            (since30,),
+        )
+        rates = [(t / lat) * 1000.0 for t, lat in cur.fetchall() if t and lat]
+        if rates:
+            out["llm"]["tokens_per_sec"] = int(sum(rates) / len(rates))
+        # Context window: prompt_tokens / configured window × 100, averaged.
+        try:
+            ctx_window = int(config.get("llm_context_window") or 8192)
+        except (TypeError, ValueError):
+            ctx_window = 8192
+        if ctx_window <= 0:
+            ctx_window = 8192
+        prompt_toks = _meta_field_floats(conn, "llm_call", "prompt_tokens", since30)
+        if prompt_toks:
+            avg_pct = (sum(prompt_toks) / len(prompt_toks)) / ctx_window * 100.0
+            out["llm"]["context_usage_pct"] = int(round(min(100.0, max(0.0, avg_pct))))
+        # Timeouts today: count events whose meta outcome is 'timeout'.
+        to_today = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE kind = 'llm_call' "
+            "AND json_extract(meta_json,'$.outcome') = 'timeout' "
+            "AND ts_unix >= ?",
+            (t_today,),
+        ).fetchone()
+        out["llm"]["timeouts_today"] = int(to_today[0] if to_today else 0)
+
+        # STT latency + chunk decode + utterance length
         stt_today = _latency_bundle(conn, "stt_request", t_today)
-        out["stt"] = stt_today
+        out["stt"]["avg_ms"] = stt_today["avg_ms"]
+        out["stt"]["p95_ms"] = stt_today["p95_ms"]
+        out["stt"]["count_today"] = stt_today["count_today"]
+        chunk_vals = sorted(int(v) for v in _meta_field_floats(
+            conn, "stt_request", "decode_ms", since30,
+        ))
+        if chunk_vals:
+            out["stt"]["chunk_avg_ms"] = sum(chunk_vals) // len(chunk_vals)
+            out["stt"]["chunk_p95_ms"] = _percentile(chunk_vals, 95)
+        audio_secs = _meta_field_floats(conn, "stt_request", "audio_seconds", since30)
+        if audio_secs:
+            out["stt"]["avg_audio_seconds"] = round(sum(audio_secs) / len(audio_secs), 2)
 
         # Soundboard table totals from sounds DB
         try:

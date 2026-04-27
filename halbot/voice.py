@@ -516,6 +516,9 @@ class VoiceSession:
     # History + idle task land in later steps of the plan; kept as stubs so
     # the dataclass shape is stable.
     history: list = field(default_factory=list)
+    # Wall-clock seconds when this session began. Used to compute
+    # voice_leave.duration_seconds for analytics.
+    started_unix: int = field(default_factory=lambda: int(time.time()))
 
     # -- listener delegation ------------------------------------------------
     @property

@@ -206,6 +206,10 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
         active = list(voice_session.voice_listeners.items())
         for gid, sess in active:
             try:
+                voice_session.emit_voice_leave(sess, reason="rpc")
+            except Exception:
+                log.exception("[voice] emit_voice_leave failed for guild %s", gid)
+            try:
                 await sess.vc.disconnect(force=True)
             except Exception as e:
                 log.warning(f"Failed to disconnect from voice session for {sess}: {type(e).__name__} - {str(e)}")
@@ -332,12 +336,14 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
                 detections_today=int(ww.get("detections_today", 0)),
                 detections_all_time=int(ww.get("detections_all_time", 0)),
                 false_positives_today=int(ww.get("false_positives_today", 0)),
-                avg_join_latency_ms=int(ww.get("avg_join_latency_ms", 0)),
             ),
             stt=mgmt_pb2.LatencyStats(
                 avg_ms=int(stt.get("avg_ms", 0)),
                 p95_ms=int(stt.get("p95_ms", 0)),
                 count_today=int(stt.get("count_today", 0)),
+                chunk_avg_ms=int(stt.get("chunk_avg_ms", 0)),
+                chunk_p95_ms=int(stt.get("chunk_p95_ms", 0)),
+                avg_audio_seconds=float(stt.get("avg_audio_seconds", 0.0)),
             ),
             tts=mgmt_pb2.LatencyStats(
                 avg_ms=int(tts.get("avg_ms", 0)),
@@ -347,8 +353,6 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             llm=mgmt_pb2.LlmStats(
                 response_avg_ms=int(llm.get("response_avg_ms", 0)),
                 response_p95_ms=int(llm.get("response_p95_ms", 0)),
-                ttft_avg_ms=int(llm.get("ttft_avg_ms", 0)),
-                ttft_p95_ms=int(llm.get("ttft_p95_ms", 0)),
                 tokens_per_sec=int(llm.get("tokens_per_sec", 0)),
                 requests_today=int(llm.get("requests_today", 0)),
                 avg_tokens_out=int(llm.get("avg_tokens_out", 0)),

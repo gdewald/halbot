@@ -353,7 +353,8 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
                   attachment_info: list[dict] | None = None,
                   guild=None,
                   voice_channels_str: str = "(unknown)",
-                  voice_status_str: str = "Not connected to any voice channel.") -> list[dict]:
+                  voice_status_str: str = "Not connected to any voice channel.",
+                  _stats_out: dict | None = None) -> list[dict]:
     """Send user text + context to Ollama, return a list of actions to execute."""
     from datetime import date
 
@@ -433,6 +434,10 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         finish_reason = choice.get("finish_reason", "unknown")
         usage = raw_json.get("usage", {})
         log.info("Ollama finish_reason=%s, usage=%s", finish_reason, usage)
+        if _stats_out is not None:
+            _stats_out["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
+            _stats_out["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+            _stats_out["outcome"] = "ok"
         message_obj = choice.get("message", {}) or {}
         content = (message_obj.get("content") or "").strip()
         # Handle <think>…</think> wrappers — thinking models hide the JSON
@@ -477,11 +482,20 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         if isinstance(parsed, list):
             return parsed
         return [{"action": "unknown", "message": str(parsed)}]
+    except requests.exceptions.Timeout:
+        log.error("Ollama timed out at %s", LLM_URL)
+        if _stats_out is not None:
+            _stats_out["outcome"] = "timeout"
+        return [{"action": "error", "message": "Ollama timed out — try a shorter prompt or restart the model."}]
     except requests.ConnectionError:
         log.error("Could not connect to Ollama at %s", LLM_URL)
+        if _stats_out is not None:
+            _stats_out["outcome"] = "connect_error"
         return [{"action": "error", "message": "I'm having trouble thinking right now — is Ollama running?"}]
     except (requests.RequestException, KeyError, IndexError) as e:
         log.error("Failed to parse intent: %s", e)
+        if _stats_out is not None:
+            _stats_out["outcome"] = "error"
         return [{"action": "error", "message": f"Ollama call failed ({type(e).__name__}: {e}). Check Ollama server."}]
 
 
@@ -1038,6 +1052,7 @@ def answer_voice_conversation(
     history: list[dict] | None = None,
     guild=None,
     voice_channel_name: str | None = None,
+    _stats_out: dict | None = None,
 ) -> str:
     """Generate a conversational spoken reply using the SAME model and prompt
     pipeline as text. Slow but full-context: personas stack, emoji list +
@@ -1113,7 +1128,13 @@ def answer_voice_conversation(
                 if ensure_model_loaded(LLM_MODEL):
                     resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
-        message = resp.json()["choices"][0].get("message", {})
+        raw_json = resp.json()
+        usage = raw_json.get("usage", {})
+        if _stats_out is not None:
+            _stats_out["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
+            _stats_out["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+            _stats_out["outcome"] = "ok"
+        message = raw_json["choices"][0].get("message", {})
         content = (message.get("content") or "").strip()
         if "</think>" in content:
             _, _, rest = content.partition("</think>")
@@ -1150,11 +1171,20 @@ def answer_voice_conversation(
             return "Hmm, I blanked on that one — try me again?"
         log.info("[voice-convo] → %r", reply_text[:140])
         return reply_text
+    except requests.exceptions.Timeout:
+        log.error("[voice-convo] timed out")
+        if _stats_out is not None:
+            _stats_out["outcome"] = "timeout"
+        return "I took too long thinking — try again?"
     except requests.ConnectionError:
         log.error("[voice-convo] could not connect to Ollama at %s", LLM_URL)
+        if _stats_out is not None:
+            _stats_out["outcome"] = "connect_error"
         return "My brain's offline — Ollama isn't answering."
     except Exception as e:
         log.warning("[voice-convo] failed: %s", e)
+        if _stats_out is not None:
+            _stats_out["outcome"] = "error"
         return "Sorry, I glitched on that — ask me again?"
 
 
@@ -1165,9 +1195,11 @@ async def answer_voice_conversation_async(
     history: list[dict] | None = None,
     guild=None,
     voice_channel_name: str | None = None,
+    _stats_out: dict | None = None,
 ) -> str:
     return await asyncio.to_thread(
         answer_voice_conversation, command, sounds, saved, history, guild, voice_channel_name,
+        _stats_out,
     )
 
 
@@ -1184,7 +1216,8 @@ def _voice_history_messages(history: list[dict] | None) -> list[dict]:
 
 
 def parse_voice_intent(transcript: str, sounds, saved: list[dict],
-                       history: list[dict] | None = None) -> list[dict]:
+                       history: list[dict] | None = None,
+                       _stats_out: dict | None = None) -> list[dict]:
     """Lightweight LLM call to pick a sound from a voice command transcript."""
     pd_block = _format_persona_block()
 
@@ -1242,6 +1275,10 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         message = choice.get("message", {})
         finish_reason = choice.get("finish_reason", "unknown")
         usage = raw_json.get("usage", {})
+        if _stats_out is not None:
+            _stats_out["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
+            _stats_out["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+            _stats_out["outcome"] = "ok"
         content = (message.get("content") or "").strip()
         reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()
         if "</think>" in content:
@@ -1285,6 +1322,18 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         log.warning("Voice LLM returned non-JSON, using as conversation reply: %r",
                     content[:200])
         return [{"action": "conversation", "reply": content.strip()}]
+    except requests.exceptions.Timeout:
+        log.error("Voice intent parse timed out")
+        if _stats_out is not None:
+            _stats_out["outcome"] = "timeout"
+        return [{"action": "unknown", "message": "Voice LLM timed out."}]
+    except requests.ConnectionError:
+        log.error("Voice intent parse: ollama unreachable")
+        if _stats_out is not None:
+            _stats_out["outcome"] = "connect_error"
+        return [{"action": "unknown", "message": "Voice LLM unreachable."}]
     except Exception as e:
         log.error("Voice intent parse failed: %s", e)
+        if _stats_out is not None:
+            _stats_out["outcome"] = "error"
         return [{"action": "unknown", "message": "Couldn't process that voice command."}]

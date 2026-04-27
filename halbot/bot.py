@@ -43,8 +43,8 @@ from .slash import register_slash
 from .voice_session import (
     VOICE_RECV_AVAILABLE, HalbotVoiceRecvClient, VoiceChatSink, VoiceListener,
     VoiceSession, _channel_has_humans, _maybe_unload_whisper, _preload_tts_engine,
-    _spec_to_sink, cancel_voice_idle_timer, handle_voice_command, load_whisper,
-    persist_voice_session, schedule_voice_idle_timer, voice_listeners,
+    _spec_to_sink, cancel_voice_idle_timer, emit_voice_leave, handle_voice_command,
+    load_whisper, persist_voice_session, schedule_voice_idle_timer, voice_listeners,
 )
 
 log = logging.getLogger("halbot")
@@ -322,6 +322,7 @@ async def on_voice_state_update(member, before, after):
         session = voice_listeners.pop(guild_id, None)
         voice_reconnect_clear(guild_id)
         if session:
+            emit_voice_leave(session, reason="kicked")
             session.stop()
             log.info("Voice listener removed (bot left %s)", before.channel.name)
             _maybe_unload_whisper()
@@ -579,6 +580,7 @@ async def on_message(message: discord.Message):
         voice_status_str = "Not connected to any voice channel."
 
     _llm_t0 = time.monotonic()
+    _llm_stats: dict = {}
     actions = await asyncio.to_thread(
         parse_intent,
         user_text, sounds, saved, channel_history,
@@ -586,14 +588,20 @@ async def on_message(message: discord.Message):
         guild=guild,
         voice_channels_str=voice_channels_str,
         voice_status_str=voice_status_str,
+        _stats_out=_llm_stats,
     )
+    _llm_latency_ms = int((time.monotonic() - _llm_t0) * 1000)
+    _llm_tokens_out = int(_llm_stats.get("completion_tokens") or 0)
     analytics.record(
         "llm_call",
         user_id=message.author.id,
         guild_id=guild.id,
         target="parse_intent",
-        latency_ms=int((time.monotonic() - _llm_t0) * 1000),
+        latency_ms=_llm_latency_ms,
         action_count=len(actions) if isinstance(actions, list) else 0,
+        tokens_out=_llm_tokens_out,
+        prompt_tokens=int(_llm_stats.get("prompt_tokens") or 0),
+        outcome=str(_llm_stats.get("outcome") or "ok"),
     )
     replies = []
     # Dedicated embed sends queued during the action loop (persona.save,
@@ -1245,6 +1253,7 @@ async def on_message(message: discord.Message):
             cancel_voice_idle_timer(guild.id)
             existing = voice_listeners.pop(guild.id, None)
             if existing:
+                emit_voice_leave(existing, reason="rejoin")
                 existing.stop()
                 try:
                     await existing.vc.disconnect()
@@ -1299,6 +1308,7 @@ async def on_message(message: discord.Message):
             session = voice_listeners.pop(guild.id, None)
             voice_reconnect_clear(guild.id)
             if session:
+                emit_voice_leave(session, reason="command")
                 session.stop()
                 try:
                     await session.vc.disconnect()

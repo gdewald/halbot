@@ -190,12 +190,14 @@ class JsApi:
                 "detections_today": int(r.wake_word.detections_today),
                 "detections_all_time": int(r.wake_word.detections_all_time),
                 "false_positives_today": int(r.wake_word.false_positives_today),
-                "avg_join_latency_ms": int(r.wake_word.avg_join_latency_ms),
             },
             "stt": {
                 "avg_ms": int(r.stt.avg_ms),
                 "p95_ms": int(r.stt.p95_ms),
                 "count_today": int(r.stt.count_today),
+                "chunk_avg_ms": int(r.stt.chunk_avg_ms),
+                "chunk_p95_ms": int(r.stt.chunk_p95_ms),
+                "avg_audio_seconds": float(r.stt.avg_audio_seconds),
             },
             "tts": {
                 "avg_ms": int(r.tts.avg_ms),
@@ -205,8 +207,6 @@ class JsApi:
             "llm": {
                 "response_avg_ms": int(r.llm.response_avg_ms),
                 "response_p95_ms": int(r.llm.response_p95_ms),
-                "ttft_avg_ms": int(r.llm.ttft_avg_ms),
-                "ttft_p95_ms": int(r.llm.ttft_p95_ms),
                 "tokens_per_sec": int(r.llm.tokens_per_sec),
                 "requests_today": int(r.llm.requests_today),
                 "avg_tokens_out": int(r.llm.avg_tokens_out),

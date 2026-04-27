@@ -236,6 +236,35 @@ async def _voice_feedback(session, sink, text: str) -> None:
     await sink.send(text)
 
 
+def emit_voice_leave(session, *, reason: str) -> None:
+    """Record a voice_leave analytics event for a session about to disconnect.
+
+    Computes duration_seconds from session.started_unix; safe to call
+    even if the session was instantiated by older code without that
+    field. Idempotent in spirit — callers should still avoid double-call.
+    """
+    try:
+        started = int(getattr(session, "started_unix", 0) or 0)
+        duration = max(0, int(time.time()) - started) if started else 0
+        try:
+            gid = session.vc.guild.id if session.vc and session.vc.guild else 0
+        except Exception:
+            gid = 0
+        try:
+            channel_name = session.vc.channel.name if session.vc and session.vc.channel else ""
+        except Exception:
+            channel_name = ""
+        analytics.record(
+            "voice_leave",
+            guild_id=gid,
+            target=channel_name,
+            duration_seconds=duration,
+            reason=reason,
+        )
+    except Exception:
+        log.exception("[voice] emit_voice_leave failed")
+
+
 def _maybe_unload_whisper() -> None:
     """Free whisper + TTS VRAM once the last voice session ends."""
     if voice_listeners:
@@ -265,6 +294,7 @@ async def _voice_idle_disconnect(guild_id: int, delay: int) -> None:
     voice_reconnect_clear(guild_id)
     channel_name = session.vc.channel.name if session.vc.channel else "?"
     sink = session.message_sink
+    emit_voice_leave(session, reason="idle")
     session.stop()
     try:
         await session.vc.disconnect()
@@ -553,8 +583,10 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
         sounds = []
     saved = db_list()
     _llm_t0 = time.monotonic()
+    _llm_stats: dict = {}
     actions = await asyncio.to_thread(
-        parse_voice_intent, command, sounds, saved, history
+        parse_voice_intent, command, sounds, saved, history,
+        _stats_out=_llm_stats,
     )
     _action_count = len(actions) if isinstance(actions, list) else 0
     _outcome = "no_match"
@@ -562,6 +594,12 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
         first = actions[0] if actions else None
         if isinstance(first, dict):
             _outcome = str(first.get("action") or "matched")
+    # If the LLM call failed (timeout/connect_error/error), surface that
+    # as the outcome instead of the action-derived one — analytics
+    # `compute_dashboard_stats` keys timeouts off this field.
+    _call_outcome = str(_llm_stats.get("outcome") or "ok")
+    if _call_outcome != "ok":
+        _outcome = _call_outcome
     analytics.record(
         "llm_call",
         user_id=user_id,
@@ -571,6 +609,8 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
         action_count=_action_count,
         phrase=(command or "")[:160],
         outcome=_outcome,
+        tokens_out=int(_llm_stats.get("completion_tokens") or 0),
+        prompt_tokens=int(_llm_stats.get("prompt_tokens") or 0),
     )
     if not actions:
         actions = [{"action": "unknown",
@@ -679,6 +719,7 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
                 # full sound + emoji + voice-status context. Slow but
                 # thoughtful; output constrained to a single TTS-ready reply.
                 _convo_t0 = time.monotonic()
+                _convo_stats: dict = {}
                 vc_name = None
                 try:
                     vc_name = session.vc.channel.name if session.vc and session.vc.channel else None
@@ -691,6 +732,7 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
                     history=history,
                     guild=guild,
                     voice_channel_name=vc_name,
+                    _stats_out=_convo_stats,
                 )
                 analytics.record(
                     "llm_call",
@@ -699,6 +741,9 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
                     target="voice_conversation",
                     latency_ms=int((time.monotonic() - _convo_t0) * 1000),
                     chars=len(reply or ""),
+                    tokens_out=int(_convo_stats.get("completion_tokens") or 0),
+                    prompt_tokens=int(_convo_stats.get("prompt_tokens") or 0),
+                    outcome=str(_convo_stats.get("outcome") or "ok"),
                 )
                 await _voice_feedback(session, sink, reply)
                 _record(reply)

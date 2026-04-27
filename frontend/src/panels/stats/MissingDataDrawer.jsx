@@ -4,29 +4,20 @@ import { T } from '../../tokens.js';
 // Source-of-truth list of metrics-not-yet-emitted. Cards in Stats.jsx that map
 // to these keys render `—` for missing values; this drawer is the canonical
 // place to learn why a card is empty and what event/field would fill it.
-const GROUPS = [
-  { label: 'Wake Word', icon: '🎙', accent: T.green, items: [
-    { label: 'Avg join latency', unit: 'ms', source: 'wake_join_latency_ms', why: 'time from detection → voice channel join' },
-  ]},
-  { label: 'STT', icon: '👂', accent: T.cyan, items: [
-    { label: 'Chunk processing time', unit: 'ms', source: 'stt_chunk_ms', why: 'per-chunk decode time' },
-    { label: 'Avg utterance length', unit: 's', source: 'stt_audio_seconds', why: 'how long users actually talk' },
-  ]},
-  { label: 'TTS', icon: '🗣', accent: T.yellow, items: [
-    { label: 'First audio chunk', unit: 'ms', source: 'tts_first_chunk_ms', why: 'TTFA — perceived TTS speed' },
-    { label: 'Engine fallback', unit: 'today', source: 'tts_engine_fallback', why: 'count of kokoro→edge fallbacks' },
-  ]},
-  { label: 'LLM', icon: '🧠', accent: T.blurple, items: [
-    { label: 'Time to first token', unit: 'ms', source: 'llm_ttft_ms', why: 'TTFT — biggest perceived speed lever' },
-    { label: 'Throughput', unit: 'tok/s', source: 'llm_tokens_per_sec', why: 'tokens emitted / total time' },
-    { label: 'Avg tokens out', unit: '', source: 'llm_tokens_out', why: 'response length' },
-    { label: 'Context usage', unit: '%', source: 'llm_context_pct', why: 'tokens used / context window' },
-  ]},
-];
+//
+// As of 2026-04-27 the drawer is empty: implementable metrics were wired
+// (STT chunk decode, utterance length, LLM tokens/throughput/context/
+// timeouts, voice session seconds) and architecture-incompatible ones
+// were dropped (TTFT — non-streaming Ollama; engine fallback — single TTS
+// engine; first audio chunk — blocking synth; wake join latency — bot
+// joins before listening starts). Add new entries here when emitting a
+// stat that the UI shows but the daemon doesn't yet populate.
+const GROUPS = [];
 
 export function MissingDataDrawer() {
   const [open, setOpen] = useState(false);
   const total = GROUPS.reduce((n, g) => n + g.items.length, 0);
+  if (total === 0) return null;
 
   return (
     <div style={{

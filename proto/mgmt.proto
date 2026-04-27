@@ -161,6 +161,11 @@ message LatencyStats {
   int32 avg_ms = 1;
   int32 p95_ms = 2;
   int32 count_today = 3;
+  // STT-specific extensions (TTS leaves zeroed): per-chunk decode latency
+  // and average utterance length in seconds.
+  int32 chunk_avg_ms = 4;
+  int32 chunk_p95_ms = 5;
+  float avg_audio_seconds = 6;
 }
 
 message LlmStats {
