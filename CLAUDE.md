@@ -290,8 +290,10 @@ so existing tokens survive:
 Tray launches manually for now (no per-user autostart):
 
 ```powershell
-# Start Menu -> Halbot -> Halbot Tray  (or directly:)
-& "$env:ProgramFiles\Halbot\.venv\Scripts\halbot-tray.exe"
+# Start Menu -> Halbot -> Halbot Tray  (or from the repo:)
+scripts\start-tray.ps1
+# direct equivalent:
+& "$env:ProgramFiles\Halbot\.venv\Scripts\pythonw.exe" -m tray
 ```
 
 ## Deploy — operational (update existing install)

@@ -11,7 +11,7 @@
       .venv\         project venv (uv sync --frozen target)
       src\           halbot, tray, dashboard, frontend, proto, pyproject, uv.lock
       nssm.exe       service host
-      halbot-tray.cmd  pythonw.exe -m tray launcher
+      Start Menu shortcut -> pythonw.exe -m tray
 
   Steps:
     1. Verify elevated.
@@ -23,7 +23,7 @@
     7. Drop nssm.exe into install root (fetch if missing).
     8. Hand off to `halbot.installer:install` (NSSM service create,
        HKLM ACLs, ProgramData ACLs, service-control ACL, autostart).
-    9. Write halbot-tray.cmd launcher.
+    9. Write Start Menu shortcut -> pythonw.exe -m tray.
 
   Idempotent: re-running a clean install does not lose registry config
   or DPAPI secrets (those live under HKLM\SOFTWARE\Halbot, untouched
@@ -268,5 +268,5 @@ if (-not $SkipServiceStart) {
 Write-Host ""
 Write-Host "[install] done. Service auto-starts at boot."
 Write-Host "[install] tray: Start Menu -> Halbot -> Halbot Tray"
-Write-Host "[install]       (or run $(Join-Path $InstallRoot '.venv\Scripts\halbot-tray.exe') directly)"
+Write-Host "[install]       (or scripts\start-tray.ps1 from the repo)"
 Pop-Location
