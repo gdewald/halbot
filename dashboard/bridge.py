@@ -58,6 +58,10 @@ class JsApi:
             "llm_reachable": h.llm_reachable,
             "whisper_loaded": h.whisper_loaded,
             "tts_loaded": h.tts_loaded,
+            "pid": int(h.pid),
+            "rss_bytes": int(h.rss_bytes),
+            "cpu_percent": float(h.cpu_percent),
+            "guild_count": int(h.guild_count),
         }
 
     # ── Config ───────────────────────────────────────────────

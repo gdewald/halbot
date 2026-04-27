@@ -73,6 +73,10 @@ message HealthReply {
   VoiceState voice = 5;
   bool whisper_loaded = 6;
   bool tts_loaded = 7;
+  uint32 pid = 8;
+  uint64 rss_bytes = 9;
+  double cpu_percent = 10;
+  uint32 guild_count = 11;
 }
 
 message StringValue {

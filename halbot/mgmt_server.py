@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 import grpc
@@ -98,6 +99,25 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             except Exception:
                 pass
 
+        pid = os.getpid()
+        rss_bytes = 0
+        cpu_percent = 0.0
+        try:
+            import psutil
+            proc = self._psutil_proc()
+            rss_bytes = int(proc.memory_info().rss)
+            cpu_percent = float(proc.cpu_percent(interval=None))
+        except Exception:
+            pass
+
+        guild_count = 0
+        try:
+            client = getattr(bot_module, "client", None)
+            if client is not None and getattr(client, "guilds", None) is not None:
+                guild_count = len(client.guilds)
+        except Exception:
+            pass
+
         return mgmt_pb2.HealthReply(
             uptime_seconds=time.time() - self._started,
             daemon_version=self._version,
@@ -106,7 +126,20 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             voice=voice_msg,
             whisper_loaded=whisper_loaded,
             tts_loaded=tts_loaded,
+            pid=pid,
+            rss_bytes=rss_bytes,
+            cpu_percent=cpu_percent,
+            guild_count=guild_count,
         )
+
+    def _psutil_proc(self):
+        # cpu_percent needs a prior call to seed its delta; cache the Process
+        # so successive calls return real percentages instead of 0.0.
+        import psutil
+        if not hasattr(self, "_psu_proc"):
+            self._psu_proc = psutil.Process()
+            self._psu_proc.cpu_percent(interval=None)
+        return self._psu_proc
 
     async def GetConfig(self, request, context):
         return _state_msg()

@@ -11,7 +11,7 @@ const SNAPSHOT = (typeof window !== 'undefined') ? window.__STATS_SNAPSHOT__ : n
 export const IS_SNAPSHOT = !!SNAPSHOT;
 
 const STUB = {
-  health: async () => ({ uptime_seconds: 0, daemon_version: 'dev', llm_reachable: false, whisper_loaded: false, tts_loaded: false }),
+  health: async () => ({ uptime_seconds: 0, daemon_version: 'dev', llm_reachable: false, whisper_loaded: false, tts_loaded: false, pid: 0, rss_bytes: 0, cpu_percent: 0, guild_count: 0 }),
   get_config: async () => ({}),
   update_config: async () => ({}),
   persist_config: async () => ({}),
@@ -54,6 +54,7 @@ function makeSnapshotBridge(S) {
       uptime_seconds: 0,
       daemon_version: `static snapshot · ${S.generated_at_utc || ''}`,
       llm_reachable: false, whisper_loaded: false, tts_loaded: false,
+      pid: 0, rss_bytes: 0, cpu_percent: 0, guild_count: 0,
     }),
     get_stats: async () => S.stats || { mock: true },
     soundboard_list: async () => S.soundboard || [],
