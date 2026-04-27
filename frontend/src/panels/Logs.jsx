@@ -1,20 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { T, LC, LBD } from '../tokens.js';
+import { T, LC } from '../tokens.js';
 import { ToggleBtn } from '../components/ToggleBtn.jsx';
 import { LogRow } from './logs/LogRow.jsx';
 import { useLogStream } from './logs/useLogStream.js';
 
-const LEVEL_FILTERS = ['ALL', 'DEBUG', 'INFO', 'WARN', 'ERROR'];
+const LEVELS = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
 
-function levelMatch(recordLevel, filter) {
-  if (filter === 'ALL') return true;
-  if (filter === 'WARN') return recordLevel === 'WARN' || recordLevel === 'WARNING';
-  return recordLevel === filter;
+function normalizeLevel(l) {
+  return l === 'WARNING' ? 'WARN' : l;
 }
 
 export function LogsPanel() {
   const { logs, connected, clear } = useLogStream();
-  const [filter, setFilter] = useState('ALL');
+  const [enabled, setEnabled] = useState({ DEBUG: true, INFO: true, WARN: true, ERROR: true });
   const [search, setSearch] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [wrap, setWrap] = useState(false);
@@ -25,11 +23,12 @@ export function LogsPanel() {
   const visible = useMemo(() => {
     const q = search.toLowerCase();
     return effectiveLogs.filter(l => {
-      if (!levelMatch(l.level, filter)) return false;
+      const lvl = normalizeLevel(l.level);
+      if (!enabled[lvl]) return false;
       if (q) return l.message.toLowerCase().includes(q) || (l.source || '').toLowerCase().includes(q);
       return true;
     });
-  }, [effectiveLogs, filter, search]);
+  }, [effectiveLogs, enabled, search]);
 
   // Pin to bottom whenever logs change (or tail re-enabled). Depends on
   // `logs` reference — not `visible.length` — so it keeps firing after the
@@ -55,15 +54,18 @@ export function LogsPanel() {
   };
 
   const counts = useMemo(() => {
-    const c = { ALL: effectiveLogs.length, DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0 };
+    const c = { DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0 };
     for (const l of effectiveLogs) {
-      if (l.level === 'DEBUG') c.DEBUG++;
-      else if (l.level === 'INFO') c.INFO++;
-      else if (l.level === 'WARN' || l.level === 'WARNING') c.WARN++;
-      else if (l.level === 'ERROR') c.ERROR++;
+      const lvl = normalizeLevel(l.level);
+      if (c[lvl] !== undefined) c[lvl]++;
     }
     return c;
   }, [effectiveLogs]);
+
+  const onCount = LEVELS.filter(l => enabled[l]).length;
+  const allOn = onCount === LEVELS.length;
+  const toggle = (l) => setEnabled(e => ({ ...e, [l]: !e[l] }));
+  const setAll = (v) => setEnabled(LEVELS.reduce((a, l) => ({ ...a, [l]: v }), {}));
 
   const onClear = () => setViewOffset(logs.length);
 
@@ -74,27 +76,52 @@ export function LogsPanel() {
         display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px',
         borderBottom: `1px solid ${T.border}`, flexShrink: 0, flexWrap: 'wrap', rowGap: 6,
       }}>
-        <div style={{ display: 'flex', gap: 2 }}>
-          {LEVEL_FILTERS.map(f => {
-            const a = filter === f;
-            const color = f === 'ALL' ? T.blurple : LC[f === 'WARN' ? 'WARN' : f];
-            return (
-              <button key={f} onClick={() => setFilter(f)} style={{
-                height: 26, padding: '0 9px', borderRadius: 5,
-                border: `1px solid ${a ? color : T.border}`,
-                background: a ? (f === 'ALL' ? `${T.blurple}22` : LBD[f]) : 'transparent',
-                color: a ? color : T.dim,
-                fontSize: 10, fontWeight: 600, cursor: 'pointer',
-                fontFamily: 'JetBrains Mono',
-                display: 'flex', alignItems: 'center', gap: 4, transition: 'all 0.1s',
-              }}>
-                {f}
-                <span style={{ fontSize: 9, opacity: 0.65, background: 'rgba(255,255,255,0.08)', borderRadius: 3, padding: '0 3px' }}>
-                  {counts[f]}
-                </span>
-              </button>
-            );
-          })}
+        {/* multi-select capsule: ALL master + per-level toggles */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, background: T.panel,
+          border: `1px solid ${T.border}`, borderRadius: 7, padding: 2, height: 28,
+        }}>
+          <button onClick={() => setAll(!allOn)} title={allOn ? 'deselect all' : 'select all'} style={{
+            height: 24, padding: '0 10px', borderRadius: 5, border: 'none', cursor: 'pointer',
+            background: allOn ? T.blurple : 'transparent',
+            color: allOn ? '#fff' : T.sub,
+            fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', letterSpacing: '0.05em',
+            display: 'flex', alignItems: 'center', gap: 5,
+          }}>
+            ALL
+            <span style={{
+              fontSize: 9, opacity: 0.85,
+              background: allOn ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.06)',
+              borderRadius: 3, padding: '0 4px',
+            }}>{onCount}/{LEVELS.length}</span>
+          </button>
+          <div style={{ width: 1, height: 14, background: T.border2 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+            {LEVELS.map(f => {
+              const a = enabled[f];
+              const color = LC[f];
+              return (
+                <button key={f} onClick={() => toggle(f)} style={{
+                  height: 24, padding: '0 10px', borderRadius: 5, border: 'none', cursor: 'pointer',
+                  background: a ? `${color}30` : 'transparent',
+                  color: a ? color : `${T.sub}88`,
+                  fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', letterSpacing: '0.05em',
+                  display: 'flex', alignItems: 'center', gap: 5, transition: 'all 0.12s',
+                  opacity: a ? 1 : 0.5,
+                  textDecoration: a ? 'none' : 'line-through',
+                  textDecorationThickness: '1px',
+                  textDecorationColor: 'rgba(255,255,255,0.25)',
+                }}>
+                  {f}
+                  <span style={{
+                    fontSize: 9, opacity: a ? 0.85 : 0.6,
+                    background: 'rgba(255,255,255,0.06)',
+                    borderRadius: 3, padding: '0 4px',
+                  }}>{counts[f]}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div style={{ flex: 1 }} />
         {/* search */}
