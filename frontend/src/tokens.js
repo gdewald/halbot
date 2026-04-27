@@ -6,7 +6,10 @@ export const T = {
   green:'#23d18b', red:'#f04747', yellow:'#faa61a', cyan:'#4fc3f7',
 };
 
-export const LC = { DEBUG: T.dim, INFO: T.cyan, WARN: T.yellow, ERROR: T.red, WARNING: T.yellow };
+// Hex-only — Logs.jsx and LevelPill.jsx append 2-digit hex alpha to these
+// values (e.g. `${color}30`). T.dim was rgba() which produced invalid CSS
+// when concatenated, hiding the active DEBUG capsule.
+export const LC = { DEBUG: '#9aa0aa', INFO: T.cyan, WARN: T.yellow, ERROR: T.red, WARNING: T.yellow };
 export const LB = {
   DEBUG:'rgba(255,255,255,0.04)', INFO:'rgba(79,195,247,0.1)',
   WARN:'rgba(250,166,26,0.1)', WARNING:'rgba(250,166,26,0.1)',
