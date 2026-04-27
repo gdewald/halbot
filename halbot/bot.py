@@ -51,6 +51,14 @@ log = logging.getLogger("halbot")
 
 _discord_state: str = "DISCONNECTED"
 
+# Discord-built-in soundboard sounds (the 12 default sounds available to
+# every server: quack, cuckoo, etc.). Populated once via
+# `client.fetch_soundboard_default_sounds()` on first ready. These don't
+# appear in `guild.soundboard_sounds` (which only carries user uploads),
+# so without this cache analytics rows fell through to a `sound_<id>`
+# placeholder.
+_default_sound_names: dict[int, str] = {}
+
 
 def _set_discord_state(state: str) -> None:
     global _discord_state
@@ -200,6 +208,8 @@ async def on_ready():
     _set_discord_state("CONNECTED")
     log.info("Logged in as %s (id: %s)", client.user, client.user.id)
     register_persistent_views(client)
+    await _refresh_default_sound_names()
+    await asyncio.to_thread(_backfill_default_sound_targets)
     if _slash_tree is not None:
         for guild in client.guilds:
             try:
@@ -238,6 +248,62 @@ async def on_ready():
                 log.info("[voice] Reconnected to #%s", vc_channel.name)
             except Exception:
                 log.exception("[voice] Failed to reconnect to #%s", vc_channel.name)
+
+
+async def _refresh_default_sound_names() -> None:
+    """Populate `_default_sound_names` from Discord's default soundboard set.
+
+    Idempotent — overwrites the dict each call. Called once on connect;
+    Discord's default sounds change rarely enough that one fetch per
+    process lifetime is fine.
+    """
+    if client is None:
+        return
+    try:
+        defaults = await client.fetch_soundboard_default_sounds()
+    except Exception:
+        log.exception("[soundboard] fetch_soundboard_default_sounds failed")
+        return
+    _default_sound_names.clear()
+    for s in defaults or []:
+        sid = int(getattr(s, "id", 0) or 0)
+        name = getattr(s, "name", "") or ""
+        if sid and name:
+            _default_sound_names[sid] = name
+    log.info("[soundboard] cached %d Discord default sound names", len(_default_sound_names))
+
+
+def _backfill_default_sound_targets() -> None:
+    """Rewrite legacy `target='sound_<id>'` rows to the real default-sound name.
+
+    Old `on_voice_channel_effect` invocations recorded a `sound_<id>`
+    placeholder when name resolution missed (Discord defaults aren't in
+    `guild.soundboard_sounds`). One-shot scan at daemon start updates
+    those rows in-place using the freshly-cached default-name map.
+    """
+    if not _default_sound_names:
+        return
+    try:
+        from . import paths as _paths
+        import sqlite3
+        db = _paths.events_db()
+        conn = sqlite3.connect(str(db))
+        try:
+            updated = 0
+            for sid, name in _default_sound_names.items():
+                cur = conn.execute(
+                    "UPDATE events SET target = ? "
+                    "WHERE kind = 'soundboard_play' AND target = ?",
+                    (name, f"sound_{sid}"),
+                )
+                updated += cur.rowcount or 0
+            if updated:
+                conn.commit()
+                log.info("[soundboard] backfilled %d sound_<id> rows", updated)
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("[soundboard] backfill failed")
 
 
 async def on_guild_emojis_update(guild, before, after):
@@ -294,6 +360,12 @@ async def on_voice_channel_effect(effect: "discord.VoiceChannelEffect") -> None:
                         break
             except Exception:
                 pass
+        # Final tier: Discord built-in default soundboard (the 12 every
+        # server gets — quack, cuckoo, etc.). These are NOT part of
+        # guild.soundboard_sounds; resolved once at on_ready into
+        # `_default_sound_names`.
+        if not name and sound_id:
+            name = _default_sound_names.get(sound_id, "")
         analytics.record(
             "soundboard_play",
             user_id=user_id,
