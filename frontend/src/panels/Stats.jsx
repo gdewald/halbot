@@ -6,6 +6,7 @@ import { LatencyCard } from './stats/LatencyCard.jsx';
 import { HealthBanner } from './stats/HealthBanner.jsx';
 import { MissingDataDrawer } from './stats/MissingDataDrawer.jsx';
 import { Pagination, usePagination } from './stats/Pagination.jsx';
+import { EmojiCell, useEmojiIndex } from './stats/EmojiCell.jsx';
 
 const dash = (v) => (v ? v : '—');
 
@@ -46,25 +47,6 @@ function fmtByteCol(n) {
   const kb = n / 1024;
   if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
   return `${Math.round(kb)} KB`;
-}
-
-const CUSTOM_EMOJI_RE = /^<a?:([A-Za-z0-9_]+):(\d+)>$/;
-function parseCustomEmoji(raw) {
-  if (!raw) return null;
-  const m = CUSTOM_EMOJI_RE.exec(raw);
-  if (!m) return null;
-  return { name: m[1], id: m[2] };
-}
-function EmojiCell({ raw, emojiIndex }) {
-  if (!raw) return <span>•</span>;
-  const parsed = parseCustomEmoji(raw);
-  if (!parsed) return <span>{raw}</span>;  // unicode emoji: render directly
-  const hit = emojiIndex?.byId?.get(parsed.id) || emojiIndex?.byName?.get(parsed.name);
-  if (hit?.image_data_url) {
-    return <img src={hit.image_data_url} alt={parsed.name} title={parsed.name}
-                style={{ width: 16, height: 16, objectFit: 'contain', verticalAlign: 'middle' }} />;
-  }
-  return <span title={parsed.name}>•</span>;
 }
 
 function fmtDuration(sec) {
@@ -160,15 +142,7 @@ export function StatsPanel() {
     return '';
   };
 
-  const emojiIndex = useMemo(() => {
-    const byId = new Map();
-    const byName = new Map();
-    for (const e of emojis) {
-      if (e.emoji_id) byId.set(String(e.emoji_id), e);
-      if (e.name) byName.set(e.name, e);
-    }
-    return { byId, byName };
-  }, [emojis]);
+  const emojiIndex = useEmojiIndex(emojis);
 
   const sb = stats.soundboard;
   const vp = stats.voice_playback;

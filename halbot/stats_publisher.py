@@ -322,22 +322,26 @@ def _emoji_table(referenced_ids: Optional[set] = None,
     return out
 
 
-def _referenced_emoji_keys(soundboard: List[Dict[str, Any]]) -> tuple[set, set]:
-    """Extract custom Discord emoji IDs + names referenced by soundboard rows.
+def _referenced_emoji_keys(*row_lists: List[Dict[str, Any]]) -> tuple[set, set]:
+    """Extract custom Discord emoji IDs + names from any number of row lists.
 
     Returns (ids, names) — both used by `_emoji_table` to filter the bundled
     rows. `names` mirrors Stats.jsx's `byName` fallback, which kicks in when
     an emoji was re-uploaded with a new ID but the same name.
     Unicode emoji cells (no `<:name:id>` form) need no lookup row.
+
+    Accepts multiple row lists so soundboard, top_sounds, etc. all
+    contribute referenced emoji keys to the bundled emoji table.
     """
     ids: set = set()
     names: set = set()
-    for row in soundboard:
-        raw = row.get("emoji") or ""
-        m = _CUSTOM_EMOJI_RE.search(raw)
-        if m:
-            names.add(m.group(1))
-            ids.add(m.group(2))
+    for rows in row_lists:
+        for row in rows or []:
+            raw = row.get("emoji") or ""
+            m = _CUSTOM_EMOJI_RE.search(raw)
+            if m:
+                names.add(m.group(1))
+                ids.add(m.group(2))
     return ids, names
 
 
@@ -384,7 +388,7 @@ def snapshot_stats(client: Any,
             row["emoji"] = em
 
     soundboard = _soundboard_table()
-    ref_ids, ref_names = _referenced_emoji_keys(soundboard)
+    ref_ids, ref_names = _referenced_emoji_keys(soundboard, sounds_30d.get("rows", []))
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
