@@ -33,6 +33,8 @@ def _suppress_console() -> None:
 _suppress_console()
 
 import logging  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
 import threading  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -98,6 +100,11 @@ def open_window() -> None:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
+    if "--dev" in sys.argv[1:] or os.environ.get("HALBOT_DASHBOARD_DEV") == "1":
+        from .dev_server import serve
+        port = int(os.environ.get("HALBOT_DASHBOARD_DEV_PORT", "51199"))
+        serve(port=port)
+        return 0
     open_window()
     return 0
 

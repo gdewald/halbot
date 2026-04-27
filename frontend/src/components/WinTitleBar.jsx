@@ -1,12 +1,16 @@
 import { T } from '../tokens.js';
 import { b } from '../bridge.js';
 
+const HAS_PYWEBVIEW = typeof window !== 'undefined'
+  && typeof location !== 'undefined'
+  && location.protocol === 'file:';
+
 export function WinTitleBar({ title, subtitle }) {
-  const buttons = [
+  const buttons = HAS_PYWEBVIEW ? [
     { label: '─', hov: 'rgba(255,255,255,0.08)', act: () => b.minimize() },
     { label: '□', hov: 'rgba(255,255,255,0.08)', act: () => b.maximize() },
     { label: '✕', hov: '#c42b1c',               act: () => b.close() },
-  ];
+  ] : [];
   return (
     <div style={{
       height: 32, flexShrink: 0, background: T.surface,

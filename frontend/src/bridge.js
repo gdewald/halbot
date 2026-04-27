@@ -1,12 +1,16 @@
 // Thin wrapper over window.pywebview.api.*.
-// Three modes:
+// Four modes (chosen by transport detection at script load):
 //   1. Static snapshot — index.html injected `window.__STATS_SNAPSHOT__`
 //      by halbot.stats_publisher. Returns pre-computed data, mutations no-op.
-//   2. pywebview — bot operator's tray dashboard.
-//   3. Browser dev — STUB returns empty data.
+//   2. HTTP — page served over http(s):// by dashboard/dev_server.py.
+//      Calls go to POST /api/{method} with {args: [...]} body.
+//   3. pywebview — bot operator's tray dashboard, loaded over file://.
+//   4. Browser dev fallback — STUB returns empty data.
 
 const api = () => window.pywebview?.api;
 const SNAPSHOT = (typeof window !== 'undefined') ? window.__STATS_SNAPSHOT__ : null;
+const IS_HTTP = (typeof location !== 'undefined')
+  && (location.protocol === 'http:' || location.protocol === 'https:');
 
 export const IS_SNAPSHOT = !!SNAPSHOT;
 
@@ -67,9 +71,25 @@ function makeSnapshotBridge(S) {
 
 const SNAPSHOT_BRIDGE = SNAPSHOT ? makeSnapshotBridge(SNAPSHOT) : null;
 
+async function httpCall(name, args) {
+  const r = await fetch(`/api/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ args }),
+  });
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).detail || ''; } catch (_) { detail = await r.text(); }
+    throw new Error(`api ${name} → ${r.status} ${detail}`);
+  }
+  if (r.status === 204) return null;
+  return r.json();
+}
+
 function make(name) {
   return async (...args) => {
     if (SNAPSHOT_BRIDGE) return SNAPSHOT_BRIDGE[name](...args);
+    if (IS_HTTP) return httpCall(name, args);
     const a = api();
     if (!a) return STUB[name](...args);
     return a[name](...args);
