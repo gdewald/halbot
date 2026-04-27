@@ -270,6 +270,24 @@ class JsApi:
         out.sort(key=lambda r: r["plays"], reverse=True)
         return out
 
+    # ── Wake-word history ────────────────────────────────────
+    def wake_history(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Last N wake-word events. Pulled via daemon's WakeHistory RPC."""
+        try:
+            r = self._client.wake_history(int(limit or 0))
+        except Exception as e:
+            log.warning("wake_history rpc failed: %s", e)
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in r.rows:
+            out.append({
+                "ts": int(row.ts_unix),
+                "phrase": str(row.phrase or ""),
+                "outcome": str(row.outcome or ""),
+                "ok": bool(row.ok),
+            })
+        return out
+
     # ── Emojis ───────────────────────────────────────────────
     def emoji_list(self) -> List[Dict[str, Any]]:
         """Return all synced custom emojis with image bytes encoded as data URLs.

@@ -331,6 +331,54 @@ def fetch_recent_events(days: int = 60, limit: int = 3000,
             pass
 
 
+def wake_history(limit: int = 25) -> List[Dict[str, Any]]:
+    """Last N wake-word events: user transcript + first-action outcome.
+
+    Pulled from `parse_voice_intent` analytics records, which voice_session
+    enriches with `phrase` (transcript) + `outcome` (action.type or 'no_match')
+    in their meta_json. Most-recent-first.
+    """
+    n = max(1, min(100, int(limit) or 25))
+    try:
+        conn = _open_db()
+    except Exception:
+        return []
+    try:
+        cur = conn.execute(
+            "SELECT ts_unix, meta_json FROM events "
+            "WHERE kind = 'llm_call' AND target = 'parse_voice_intent' "
+            "ORDER BY ts_unix DESC LIMIT ?",
+            (n,),
+        )
+        out: List[Dict[str, Any]] = []
+        for ts, meta_raw in cur.fetchall():
+            meta: Dict[str, Any] = {}
+            if meta_raw:
+                try:
+                    parsed = json.loads(meta_raw)
+                    if isinstance(parsed, dict):
+                        meta = parsed
+                except Exception:
+                    pass
+            phrase = str(meta.get("phrase") or "").strip()
+            outcome = str(meta.get("outcome") or "").strip()
+            action_count = int(meta.get("action_count") or 0)
+            if not outcome:
+                outcome = "matched" if action_count > 0 else "no_match"
+            out.append({
+                "ts": int(ts),
+                "phrase": phrase,
+                "outcome": outcome,
+                "ok": action_count > 0,
+            })
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # ── Retention ──────────────────────────────────────────────
 def prune_older_than(retention_days: int) -> int:
     cutoff = int(time.time()) - max(1, int(retention_days)) * 86400

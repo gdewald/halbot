@@ -377,6 +377,20 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             )
         return reply
 
+    async def WakeHistory(self, request, context):
+        from . import analytics
+        n = int(request.limit or 0)
+        rows = await asyncio.to_thread(analytics.wake_history, n or 25)
+        reply = mgmt_pb2.WakeHistoryReply()
+        for r in rows:
+            reply.rows.add(
+                ts_unix=int(r["ts"]),
+                phrase=r["phrase"],
+                outcome=r["outcome"],
+                ok=bool(r["ok"]),
+            )
+        return reply
+
     async def StreamEvents(self, request, context):
         from . import analytics
         kind = request.kind or ""

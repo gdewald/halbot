@@ -93,6 +93,12 @@ class MgmtClient:
         )
         return self._call("QueryStats", req, timeout=5.0)
 
+    def wake_history(self, limit=25):
+        return self._call(
+            "WakeHistory",
+            mgmt_pb2.WakeHistoryRequest(limit=int(limit or 0)),
+        )
+
     def stream_events(self, *, backlog=0, kind="", user_id=0):
         req = mgmt_pb2.StreamEventsRequest(
             backlog=int(backlog or 0), kind=kind, user_id=int(user_id or 0),

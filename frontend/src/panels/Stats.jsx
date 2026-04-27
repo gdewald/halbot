@@ -5,6 +5,7 @@ import { StatCard, MiniBar, SectionHeader } from './stats/StatCard.jsx';
 import { LatencyCard } from './stats/LatencyCard.jsx';
 import { HealthBanner } from './stats/HealthBanner.jsx';
 import { MissingDataDrawer } from './stats/MissingDataDrawer.jsx';
+import { WakeHistory } from './stats/WakeHistory.jsx';
 
 const dash = (v) => (v ? v : '—');
 
@@ -267,6 +268,7 @@ export function StatsPanel() {
           <StatCard label="False positives"  value={ww.false_positives_today} unit="today" sub={falsePct} accent={T.yellow} />
           <StatCard label="Avg join latency" value={dash(ww.avg_join_latency_ms)} unit={ww.avg_join_latency_ms ? 'ms' : ''} sub="wake → audio" accent={T.blurple} />
         </div>
+        <WakeHistory />
 
         {/* STT */}
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />

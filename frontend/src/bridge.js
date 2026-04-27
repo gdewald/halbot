@@ -28,6 +28,7 @@ const STUB = {
   get_stats: async () => ({ mock: true }),
   soundboard_list: async () => [],
   emoji_list: async () => [],
+  wake_history: async () => [],
   query_stats: async () => ({ total_count: 0, rows: [] }),
   backlog_events: async () => [],
   pop_event_batch: async () => [],
@@ -59,6 +60,7 @@ function makeSnapshotBridge(S) {
     get_stats: async () => S.stats || { mock: true },
     soundboard_list: async () => S.soundboard || [],
     emoji_list: async () => S.emoji || [],
+    wake_history: async () => S.wake_history || [],
     query_stats: queryStats,
   };
 }
@@ -92,6 +94,7 @@ export const b = {
   getStats: make('get_stats'),
   soundboardList: make('soundboard_list'),
   emojiList: make('emoji_list'),
+  wakeHistory: make('wake_history'),
   queryStats: make('query_stats'),
   backlogEvents: make('backlog_events'),
   popEventBatch: make('pop_event_batch'),

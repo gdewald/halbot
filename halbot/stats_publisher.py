@@ -365,6 +365,7 @@ def snapshot_stats(client: Any,
         },
         "soundboard": soundboard,
         "emoji": _emoji_table(referenced_ids=ref_ids, referenced_names=ref_names),
+        "wake_history": analytics.wake_history(limit=25),
     }
 
 

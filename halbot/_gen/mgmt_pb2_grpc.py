@@ -114,6 +114,11 @@ class MgmtStub(object):
                 request_serializer=mgmt__pb2.StreamEventsRequest.SerializeToString,
                 response_deserializer=mgmt__pb2.Event.FromString,
                 _registered_method=True)
+        self.WakeHistory = channel.unary_unary(
+                '/halbot.mgmt.Mgmt/WakeHistory',
+                request_serializer=mgmt__pb2.WakeHistoryRequest.SerializeToString,
+                response_deserializer=mgmt__pb2.WakeHistoryReply.FromString,
+                _registered_method=True)
 
 
 class MgmtServicer(object):
@@ -215,6 +220,12 @@ class MgmtServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def WakeHistory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MgmtServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -297,6 +308,11 @@ def add_MgmtServicer_to_server(servicer, server):
                     servicer.StreamEvents,
                     request_deserializer=mgmt__pb2.StreamEventsRequest.FromString,
                     response_serializer=mgmt__pb2.Event.SerializeToString,
+            ),
+            'WakeHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.WakeHistory,
+                    request_deserializer=mgmt__pb2.WakeHistoryRequest.FromString,
+                    response_serializer=mgmt__pb2.WakeHistoryReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -731,6 +747,33 @@ class Mgmt(object):
             '/halbot.mgmt.Mgmt/StreamEvents',
             mgmt__pb2.StreamEventsRequest.SerializeToString,
             mgmt__pb2.Event.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WakeHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/halbot.mgmt.Mgmt/WakeHistory',
+            mgmt__pb2.WakeHistoryRequest.SerializeToString,
+            mgmt__pb2.WakeHistoryReply.FromString,
             options,
             channel_credentials,
             insecure,

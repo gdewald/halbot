@@ -556,13 +556,21 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
     actions = await asyncio.to_thread(
         parse_voice_intent, command, sounds, saved, history
     )
+    _action_count = len(actions) if isinstance(actions, list) else 0
+    _outcome = "no_match"
+    if _action_count > 0 and isinstance(actions, list):
+        first = actions[0] if actions else None
+        if isinstance(first, dict):
+            _outcome = str(first.get("action") or "matched")
     analytics.record(
         "llm_call",
         user_id=user_id,
         guild_id=guild.id,
         target="parse_voice_intent",
         latency_ms=int((time.monotonic() - _llm_t0) * 1000),
-        action_count=len(actions) if isinstance(actions, list) else 0,
+        action_count=_action_count,
+        phrase=(command or "")[:160],
+        outcome=_outcome,
     )
     if not actions:
         actions = [{"action": "unknown",

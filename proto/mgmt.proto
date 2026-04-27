@@ -19,6 +19,7 @@ service Mgmt {
   rpc GetStats (Empty) returns (StatsReply);
   rpc QueryStats (QueryStatsRequest) returns (QueryStatsReply);
   rpc StreamEvents (StreamEventsRequest) returns (stream Event);
+  rpc WakeHistory (WakeHistoryRequest) returns (WakeHistoryReply);
 }
 
 enum ConfigSource {
@@ -218,4 +219,19 @@ message StreamEventsRequest {
   int32  backlog = 1;     // events to replay on connect; 0 = none
   string kind    = 2;     // filter; empty = all
   uint64 user_id = 3;     // filter; 0 = all
+}
+
+message WakeHistoryRequest {
+  int32 limit = 1;   // 0 = 25, max 100
+}
+
+message WakeHistoryRow {
+  int64  ts_unix = 1;
+  string phrase  = 2;   // user transcript that triggered the parse
+  string outcome = 3;   // first action.type (or "no_match")
+  bool   ok      = 4;   // true when parse produced any actions
+}
+
+message WakeHistoryReply {
+  repeated WakeHistoryRow rows = 1;
 }
