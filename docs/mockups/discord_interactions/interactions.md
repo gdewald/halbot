@@ -65,14 +65,15 @@ Live tail with backlog (up to 200 lines). Min-level filter (DEBUG/INFO/WARN/ERRO
 ### Stats
 Read-only cards & tables:
 - Soundboard: total sounds, bytes stored, new-since-sync.
-- Voice playback: plays today / all-time, session seconds, avg response latency.
-- Wake word: detections today / all-time, false-positive count, avg wake→join latency.
-- STT / TTS: avg + p95 duration ms, count today.
-- LLM: response latency, TTFT, tokens/sec, requests today, context-usage %.
-- Soundboard table: name, emoji, size, saved-by, 30-day play count, last-played.
+- Voice playback: plays today / all-time, session seconds (sum of `voice_leave.duration_seconds`).
+- Wake word: detections today / all-time, false-positive count.
+- STT: transcription latency avg+p95, chunk decode avg+p95, segments today, avg utterance length.
+- TTS: full render latency avg+p95, renders today.
+- LLM: response latency, throughput (tok/s), requests today, avg tokens out, context-usage %, timeouts today.
+- Soundboard table: name, emoji, size, saved-by, 30-day play count, last-played. Paginated 10 per page.
 
 ### Analytics
-Query events from the analytics store. Filter by kind (`mention`, `cmd_invoke`, `hook_fired`, `soundboard_play`, `llm_call`, …), user, target, date range; group-by; drill-down.
+Aggregate readbacks from the analytics store: kind-mix pills, top soundboard plays, top commands invoked, top users by activity. All variable-length lists paginate 10 per page. Click a kind pill or user row to filter.
 
 ### Emojis
 Gallery of synced custom server emojis with names, IDs, descriptions, images.
