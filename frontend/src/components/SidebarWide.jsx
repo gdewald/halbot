@@ -1,7 +1,7 @@
 import { T } from '../tokens.js';
 import { NAV_ITEMS } from './navItems.jsx';
 
-export function SidebarWide({ active, onChange }) {
+export function SidebarWide({ active, onChange, items = NAV_ITEMS }) {
   return (
     <div style={{
       width: 160, height: '100%', background: T.surface,
@@ -21,7 +21,7 @@ export function SidebarWide({ active, onChange }) {
         fontSize: 9, fontWeight: 600, color: T.dim, letterSpacing: '0.1em',
         textTransform: 'uppercase', padding: '0 8px', marginBottom: 4,
       }}>Navigation</div>
-      {NAV_ITEMS.map(n => {
+      {items.map(n => {
         const a = active === n.id;
         return (
           <button key={n.id} onClick={() => onChange(n.id)} style={{

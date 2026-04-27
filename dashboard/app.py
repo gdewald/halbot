@@ -67,14 +67,16 @@ def open_window() -> None:
         if not index.exists():
             raise FileNotFoundError(f"no dashboard HTML found at {index}")
 
+        # Native chrome (frameless=False) so the user gets resize edges and
+        # the system min/max/close buttons. EdgeChromium frameless windows
+        # have no WM_NCHITTEST handling -- they can't be resized at all.
         window = webview.create_window(
             title="halbot",
             url=index.as_uri(),
             js_api=api,
             width=1080, height=680,
             min_size=(720, 480),
-            frameless=True,
-            easy_drag=True,
+            resizable=True,
             background_color="#0c0c0f",
         )
         api.bind_window(window)
