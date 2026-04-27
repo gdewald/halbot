@@ -685,13 +685,6 @@ const SOUND_LIST=[
   {name:'tada',       emoji:'🎉', desc:'Tada fanfare',                   plays:55,  lastPlayed:'1 hr ago',   size:'72 KB'},
 ];
 
-const WAKE_HISTORY=[
-  {time:'09:41:22', phrase:'hey hal',  action:'Joined #gaming, played vine_boom.mp3', ok:true},
-  {time:'09:28:07', phrase:'hey hal',  action:'Joined #general, played airhorn.mp3',  ok:true},
-  {time:'08:55:44', phrase:'hey hal',  action:'False positive — no voice channel',    ok:false},
-  {time:'07:12:03', phrase:'hey hal',  action:'Joined #music, played bruh.mp3',       ok:true},
-];
-
 function StatCard({label,value,unit,sub,accent}){
   const ac=accent||T.blurple;
   return(
@@ -790,64 +783,47 @@ function StatsPanel(){
 
       {/* ── Voice Playback ────────────────────────── */}
       <SectionHeader label="Voice Playback" icon="🔊"/>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,marginBottom:18}}>
-        <StatCard label="Sounds played today" value="38"     sub="across all sessions"  accent={T.cyan}/>
-        <StatCard label="Total all-time"      value="2,841"  sub="since bot started"    accent={T.cyan}/>
-        <StatCard label="Session time today"  value="1h 12m" sub="cumulative voice"     accent={T.yellow}/>
-        <StatCard label="Avg response time"   value="340"    unit="ms" sub="TTS + join" accent={T.green}/>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:18}}>
+        <StatCard label="Sounds played today" value="38"     sub="soundboard_play events"      accent={T.cyan}/>
+        <StatCard label="Total all-time"      value="2,841"  sub="since analytics start"       accent={T.cyan}/>
+        <StatCard label="Session time today"  value="1h 12m" sub="sum of voice_leave durations" accent={T.yellow}/>
       </div>
 
-      {/* ── Wake Word ────────────────────────────── */}
+      {/* ── Wake Word ────────────────────────────────
+          Avg-join-latency dropped: bot joins channel BEFORE wake
+          detection runs, so there's no measurable gap.            */}
       <SectionHeader label="Wake Word" icon="🎙"/>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,marginBottom:10}}>
-        <StatCard label="Detections today" value="4"   sub="hey hal"            accent={T.green}/>
-        <StatCard label="Total all-time"   value="312" sub="since tracking"     accent={T.green}/>
-        <StatCard label="False positives"  value="1"   unit="today" sub="0.3%"  accent={T.yellow}/>
-        <StatCard label="Avg join latency" value="620" unit="ms" sub="wake → audio" accent={T.blurple}/>
-      </div>
-      <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,overflow:'hidden',marginBottom:18}}>
-        <div style={{padding:'7px 14px',borderBottom:`1px solid ${T.border}`,
-          display:'grid',gridTemplateColumns:'80px 90px 1fr',gap:8,
-          fontSize:9,color:T.dim,textTransform:'uppercase',letterSpacing:'0.08em'}}>
-          <span>Time</span><span>Phrase</span><span>Action</span>
-        </div>
-        {WAKE_HISTORY.map((w,i)=>(
-          <div key={i} style={{display:'grid',gridTemplateColumns:'80px 90px 1fr',
-            alignItems:'center',gap:8,padding:'7px 14px',
-            borderBottom:i<WAKE_HISTORY.length-1?`1px solid ${T.border}`:'none'}}>
-            <span style={{fontFamily:'JetBrains Mono',fontSize:10,color:T.dim}}>{w.time}</span>
-            <span style={{fontFamily:'JetBrains Mono',fontSize:11,color:T.blurpleL}}>{w.phrase}</span>
-            <div style={{display:'flex',alignItems:'center',gap:7}}>
-              <div style={{width:6,height:6,borderRadius:'50%',flexShrink:0,background:w.ok?T.green:T.yellow}}/>
-              <span style={{fontSize:12,color:w.ok?T.text:T.yellow}}>{w.action}</span>
-            </div>
-          </div>
-        ))}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:18}}>
+        <StatCard label="Detections today" value="4"   sub="voice LLM parses"      accent={T.green}/>
+        <StatCard label="Total all-time"   value="312" sub="since analytics start" accent={T.green}/>
+        <StatCard label="False positives"  value="1"   unit="today" sub="0.3%"     accent={T.yellow}/>
       </div>
 
       {/* ── STT ───────────────────────────────────── */}
       <SectionHeader label="Speech-to-Text (STT)" icon="👂"/>
       <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr) repeat(2,1fr)',gap:10,marginBottom:18}}>
         <LatencyCard label="Transcription latency" avg={210} p95={480} unit="ms" color={T.cyan} sub="time from audio end → text"/>
-        <LatencyCard label="Chunk processing time" avg={85}  p95={140} unit="ms" color={T.cyan} sub="per audio segment"/>
-        <StatCard label="Segments today"    value="187"  sub="utterances processed"      accent={T.cyan}/>
-        <StatCard label="Avg utterance len" value="3.2"  unit="s"  sub="mean audio length" accent={T.dim}/>
+        <LatencyCard label="Chunk decode time"     avg={85}  p95={140} unit="ms" color={T.cyan} sub="whisper decode only"/>
+        <StatCard label="Segments today"    value="187"  sub="stt_request events"            accent={T.cyan}/>
+        <StatCard label="Avg utterance len" value="3.2"  unit="s" sub="audio captured"      accent={T.cyan}/>
       </div>
 
-      {/* ── TTS ───────────────────────────────────── */}
+      {/* ── TTS ───────────────────────────────────────
+          First-audio-chunk + engine-fallback dropped: kokoro synth
+          is blocking (no streaming chunks) and there is no secondary
+          TTS engine to fall back to.                                */}
       <SectionHeader label="Text-to-Speech (TTS)" icon="🗣"/>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr) repeat(2,1fr)',gap:10,marginBottom:18}}>
-        <LatencyCard label="First audio chunk" avg={128} p95={290} unit="ms" color={T.yellow} sub="time to first playable chunk"/>
-        <LatencyCard label="Full render time"  avg={340} p95={680} unit="ms" color={T.yellow} sub="complete synthesis time"/>
-        <StatCard label="Renders today"     value="42"    sub="TTS invocations"           accent={T.yellow}/>
-        <StatCard label="Fallback to espeak" value="3"   unit="today" sub="kokoro failures" accent={T.red}/>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10,marginBottom:18}}>
+        <LatencyCard label="Full render time"  avg={340} p95={680} unit="ms" color={T.yellow} sub="engine.synth latency"/>
+        <StatCard    label="Renders today"     value="42"    sub="tts_request events"   accent={T.yellow}/>
       </div>
 
-      {/* ── LLM ───────────────────────────────────── */}
+      {/* ── LLM ───────────────────────────────────────
+          TTFT card dropped — Ollama calls are blocking, so TTFT
+          equals total response latency (no streaming).             */}
       <SectionHeader label="Text LLM" icon="🧠"/>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:10}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10,marginBottom:10}}>
         <LatencyCard label="Response latency" avg={1240} p95={4800} unit="ms" color={T.blurple} sub="full completion time"/>
-        <LatencyCard label="Time to first token" avg={320} p95={890} unit="ms" color={T.blurple} sub="TTFT — key for streaming"/>
         <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:9,padding:'12px 14px',position:'relative',overflow:'hidden'}}>
           <div style={{position:'absolute',top:0,left:0,right:0,height:2,background:`linear-gradient(90deg,${T.green},${T.green}44)`}}/>
           <div style={{fontSize:9,color:T.dim,textTransform:'uppercase',letterSpacing:'0.09em',marginBottom:4}}>Throughput</div>
@@ -859,10 +835,10 @@ function StatsPanel(){
         </div>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,marginBottom:20}}>
-        <StatCard label="Requests today"    value="52"    sub="LLM completions"            accent={T.blurple}/>
+        <StatCard label="Requests today"    value="52"    sub="llm_call events"            accent={T.blurple}/>
         <StatCard label="Avg tokens out"    value="184"   sub="per completion"             accent={T.blurple}/>
         <StatCard label="Context usage"     value="62"    unit="%" sub="avg window fill"   accent={T.yellow}/>
-        <StatCard label="Timeouts today"    value="2"     sub="of 52 requests (3.8%)"      accent={T.red}/>
+        <StatCard label="Timeouts today"    value="2"     sub="of 52 requests"             accent={T.red}/>
       </div>
 
       <div style={{height:8}}/>

@@ -5,7 +5,6 @@ import { StatCard, MiniBar, SectionHeader } from './stats/StatCard.jsx';
 import { LatencyCard } from './stats/LatencyCard.jsx';
 import { HealthBanner } from './stats/HealthBanner.jsx';
 import { MissingDataDrawer } from './stats/MissingDataDrawer.jsx';
-import { WakeHistory } from './stats/WakeHistory.jsx';
 
 const dash = (v) => (v ? v : '—');
 
@@ -201,15 +200,17 @@ export function StatsPanel() {
           <StatCard label="Last saved"         value={fmtRelative(sb.last_sync_unix)} sub={sb.last_sync_unix ? new Date(sb.last_sync_unix * 1000).toLocaleString() : 'no data'} accent={T.cyan} />
           <StatCard label="New last 24h"       value={sb.new_since_last}    sub="rows added"             accent={T.green} />
         </div>
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, overflow: 'hidden', marginBottom: 18 }}>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, marginBottom: 18, display: 'flex', flexDirection: 'column', maxHeight: 460 }}>
           <div style={{
             padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
             display: 'grid', gridTemplateColumns: '26px 150px 1fr 110px 120px 72px', gap: 8,
             fontSize: 9, color: T.dim, textTransform: 'uppercase', letterSpacing: '0.08em',
+            flexShrink: 0,
           }}>
             <span /><span>Name</span><span>Metadata</span><span>Plays (30d)</span><span>Last played</span>
             <span style={{ textAlign: 'right' }}>Size</span>
           </div>
+          <div style={{ overflow: 'auto', flex: 1 }}>
           {sounds.length === 0 ? (
             <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>
               no soundboard rows — save some sounds first
@@ -247,6 +248,7 @@ export function StatsPanel() {
               </div>
             );
           })}
+          </div>
         </div>
 
         {/* Voice playback. */}
@@ -265,7 +267,6 @@ export function StatsPanel() {
           <StatCard label="Total all-time"   value={ww.detections_all_time} sub="since analytics start" accent={T.green} />
           <StatCard label="False positives"  value={ww.false_positives_today} unit="today" sub={falsePct} accent={T.yellow} />
         </div>
-        <WakeHistory />
 
         {/* STT */}
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />

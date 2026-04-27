@@ -378,6 +378,7 @@ export function AnalyticsPanel() {
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: 8,
+            minHeight: 56,
           }}>
             {kindMix.rows.length === 0 ? (
               <span style={{ fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no events in window</span>
@@ -399,7 +400,7 @@ export function AnalyticsPanel() {
         <Section title={`Top soundboard plays — ${windowKey}`}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, overflow: 'hidden',
+            borderRadius: 9, overflow: 'auto', maxHeight: 360,
           }}>
             {topSounds.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no soundboard plays in window</div>
@@ -415,7 +416,7 @@ export function AnalyticsPanel() {
         <Section title={`Top commands invoked — ${windowKey}`}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, overflow: 'hidden',
+            borderRadius: 9, overflow: 'auto', maxHeight: 360,
           }}>
             {topCmds.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no commands invoked in window</div>
@@ -433,7 +434,7 @@ export function AnalyticsPanel() {
                  right={!IS_SNAPSHOT && <span style={{ fontSize: 9, color: T.dim, fontStyle: 'italic' }}>click to drill down</span>}>
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
-            borderRadius: 9, overflow: 'hidden',
+            borderRadius: 9, overflow: 'auto', maxHeight: 360,
           }}>
             {topUsers.rows.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 12, color: T.dim, fontStyle: 'italic' }}>no user activity in window</div>

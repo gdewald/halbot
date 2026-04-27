@@ -14,6 +14,7 @@ import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Dict
 from unittest import mock
 
 from halbot import stats_publisher
@@ -193,6 +194,107 @@ class PublishNowThrottleTests(unittest.TestCase):
                 import shutil as _sh
                 _sh.rmtree(real_root, ignore_errors=True)
                 _sh.rmtree(staging_parent, ignore_errors=True)
+
+
+class SnapshotStatsShapeTests(unittest.TestCase):
+    """Snapshot dict mirrors the dashboard `compute_dashboard_stats` shape.
+
+    The published `/halbot-stats` page renders the same React Stats panel
+    over `window.__STATS_SNAPSHOT__.stats`, so the new STT chunk decode +
+    LLM tokens fields must flow through, the dropped wake-join-latency /
+    TTFT keys must NOT appear, and the wake-history transcript view must
+    be gone (per "transcript view in stats shouldn't exist").
+    """
+
+    def _patches(self, dashboard_stats: Dict[str, object]):
+        return [
+            mock.patch.object(stats_publisher, "_query",
+                              return_value={"total_count": 0, "rows": []}),
+            mock.patch.object(stats_publisher, "_treat_user_rows",
+                              side_effect=lambda _c, rows, _cache: rows),
+            mock.patch.object(stats_publisher, "_soundboard_table", return_value=[]),
+            mock.patch.object(stats_publisher, "_emoji_table", return_value=[]),
+            mock.patch.object(stats_publisher.analytics,
+                              "compute_dashboard_stats",
+                              return_value=dashboard_stats),
+        ]
+
+    def _stub_stats(self) -> Dict[str, object]:
+        return {
+            "soundboard": {"sounds_backed_up": 0, "storage_bytes": 0,
+                           "last_sync_unix": 0, "new_since_last": 0},
+            "voice_playback": {"played_today": 0, "played_all_time": 0,
+                               "session_seconds_today": 600,
+                               "avg_response_ms": 0},
+            "wake_word": {"detections_today": 0, "detections_all_time": 0,
+                          "false_positives_today": 0},
+            "stt": {"avg_ms": 0, "p95_ms": 0, "count_today": 0,
+                    "chunk_avg_ms": 50, "chunk_p95_ms": 90,
+                    "avg_audio_seconds": 1.5},
+            "tts": {"avg_ms": 0, "p95_ms": 0, "count_today": 0},
+            "llm": {"response_avg_ms": 0, "response_p95_ms": 0,
+                    "tokens_per_sec": 35, "requests_today": 0,
+                    "avg_tokens_out": 86, "context_usage_pct": 14,
+                    "timeouts_today": 1},
+            "mock": False,
+        }
+
+    def test_no_wake_history_key(self):
+        """Wake-history / transcript view ripped from snapshot."""
+        patches = self._patches(self._stub_stats())
+        for p in patches:
+            p.start()
+        try:
+            snap = stats_publisher.snapshot_stats(client=SimpleNamespace())
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertNotIn("wake_history", snap,
+                         "wake_history must be removed from snapshot")
+
+    def test_stats_carries_new_stt_and_llm_fields(self):
+        patches = self._patches(self._stub_stats())
+        for p in patches:
+            p.start()
+        try:
+            snap = stats_publisher.snapshot_stats(client=SimpleNamespace())
+        finally:
+            for p in patches:
+                p.stop()
+        stats = snap["stats"]
+        for k in ("chunk_avg_ms", "chunk_p95_ms", "avg_audio_seconds"):
+            self.assertIn(k, stats["stt"], f"stt.{k} must appear in snapshot")
+        for k in ("tokens_per_sec", "avg_tokens_out",
+                  "context_usage_pct", "timeouts_today"):
+            self.assertIn(k, stats["llm"], f"llm.{k} must appear in snapshot")
+        # Sanity: dropped fields stay dropped.
+        self.assertNotIn("ttft_avg_ms", stats["llm"])
+        self.assertNotIn("avg_join_latency_ms", stats["wake_word"])
+        # Voice session-seconds is real, not the voice_join × 60s placeholder.
+        self.assertEqual(stats["voice_playback"]["session_seconds_today"], 600)
+
+    def test_snapshot_round_trips_through_html_injection(self):
+        """End-to-end: snapshot → render_snapshot_html → recoverable JSON."""
+        patches = self._patches(self._stub_stats())
+        for p in patches:
+            p.start()
+        try:
+            snap = stats_publisher.snapshot_stats(client=SimpleNamespace())
+        finally:
+            for p in patches:
+                p.stop()
+        out = stats_publisher.render_snapshot_html(
+            "<head></head><body></body>", snap,
+        )
+        marker = "JSON.parse("
+        i = out.find(marker) + len(marker)
+        j = out.find(")", i)
+        literal = out[i:j]
+        json_str = json.loads(literal).replace("<\\/", "</")
+        recovered = json.loads(json_str)
+        self.assertEqual(recovered["stats"]["llm"]["avg_tokens_out"], 86)
+        self.assertEqual(recovered["stats"]["stt"]["chunk_avg_ms"], 50)
+        self.assertNotIn("wake_history", recovered)
 
 
 if __name__ == "__main__":

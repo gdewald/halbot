@@ -375,7 +375,21 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             limit=request.limit,
         )
         reply = mgmt_pb2.QueryStatsReply(total_count=total)
+        # Pre-resolve user_id → display_name via the async resolver, which
+        # walks Member/User caches AND falls through to bounded HTTP
+        # fetch_member when the cache misses. The sync `_user_label` skips
+        # tier-3 HTTP and almost always returns the `user_NNNN` placeholder
+        # — pre-fetching here gives the dashboard real Discord names.
         label_cache: dict[int, str] = {}
+        if request.group_by == "user_id":
+            user_ids = [int(r["key"]) for r in rows
+                        if str(r["key"] or "").isdigit() and int(r["key"]) > 0]
+            if user_ids:
+                try:
+                    resolved = await stats_publisher.resolve_user_labels(_bot.client, user_ids)
+                    label_cache.update(resolved)
+                except Exception:
+                    log.exception("QueryStats: resolve_user_labels failed")
         for r in rows:
             label = ""
             if request.group_by == "user_id":
