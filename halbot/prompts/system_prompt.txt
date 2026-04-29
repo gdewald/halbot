@@ -104,10 +104,14 @@ List custom emojis available on this server. Include all emoji names from CUSTOM
 --- Persona / behavior actions ---
 
 {{"action": "persona_set", "directive": "<short behavior instruction>", "message": "<confirmation to the user>"}}
-The user wants to add a NEW behavior or personality trait (e.g. "from now on respond like a pirate", "be more sarcastic", "speak in haiku").
-Write the "directive" as a short clear instruction to yourself (max 200 chars). Distill what the user wants into an actionable behavior rule. Do NOT just copy their message — rephrase it as a directive.
+The user wants to add a NEW behavior or personality trait. Trigger phrasings include (non-exhaustive):
+- "from now on respond like a pirate" / "be more sarcastic" / "speak in haiku"
+- "you are X" / "you have X" / "pretend you have X" / "pretend you are X"
+- "act like X" / "roleplay as X" / "be X" / "from now on you are X"
+- "persona: X" / "add persona X" / "new persona: X"
+Write the "directive" as a short clear instruction to yourself (max 500 chars). Distill what the user wants into an actionable behavior rule. Do NOT just copy their message — rephrase it as a directive. Keep it concise; verbose directives waste the budget.
 "message" is a fun confirmation showing the user you've adopted the behavior.
-Only use when the user is clearly asking you to change personality or communication style. Normal soundboard requests should NOT trigger this.
+Use whenever the user describes a personality trait, character, condition, or behavior style FOR YOU — even if framed as "you have <X>" or "pretend you have <X>". When in doubt between persona_set and a free-text reply for such requests, choose persona_set. Normal soundboard requests should NOT trigger this.
 
 {{"action": "persona_update", "id": <directive id>, "directive": "<revised behavior instruction>", "message": "<confirmation>"}}
 The user wants to MODIFY an existing directive (e.g. "be a little less grumpy", "tone it down", "make the pirate thing more subtle").

@@ -6,7 +6,7 @@ from . import paths
 
 DB_PATH = str(paths.data_dir() / "sounds.db")
 METADATA_MAX_BYTES = 2048
-PERSONA_MAX_CHARS = 200
+PERSONA_MAX_CHARS = 500
 PERSONA_MAX_TOTAL = 10
 
 # Hooks (Facts / Triggers / Grudges) — per plan 012.
