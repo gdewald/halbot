@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from pathlib import Path
 
 import requests
@@ -1203,6 +1204,28 @@ async def answer_voice_conversation_async(
     )
 
 
+_PLAYED_SOUND_MARKER = re.compile(r"^\(played sound: (.+)\)\s*$")
+_FAILED_SOUND_MARKER = re.compile(r"^\(failed to play: (.+)\)\s*$")
+
+
+def _normalize_history_response(text: str) -> str:
+    """Translate legacy free-text action markers to the JSON form the LLM emits.
+
+    Older voice_history rows store ``(played sound: fah)`` as the bot
+    turn. Feeding those back as assistant messages teaches the LLM to
+    mimic the marker as a free-text reply on the next play request,
+    which the bot then routes through TTS instead of soundboard
+    playback. Rewrite to canonical JSON so the LLM only ever sees
+    action-shaped assistant turns for plays.
+    """
+    if not text:
+        return text
+    m = _PLAYED_SOUND_MARKER.match(text) or _FAILED_SOUND_MARKER.match(text)
+    if m:
+        return json.dumps({"action": "voice_play", "name": m.group(1).strip()})
+    return text
+
+
 def _voice_history_messages(history: list[dict] | None) -> list[dict]:
     """Turn a voice_history list into OpenAI-chat message dicts."""
     if not history:
@@ -1211,7 +1234,10 @@ def _voice_history_messages(history: list[dict] | None) -> list[dict]:
     for turn in history:
         user_text = f"{turn['user_display_name']}: {turn['transcript']}"
         msgs.append({"role": "user", "content": user_text})
-        msgs.append({"role": "assistant", "content": turn["bot_response"]})
+        msgs.append({
+            "role": "assistant",
+            "content": _normalize_history_response(turn["bot_response"]),
+        })
     return msgs
 
 

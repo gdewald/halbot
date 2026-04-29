@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import json
 import logging
 import re
 import time
@@ -625,7 +626,17 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
     # wake turn regardless of which branch handled the intent.
     wake_reply: list[str] = []
 
-    def _record(bot_response: str) -> None:
+    def _record(bot_response: str, *, history_response: str | None = None) -> None:
+        """Record a bot turn.
+
+        ``bot_response`` is the human-facing summary (transcript log,
+        wake-card text). ``history_response`` is what's persisted into
+        the conversation history fed back to the LLM. Pass it for
+        action confirmations so the LLM sees the JSON it emitted, not
+        a marker like "(played sound: fah)" — otherwise the LLM mimics
+        the marker on the next play request and we end up TTS-speaking
+        "(played sound: fah)" instead of playing the ogg.
+        """
         wake_reply.append(bot_response)
         transcript_log.emit(
             "bot", bot_response,
@@ -633,16 +644,17 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
         )
         if VOICE_HISTORY_TURNS <= 0:
             return
+        history_text = history_response if history_response is not None else bot_response
         turn = {
             "user_display_name": user_name,
             "transcript": transcript,
-            "bot_response": bot_response,
+            "bot_response": history_text,
         }
         session.history.append(turn)
         while len(session.history) > VOICE_HISTORY_TURNS:
             session.history.pop(0)
         try:
-            voice_history_append(guild.id, user_name, transcript, bot_response)
+            voice_history_append(guild.id, user_name, transcript, history_text)
         except Exception:
             log.exception("[voice-history] persist failed")
 
@@ -659,6 +671,10 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
             if action == "voice_play":
                 name = intent.get("name", "")
                 row = db_get(name) if name else None
+                # Persist the action JSON in history so the LLM sees a
+                # consistent JSON-only assistant turn for play requests
+                # and won't mimic a free-text marker on the next call.
+                action_json = json.dumps({"action": "voice_play", "name": name})
                 if row:
                     fmt = detect_audio_format(row["audio"])
                     await session.play_sound(row["audio"], fmt)
@@ -671,7 +687,7 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
                         trigger="voice",
                         bytes=len(row["audio"]) if row.get("audio") else 0,
                     )
-                    _record(f"(played sound: {name})")
+                    _record(f"(played sound: {name})", history_response=action_json)
                     break
 
                 live = sound_map.get(name)
@@ -689,10 +705,10 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
                             trigger="voice",
                             bytes=len(audio) if audio else 0,
                         )
-                        _record(f"(played sound: {name})")
+                        _record(f"(played sound: {name})", history_response=action_json)
                     except Exception:
                         log.exception("Failed to read live sound %s for voice playback", name)
-                        _record(f"(failed to play: {name})")
+                        _record(f"(failed to play: {name})", history_response=action_json)
                     break
 
                 customized = await customize_response_async(
