@@ -97,6 +97,12 @@ class KokoroEngine(TTSEngine):
     def __init__(self):
         self._pipeline = None
         self._lock = threading.Lock()
+        # KPipeline is not safe for concurrent calls — its internal state
+        # gets stomped and emits a corrupted waveform (0 sample rate / 0
+        # channels), which ffmpeg surfaces as `integer divide by zero`
+        # at playback. Serialize synth() bodies. CPU-bound on a single
+        # core anyway, so contention is the bottleneck, not the lock.
+        self._synth_lock = threading.Lock()
         # See https://huggingface.co/hexgrad/Kokoro-82M for the voice list.
         # af_heart is a warm, neutral American-English default.
         from . import config as _config
@@ -139,16 +145,18 @@ class KokoroEngine(TTSEngine):
 
         log.info("[tts] stage=synth-begin chars=%d", len(text))
         pipeline = self._load()
-        log.info("[tts] stage=synth-generate")
-        chunks: list[np.ndarray] = []
-        # KPipeline yields (graphemes, phonemes, audio) per chunk.  audio is
-        # a torch.Tensor or numpy array on CPU; concatenate all chunks into
-        # one waveform and encode as 16-bit WAV for ffmpeg.
-        for _, _, audio in pipeline(text, voice=self.voice, speed=self.speed):
-            if audio is None:
-                continue
-            arr = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
-            chunks.append(arr.astype(np.float32))
+        # Serialize pipeline iteration — KPipeline is not concurrency-safe.
+        with self._synth_lock:
+            log.info("[tts] stage=synth-generate")
+            chunks: list[np.ndarray] = []
+            # KPipeline yields (graphemes, phonemes, audio) per chunk.  audio is
+            # a torch.Tensor or numpy array on CPU; concatenate all chunks into
+            # one waveform and encode as 16-bit WAV for ffmpeg.
+            for _, _, audio in pipeline(text, voice=self.voice, speed=self.speed):
+                if audio is None:
+                    continue
+                arr = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
+                chunks.append(arr.astype(np.float32))
         if not chunks:
             raise RuntimeError(f"Kokoro produced no audio for text: {text!r}")
         log.info("[tts] stage=synth-encode chunks=%d", len(chunks))
