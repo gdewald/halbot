@@ -57,6 +57,35 @@ except ImportError:
 
 if VOICE_RECV_AVAILABLE:
 
+    # Safety net for the PacketRouter thread. discord-ext-voice-recv has no
+    # per-packet try/except in its router loop, so a single OpusError
+    # (corrupted stream) inside _decoder.decode kills the thread and tears
+    # down the AudioSink with 0 frames — voice receive then stays dead
+    # until the next reconnect cycle (which crashes the same way).
+    # We guard PacketDecoder._process_packet so a bad frame returns None;
+    # PacketRouter._do_run already skips None and keeps looping.
+    if not getattr(voice_recv.opus.PacketDecoder, "_halbot_opus_guard", False):
+        from discord.opus import OpusError as _OpusError  # local import
+
+        _orig_process_packet = voice_recv.opus.PacketDecoder._process_packet
+
+        def _safe_process_packet(self, packet):
+            try:
+                return _orig_process_packet(self, packet)
+            except _OpusError:
+                log.debug(
+                    "[voice] dropping un-decodable opus packet ssrc=%s seq=%s",
+                    getattr(packet, "ssrc", "?"),
+                    getattr(packet, "sequence", "?"),
+                )
+                return None
+
+        voice_recv.opus.PacketDecoder._process_packet = _safe_process_packet
+        voice_recv.opus.PacketDecoder._halbot_opus_guard = True
+        log.info(
+            "[voice] Patched PacketDecoder._process_packet with OpusError guard"
+        )
+
     class HalbotVoiceRecvClient(voice_recv.VoiceRecvClient):
         """VoiceRecvClient that adds DAVE decryption to the receive pipeline."""
 
