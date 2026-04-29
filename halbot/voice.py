@@ -771,7 +771,10 @@ class VoiceListener:
     async def play_sound(self, audio_bytes: bytes, fmt: str = "mp3"):
         """Play raw audio bytes in the voice channel via ffmpeg."""
         if self.vc.is_playing():
-            self.vc.stop()
+            # VoiceRecvClient.stop() detaches the sink as well as the
+            # player — that tears down our listener mid-session and
+            # voice receive is dead until reconnect. Stop only the player.
+            self.vc.stop_playing()
 
         log.info("[play] stage=begin bytes=%d fmt=%s channel=#%s", len(audio_bytes), fmt, self.vc.channel.name)
 
