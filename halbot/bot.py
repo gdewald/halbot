@@ -1066,14 +1066,14 @@ async def on_message(message: discord.Message):
                     title=(directive[:120] + ("…" if len(directive) > 120 else "")) or "Persona saved",
                     description=confirm_msg,
                     fields=(
-                        EmbedField("Trigger", trigger_line, inline=True),
-                        EmbedField("Scope", "per-user (default)", inline=True),
+                        EmbedField("Trigger", "everyone in this server", inline=True),
+                        EmbedField("Scope", "guild-wide", inline=True),
                         EmbedField("Saved", "just now", inline=True),
                     ),
-                    subtext=f"Intent: persona.save · scope: user {message.author.display_name} · kind: `personas`",
+                    subtext=f"Intent: persona.save · scope: guild · kind: `personas`",
                     footer='Edit or remove in the dashboard · or ask me "drop my persona"',
                 )
-                extra_sends.append((persona_payload, PersonaActionsView(pid, "user")))
+                extra_sends.append((persona_payload, PersonaActionsView(pid, "guild")))
             except ValueError as e:
                 replies.append(str(e))
 

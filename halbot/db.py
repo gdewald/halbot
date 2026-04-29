@@ -430,7 +430,7 @@ def persona_mark_fired_all() -> int:
         return cur.rowcount
 
 
-def persona_add(directive: str, set_by: str, scope: str = "user") -> int:
+def persona_add(directive: str, set_by: str, scope: str = "guild") -> int:
     if len(directive) > PERSONA_MAX_CHARS:
         raise ValueError(f"Directive too long ({len(directive)} chars). Max is {PERSONA_MAX_CHARS}.")
     if scope not in ("user", "guild"):

@@ -450,26 +450,18 @@ class TriggerActionsView(discord.ui.View):
 
 
 class PersonaActionsView(discord.ui.View):
-    """Edit / Make guild-wide / Remove persona (flow 09)."""
+    """Edit / Remove persona (flow 09). Personas are always guild-wide."""
 
-    def __init__(self, persona_id: int, scope: str) -> None:
+    def __init__(self, persona_id: int, scope: str = "guild") -> None:
         super().__init__(timeout=None)
         self.persona_id = persona_id
-        self.scope = scope
+        self.scope = scope  # kept for back-compat; always treated as guild
         edit = discord.ui.Button(
             label="Edit wording", style=discord.ButtonStyle.secondary, emoji="📝",
             custom_id=f"halbot:persona:edit:{persona_id}",
         )
         edit.callback = self._edit  # type: ignore[assignment]
         self.add_item(edit)
-
-        promote = discord.ui.Button(
-            label="Make guild-wide" if scope == "user" else "Make per-user",
-            style=discord.ButtonStyle.secondary, emoji="👥",
-            custom_id=f"halbot:persona:promote:{persona_id}",
-        )
-        promote.callback = self._promote  # type: ignore[assignment]
-        self.add_item(promote)
 
         remove = discord.ui.Button(
             label="Remove persona", style=discord.ButtonStyle.danger, emoji="🗑️",
@@ -480,24 +472,6 @@ class PersonaActionsView(discord.ui.View):
 
     async def _edit(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(PersonaEditModal(self.persona_id))
-
-    async def _promote(self, interaction: discord.Interaction) -> None:
-        from .db import persona_set_scope
-        new_scope = "guild" if self.scope == "user" else "user"
-        try:
-            ok = persona_set_scope(self.persona_id, new_scope)
-        except ValueError as e:
-            await interaction.response.send_message(str(e), ephemeral=True)
-            return
-        if not ok:
-            await interaction.response.send_message(
-                f"Persona #{self.persona_id} not found.", ephemeral=True,
-            )
-            return
-        log.info("[persona] %s set #%s scope=%s", interaction.user, self.persona_id, new_scope)
-        await interaction.response.send_message(
-            f"Persona scope → `{new_scope}`.", ephemeral=True,
-        )
 
     async def _remove(self, interaction: discord.Interaction) -> None:
         from .db import persona_remove
