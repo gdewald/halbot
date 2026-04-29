@@ -330,13 +330,23 @@ def unload_whisper() -> None:
     log.info("[whisper] Model unloaded")
 
 
-def transcribe(audio_float32: np.ndarray) -> "tuple[str, dict]":
+def transcribe(
+    audio_float32: np.ndarray,
+    captured_at: float | None = None,
+    stale_after_seconds: float | None = None,
+) -> "tuple[str, dict]":
     """Transcribe 16 kHz mono float32 audio.  **Blocking** — run in executor.
+
+    If ``captured_at`` and ``stale_after_seconds`` are supplied, skip the
+    decode entirely when the segment has aged past the threshold while
+    waiting for ``_transcribe_lock``.  The pre-task gate catches event-loop
+    backlog; this catches Whisper queue backlog under multi-talker load.
 
     Returns (text, metrics) where metrics = {
         "lock_wait_ms": int,    # time waiting on _transcribe_lock
         "decode_ms":    int,    # time inside model.transcribe + iteration
         "lang_prob":    float,
+        "skipped":      bool,   # True if dropped post-lock as stale
     }.
     """
     log.info("[stt] stage=load-whisper samples=%d", len(audio_float32))
@@ -344,6 +354,22 @@ def transcribe(audio_float32: np.ndarray) -> "tuple[str, dict]":
     t_lock = time.monotonic()
     with _transcribe_lock:
         lock_wait_ms = int((time.monotonic() - t_lock) * 1000)
+        if (
+            captured_at is not None
+            and stale_after_seconds is not None
+            and (time.monotonic() - captured_at) > stale_after_seconds
+        ):
+            age = time.monotonic() - captured_at
+            log.warning(
+                "[stt] dropping stale segment at lock-acquire (age=%.1fs > %.1fs lock_wait=%dms)",
+                age, stale_after_seconds, lock_wait_ms,
+            )
+            return "", {
+                "lock_wait_ms": lock_wait_ms,
+                "decode_ms": 0,
+                "lang_prob": 0.0,
+                "skipped": True,
+            }
         t_decode = time.monotonic()
         log.info("[stt] stage=transcribe-begin lock_wait_ms=%d", lock_wait_ms)
         segments, info = model.transcribe(
@@ -373,6 +399,7 @@ def transcribe(audio_float32: np.ndarray) -> "tuple[str, dict]":
             "lock_wait_ms": lock_wait_ms,
             "decode_ms": decode_ms,
             "lang_prob": float(getattr(info, "language_probability", 0.0) or 0.0),
+            "skipped": False,
         }
 
 
@@ -720,7 +747,13 @@ class VoiceListener:
         text = ""
         try:
             try:
-                text, stt_metrics = await self._loop.run_in_executor(None, transcribe, audio)
+                text, stt_metrics = await self._loop.run_in_executor(
+                None,
+                transcribe,
+                audio,
+                captured_at,
+                STALE_PRE_STT_SECONDS,
+            )
             except Exception:
                 log.exception("[stt] Whisper transcription failed")
                 return
