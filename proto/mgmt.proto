@@ -166,6 +166,10 @@ message LatencyStats {
   int32 chunk_avg_ms = 4;
   int32 chunk_p95_ms = 5;
   float avg_audio_seconds = 6;
+  // Median latency over the same 30 d sample window as avg/p95.
+  // Frontend uses p50 as the headline number to dodge cold-load tail.
+  int32 p50_ms = 7;
+  int32 chunk_p50_ms = 8;
 }
 
 message LlmStats {
@@ -178,6 +182,7 @@ message LlmStats {
   int32 avg_tokens_out = 7;
   int32 context_usage_pct = 8;
   int32 timeouts_today = 9;
+  int32 response_p50_ms = 10;
 }
 
 message StatsReply {

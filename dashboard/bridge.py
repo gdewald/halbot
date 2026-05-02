@@ -193,19 +193,23 @@ class JsApi:
             },
             "stt": {
                 "avg_ms": int(r.stt.avg_ms),
+                "p50_ms": int(r.stt.p50_ms),
                 "p95_ms": int(r.stt.p95_ms),
                 "count_today": int(r.stt.count_today),
                 "chunk_avg_ms": int(r.stt.chunk_avg_ms),
+                "chunk_p50_ms": int(r.stt.chunk_p50_ms),
                 "chunk_p95_ms": int(r.stt.chunk_p95_ms),
                 "avg_audio_seconds": float(r.stt.avg_audio_seconds),
             },
             "tts": {
                 "avg_ms": int(r.tts.avg_ms),
+                "p50_ms": int(r.tts.p50_ms),
                 "p95_ms": int(r.tts.p95_ms),
                 "count_today": int(r.tts.count_today),
             },
             "llm": {
                 "response_avg_ms": int(r.llm.response_avg_ms),
+                "response_p50_ms": int(r.llm.response_p50_ms),
                 "response_p95_ms": int(r.llm.response_p95_ms),
                 "tokens_per_sec": int(r.llm.tokens_per_sec),
                 "requests_today": int(r.llm.requests_today),

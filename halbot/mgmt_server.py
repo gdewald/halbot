@@ -347,19 +347,23 @@ class MgmtService(mgmt_pb2_grpc.MgmtServicer):
             ),
             stt=mgmt_pb2.LatencyStats(
                 avg_ms=int(stt.get("avg_ms", 0)),
+                p50_ms=int(stt.get("p50_ms", 0)),
                 p95_ms=int(stt.get("p95_ms", 0)),
                 count_today=int(stt.get("count_today", 0)),
                 chunk_avg_ms=int(stt.get("chunk_avg_ms", 0)),
+                chunk_p50_ms=int(stt.get("chunk_p50_ms", 0)),
                 chunk_p95_ms=int(stt.get("chunk_p95_ms", 0)),
                 avg_audio_seconds=float(stt.get("avg_audio_seconds", 0.0)),
             ),
             tts=mgmt_pb2.LatencyStats(
                 avg_ms=int(tts.get("avg_ms", 0)),
+                p50_ms=int(tts.get("p50_ms", 0)),
                 p95_ms=int(tts.get("p95_ms", 0)),
                 count_today=int(tts.get("count_today", 0)),
             ),
             llm=mgmt_pb2.LlmStats(
                 response_avg_ms=int(llm.get("response_avg_ms", 0)),
+                response_p50_ms=int(llm.get("response_p50_ms", 0)),
                 response_p95_ms=int(llm.get("response_p95_ms", 0)),
                 tokens_per_sec=int(llm.get("tokens_per_sec", 0)),
                 requests_today=int(llm.get("requests_today", 0)),

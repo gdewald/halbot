@@ -399,32 +399,62 @@ def _percentile(sorted_vals: List[int], pct: float) -> int:
 
 
 def _latency_bundle(conn: sqlite3.Connection, kind: str,
-                    t_today: int, target_filter: str = "") -> Dict[str, int]:
-    """(avg_ms, p95_ms, count_today) from json_extract(meta_json,'$.latency_ms')."""
-    where = "kind = ? AND json_extract(meta_json,'$.latency_ms') IS NOT NULL"
+                    t_today: int, target_filter: str = "",
+                    target_exclude: str = "",
+                    fields: Tuple[str, ...] = ("latency_ms",)) -> Dict[str, int]:
+    """(avg_ms, p50_ms, p95_ms, count_today) over a 30 d sample.
+
+    `fields` is COALESCEd in priority order — first non-null wins. Lets
+    callers prefer e.g. `llm_ms` (LLM HTTP-only span) but fall back to
+    legacy `latency_ms` rows. `target_exclude` filters a stale target.
+    """
+    parts = [f"json_extract(meta_json,'$.{f}')" for f in fields]
+    extract = parts[0] if len(parts) == 1 else " COALESCE(" + ", ".join(parts) + ")"
+    where = f"kind = ? AND {extract} IS NOT NULL"
     params: List[Any] = [kind]
     if target_filter:
         where += " AND target = ?"
         params.append(target_filter)
+    if target_exclude:
+        where += " AND target != ?"
+        params.append(target_exclude)
     # Today's count
     cur_today = conn.execute(
         f"SELECT COUNT(*) FROM events WHERE {where} AND ts_unix >= ?",
         params + [t_today],
     ).fetchone()
     count_today = int(cur_today[0] if cur_today else 0)
-    # Sample up to 2000 most recent for avg/p95 (bound memory)
+    # Sample up to 2000 most recent for avg/p50/p95 (bound memory)
     cur = conn.execute(
-        f"SELECT CAST(json_extract(meta_json,'$.latency_ms') AS INTEGER) AS lat "
+        f"SELECT CAST({extract} AS INTEGER) AS lat "
         f"FROM events WHERE {where} AND ts_unix >= ? "
         f"ORDER BY ts_unix DESC LIMIT 2000",
         params + [t_today - 30 * 86400],
     )
     vals = sorted(int(r[0]) for r in cur.fetchall() if r[0] is not None)
     if not vals:
-        return {"avg_ms": 0, "p95_ms": 0, "count_today": count_today}
+        return {"avg_ms": 0, "p50_ms": 0, "p95_ms": 0, "count_today": count_today}
     avg = sum(vals) // len(vals)
+    p50 = _percentile(vals, 50)
     p95 = _percentile(vals, 95)
-    return {"avg_ms": int(avg), "p95_ms": int(p95), "count_today": count_today}
+    return {"avg_ms": int(avg), "p50_ms": int(p50),
+            "p95_ms": int(p95), "count_today": count_today}
+
+
+def _tts_latency_bundle(conn: sqlite3.Connection, t_today: int) -> Dict[str, int]:
+    """TTS panel: prefer `synth_ms` (cold-load excluded), fall back to `latency_ms`."""
+    return _latency_bundle(conn, "tts_request", t_today,
+                           fields=("synth_ms", "latency_ms"))
+
+
+def _llm_latency_bundle(conn: sqlite3.Connection, t_today: int) -> Dict[str, int]:
+    """LLM panel: prefer `llm_ms` (HTTP-only), fall back to `latency_ms`.
+
+    Excludes legacy `parse_voice_combined` target (dead code path).
+    """
+    return _latency_bundle(conn, "llm_call", t_today,
+                           target_exclude="parse_voice_combined",
+                           fields=("llm_ms", "latency_ms"))
 
 
 def _meta_field_floats(conn: sqlite3.Connection, kind: str, field_name: str,
@@ -451,8 +481,10 @@ def _meta_field_floats(conn: sqlite3.Connection, kind: str, field_name: str,
 def compute_dashboard_stats() -> Dict[str, Any]:
     """Roll up events DB into the StatsReply shape. All-numeric, never raises."""
     now = int(time.time())
-    # "today" = since local midnight. Use UTC-ish (seconds-of-day) to avoid tz lib dep.
-    t_today = now - (now % 86400)
+    # "today" = local midnight. struct_time → mktime gives correct DST handling.
+    lt = time.localtime(now)
+    t_today = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                               0, 0, 0, 0, 0, -1)))
     out: Dict[str, Any] = {
         "soundboard": {"sounds_backed_up": 0, "storage_bytes": 0,
                        "last_sync_unix": 0, "new_since_last": 0},
@@ -460,10 +492,12 @@ def compute_dashboard_stats() -> Dict[str, Any]:
                            "session_seconds_today": 0, "avg_response_ms": 0},
         "wake_word": {"detections_today": 0, "detections_all_time": 0,
                       "false_positives_today": 0},
-        "stt": {"avg_ms": 0, "p95_ms": 0, "count_today": 0,
-                "chunk_avg_ms": 0, "chunk_p95_ms": 0, "avg_audio_seconds": 0.0},
-        "tts": {"avg_ms": 0, "p95_ms": 0, "count_today": 0},
-        "llm": {"response_avg_ms": 0, "response_p95_ms": 0,
+        "stt": {"avg_ms": 0, "p50_ms": 0, "p95_ms": 0, "count_today": 0,
+                "chunk_avg_ms": 0, "chunk_p50_ms": 0, "chunk_p95_ms": 0,
+                "avg_audio_seconds": 0.0},
+        "tts": {"avg_ms": 0, "p50_ms": 0, "p95_ms": 0, "count_today": 0},
+        "llm": {"response_avg_ms": 0, "response_p50_ms": 0,
+                "response_p95_ms": 0,
                 "tokens_per_sec": 0, "requests_today": 0,
                 "avg_tokens_out": 0, "context_usage_pct": 0,
                 "timeouts_today": 0},
@@ -497,10 +531,12 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         ).fetchone()
         out["voice_playback"]["session_seconds_today"] = int(vl_dur[0] if vl_dur else 0)
 
-        # Avg voice response ms = avg TTS latency today (soundboard playback is sync)
-        tts_today = _latency_bundle(conn, "tts_request", t_today)
+        # Avg voice response ms = TTS p50 latency over 30 d window. Prefer
+        # synth_ms (cold-load excluded) when populated; fall back to
+        # latency_ms for old rows that predate the split.
+        tts_today = _tts_latency_bundle(conn, t_today)
         out["tts"] = tts_today
-        out["voice_playback"]["avg_response_ms"] = tts_today["avg_ms"]
+        out["voice_playback"]["avg_response_ms"] = tts_today["p50_ms"]
 
         # Wake-word proxy: voice-path LLM calls succeed => detection.
         # (True wake event emitter TBD; this counts parsed voice commands.)
@@ -522,9 +558,11 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         ).fetchone()
         out["wake_word"]["false_positives_today"] = int(fp_today[0] if fp_today else 0)
 
-        # LLM latency (text-path parse_intent primarily, but roll all llm_call)
-        llm_today = _latency_bundle(conn, "llm_call", t_today)
+        # LLM latency (excludes legacy parse_voice_combined; prefers HTTP-only
+        # llm_ms when present).
+        llm_today = _llm_latency_bundle(conn, t_today)
         out["llm"]["response_avg_ms"] = llm_today["avg_ms"]
+        out["llm"]["response_p50_ms"] = llm_today["p50_ms"]
         out["llm"]["response_p95_ms"] = llm_today["p95_ms"]
         out["llm"]["requests_today"] = llm_today["count_today"]
 
@@ -574,6 +612,7 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         # STT latency + chunk decode + utterance length
         stt_today = _latency_bundle(conn, "stt_request", t_today)
         out["stt"]["avg_ms"] = stt_today["avg_ms"]
+        out["stt"]["p50_ms"] = stt_today["p50_ms"]
         out["stt"]["p95_ms"] = stt_today["p95_ms"]
         out["stt"]["count_today"] = stt_today["count_today"]
         chunk_vals = sorted(int(v) for v in _meta_field_floats(
@@ -581,6 +620,7 @@ def compute_dashboard_stats() -> Dict[str, Any]:
         ))
         if chunk_vals:
             out["stt"]["chunk_avg_ms"] = sum(chunk_vals) // len(chunk_vals)
+            out["stt"]["chunk_p50_ms"] = _percentile(chunk_vals, 50)
             out["stt"]["chunk_p95_ms"] = _percentile(chunk_vals, 95)
         audio_secs = _meta_field_floats(conn, "stt_request", "audio_seconds", since30)
         if audio_secs:
