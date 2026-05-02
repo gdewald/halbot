@@ -50,10 +50,10 @@ export function HealthBanner({ stats }) {
 
   const dotColor = healthy ? T.green : (h ? T.yellow : T.red);
 
-  // Right-side latency summary from stats. Use TTS + LLM avg as the user-perceptible
+  // Right-side latency summary from stats. Use TTS + LLM p50 as the user-perceptible
   // round-trip pair. Hide the line entirely if neither metric has data.
-  const ttsAvg = stats?.tts?.avg_ms || 0;
-  const llmAvg = stats?.llm?.response_avg_ms || 0;
+  const ttsAvg = stats?.tts?.p50_ms || stats?.tts?.avg_ms || 0;
+  const llmAvg = stats?.llm?.response_p50_ms || stats?.llm?.response_avg_ms || 0;
   const showLatency = ttsAvg > 0 || llmAvg > 0;
 
   return (
@@ -80,12 +80,12 @@ export function HealthBanner({ stats }) {
         <div style={{ textAlign: 'right' }}>
           {ttsAvg > 0 && (
             <div style={{ fontSize: 11, color: T.text, fontFamily: 'JetBrains Mono' }}>
-              {Math.round(ttsAvg)} ms <span style={{ color: T.sub }}>avg TTS</span>
+              {Math.round(ttsAvg)} ms <span style={{ color: T.sub }}>p50 TTS</span>
             </div>
           )}
           {llmAvg > 0 && (
             <div style={{ fontSize: 11, color: T.text, marginTop: 2, fontFamily: 'JetBrains Mono' }}>
-              {Math.round(llmAvg).toLocaleString()} ms <span style={{ color: T.sub }}>avg LLM</span>
+              {Math.round(llmAvg).toLocaleString()} ms <span style={{ color: T.sub }}>p50 LLM</span>
             </div>
           )}
         </div>

@@ -16,10 +16,10 @@ const EMPTY_STATS = {
   soundboard: { sounds_backed_up: 0, storage_bytes: 0, last_sync_unix: 0, new_since_last: 0 },
   voice_playback: { played_today: 0, played_all_time: 0, session_seconds_today: 0 },
   wake_word: { detections_today: 0, detections_all_time: 0, false_positives_today: 0 },
-  stt: { avg_ms: 0, p95_ms: 0, count_today: 0, chunk_avg_ms: 0, chunk_p95_ms: 0, avg_audio_seconds: 0 },
-  tts: { avg_ms: 0, p95_ms: 0, count_today: 0 },
+  stt: { avg_ms: 0, p50_ms: 0, p95_ms: 0, count_today: 0, chunk_avg_ms: 0, chunk_p50_ms: 0, chunk_p95_ms: 0, avg_audio_seconds: 0 },
+  tts: { avg_ms: 0, p50_ms: 0, p95_ms: 0, count_today: 0 },
   llm: {
-    response_avg_ms: 0, response_p95_ms: 0, tokens_per_sec: 0,
+    response_avg_ms: 0, response_p50_ms: 0, response_p95_ms: 0, tokens_per_sec: 0,
     requests_today: 0, avg_tokens_out: 0, context_usage_pct: 0, timeouts_today: 0,
   },
 };
@@ -253,8 +253,8 @@ export function StatsPanel() {
         {/* STT */}
         <SectionHeader label="Speech-to-Text (STT)" icon="👂" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 18 }}>
-          <LatencyCard label="Transcription latency" avg={stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub={stt.avg_ms ? `30d sample · ${stt.count_today} today` : ''} />
-          <LatencyCard label="Chunk decode time" avg={stt.chunk_avg_ms} p95={stt.chunk_p95_ms} unit="ms" color={T.cyan} sub="whisper decode only" />
+          <LatencyCard label="Transcription latency" avg={stt.p50_ms || stt.avg_ms} p95={stt.p95_ms} unit="ms" color={T.cyan} sub={stt.count_today ? `30d sample · ${stt.count_today} today` : '30d sample'} />
+          <LatencyCard label="Chunk decode time" avg={stt.chunk_p50_ms || stt.chunk_avg_ms} p95={stt.chunk_p95_ms} unit="ms" color={T.cyan} sub="whisper decode only" />
           <StatCard    label="Segments today"    value={stt.count_today}    sub="stt_request events"     accent={T.cyan} />
           <StatCard    label="Avg utterance len" value={stt.avg_audio_seconds ? stt.avg_audio_seconds.toFixed(1) : '—'} unit={stt.avg_audio_seconds ? 's' : ''} sub="audio captured" accent={T.cyan} />
         </div>
@@ -264,7 +264,7 @@ export function StatsPanel() {
             secondary TTS engine to fall back to. */}
         <SectionHeader label="Text-to-Speech (TTS)" icon="🗣" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10, marginBottom: 18 }}>
-          <LatencyCard label="Full render time"  avg={tts.avg_ms} p95={tts.p95_ms} unit="ms" color={T.yellow} sub="engine.synth latency" />
+          <LatencyCard label="Synth latency"     avg={tts.p50_ms || tts.avg_ms} p95={tts.p95_ms} unit="ms" color={T.yellow} sub="engine.synth, cold-load excluded" />
           <StatCard    label="Renders today"     value={tts.count_today}    sub="tts_request events"         accent={T.yellow} />
         </div>
 
@@ -272,7 +272,7 @@ export function StatsPanel() {
             equals total response latency (no streaming). */}
         <SectionHeader label="Text LLM" icon="🧠" />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10, marginBottom: 10 }}>
-          <LatencyCard label="Response latency"    avg={llm.response_avg_ms} p95={llm.response_p95_ms} unit="ms" color={T.blurple} sub="full completion time" />
+          <LatencyCard label="Response latency"    avg={llm.response_p50_ms || llm.response_avg_ms} p95={llm.response_p95_ms} unit="ms" color={T.blurple} sub="LLM HTTP round, parse_voice_combined excluded" />
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
             borderRadius: 9, padding: '12px 14px', position: 'relative', overflow: 'hidden',

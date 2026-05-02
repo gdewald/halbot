@@ -40,7 +40,7 @@ export function LatencyCard({ label, avg, p95, unit, color, sub }) {
       }}>{label}</div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
         <span style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: 'JetBrains Mono' }}>{avg}</span>
-        <span style={{ fontSize: 10, color: T.sub }}>{unit} avg</span>
+        <span style={{ fontSize: 10, color: T.sub }}>{unit} p50</span>
         <span style={{ fontSize: 11, color: T.dim, marginLeft: 'auto', fontFamily: 'JetBrains Mono' }}>
           p95 {p95}{unit}
         </span>
