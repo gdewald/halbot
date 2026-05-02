@@ -26,6 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     "tts_voice": "af_heart",
     "tts_lang": "a",
     "tts_speed": "1.0",
+    "keep_kokoro_warm": "true",
     "analytics_retention_days": "90",
     "transcript_log_enabled": "false",
     "halbot_avatar_url": "",
@@ -246,6 +247,11 @@ SCHEMA: Dict[str, Dict[str, Any]] = {
         "type": "RANGE", "min": 0.5, "max": 2.0, "step": 0.05,
         "description": "TTS playback speed multiplier",
         "group": "tts", "label": "TTS_SPEED",
+    },
+    "keep_kokoro_warm": {
+        "type": "BOOL",
+        "description": "Preload Kokoro at daemon boot and never unload. ~350MB RSS for zero cold-load latency.",
+        "group": "tts", "label": "KEEP_KOKORO_WARM",
     },
     "analytics_retention_days": {
         "type": "NUMBER", "min": 1.0, "max": 3650.0, "step": 1.0,

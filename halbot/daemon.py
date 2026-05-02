@@ -109,6 +109,16 @@ async def _run_async() -> int:
 
     from . import llm as llm_mod
 
+    # Optional: preload Kokoro at boot so the first user-facing voice turn
+    # never eats the ~3-25s cold load. RSS climbs ~350 MB and stays.
+    try:
+        if str(config.get("keep_kokoro_warm")).lower() in ("1", "true", "yes", "on"):
+            from . import tts as tts_mod
+            log.info("[boot] keep_kokoro_warm=true; kicking background Kokoro preload")
+            tts_mod.preload_engine_async()
+    except Exception:
+        log.exception("[boot] Kokoro preload kickoff failed")
+
     tasks = [
         asyncio.create_task(_run_bot(bot_module), name="discord-bot"),
         asyncio.create_task(analytics.prune_loop(), name="analytics-prune"),
