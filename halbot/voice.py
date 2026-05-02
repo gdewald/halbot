@@ -428,7 +428,8 @@ def is_speech(chunk: np.ndarray) -> bool:
 class _UserAudioState:
     """Accumulates PCM for one user, fires when a speech segment completes."""
 
-    __slots__ = ("chunks", "is_speaking", "silence_t", "speech_t", "n_samples")
+    __slots__ = ("chunks", "is_speaking", "silence_t", "speech_t",
+                 "n_samples", "last_chunk_t")
 
     def __init__(self):
         self.reset()
@@ -439,11 +440,13 @@ class _UserAudioState:
         self.silence_t: float = 0.0
         self.speech_t: float = 0.0
         self.n_samples: int = 0
+        self.last_chunk_t: float = 0.0
 
     def feed(self, user_id: int, audio_16k: np.ndarray) -> np.ndarray | None:
         """Feed a 20 ms chunk.  Returns the complete segment or *None*."""
         now = time.monotonic()
         speaking = is_speech(audio_16k)
+        self.last_chunk_t = now
 
         if speaking:
             if not self.is_speaking:
@@ -485,6 +488,33 @@ class _UserAudioState:
                 self.reset()
 
         return None
+
+    def try_finalize_idle(self, user_id: int, now: float) -> np.ndarray | None:
+        """Fire a segment if no audio has arrived for SILENCE_TIMEOUT.
+
+        Discord clients use Opus DTX — no RTP packets at all when silent.
+        Without this wall-clock check, an utterance hangs in is_speaking
+        state until the *next* utterance forces it complete (or until
+        MAX_SPEECH_DURATION pulls the trigger). Driven by VoiceListener's
+        flush loop.
+        """
+        if not self.is_speaking:
+            return None
+        if self.last_chunk_t == 0.0:
+            return None
+        if (now - self.last_chunk_t) < SILENCE_TIMEOUT:
+            return None
+        duration = self.n_samples / 16000
+        if duration < MIN_SPEECH_DURATION:
+            log.debug("[vad] user=%s segment discarded (dtx-flush, too short: %.2fs)",
+                      user_id, duration)
+            self.reset()
+            return None
+        log.debug("[vad] user=%s segment complete (dtx-flush): %.1fs",
+                  user_id, duration)
+        seg = np.concatenate(self.chunks)
+        self.reset()
+        return seg
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +647,7 @@ class VoiceListener:
         self._users: dict[int, _UserAudioState] = defaultdict(_UserAudioState)
         self._loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
         self._disconnect_listener = None  # coro, registered in start()
+        self._flush_task: asyncio.Task | None = None
 
     # -- listening -----------------------------------------------------------
 
@@ -702,8 +733,40 @@ class VoiceListener:
             dave_ver,
         )
 
+        # Wall-clock VAD flush: drives end-of-utterance detection when
+        # Discord stops sending RTP packets entirely (Opus DTX). Without
+        # this, an utterance hangs in is_speaking until the next user
+        # speech triggers a frame and force-complete fires.
+        self._flush_task = asyncio.create_task(
+            self._flush_loop(), name=f"vad-flush-{self.vc.channel.id}"
+        )
+
+    async def _flush_loop(self) -> None:
+        """Every 200 ms, walk _users and finalize stale is_speaking states."""
+        try:
+            while True:
+                await asyncio.sleep(0.2)
+                now = time.monotonic()
+                # Snapshot ids — feed() may mutate _users concurrently from
+                # the AudioSink router thread.
+                for user_id in list(self._users.keys()):
+                    state = self._users.get(user_id)
+                    if state is None:
+                        continue
+                    seg = state.try_finalize_idle(user_id, now)
+                    if seg is not None:
+                        captured_at = now
+                        await self._process_segment(user_id, seg, captured_at)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("[vad-flush] loop crashed")
+
     def stop(self):
         """Stop listening and clear buffers."""
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            self._flush_task = None
         if self._disconnect_listener is not None:
             try:
                 self.vc.remove_listener(
