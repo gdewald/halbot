@@ -16,6 +16,7 @@ import abc
 import io
 import logging
 import threading
+import time
 
 log = logging.getLogger("halbot")
 
@@ -103,6 +104,10 @@ class KokoroEngine(TTSEngine):
         # at playback. Serialize synth() bodies. CPU-bound on a single
         # core anyway, so contention is the bottleneck, not the lock.
         self._synth_lock = threading.Lock()
+        # Set by _load() when a cold load actually happens; cleared at the
+        # start of every synth() so callers can attribute load time to the
+        # current call. Caller subtracts from total to get pure synth time.
+        self.last_cold_load_ms = 0
         # See https://huggingface.co/hexgrad/Kokoro-82M for the voice list.
         # af_heart is a warm, neutral American-English default.
         from . import config as _config
@@ -119,6 +124,7 @@ class KokoroEngine(TTSEngine):
         with self._lock:
             if self._pipeline is not None:
                 return self._pipeline
+            _t_load = time.monotonic()
             log.info("[tts] stage=begin-load lang=%s voice=%s", self.lang, self.voice)
             # Force CPU: Ollama already holds ~12 GiB on the GPU and loading
             # Kokoro onto the same device has crashed the NVIDIA driver (GPU
@@ -136,13 +142,16 @@ class KokoroEngine(TTSEngine):
                     p.data = p.data.to("cpu")
             except Exception:
                 pass
-            log.info("[tts] stage=loaded device=cpu")
+            self.last_cold_load_ms = int((time.monotonic() - _t_load) * 1000)
+            log.info("[tts] stage=loaded device=cpu cold_load_ms=%d",
+                     self.last_cold_load_ms)
             return self._pipeline
 
     def synth(self, text: str) -> tuple[bytes, str]:
         import numpy as np
         import soundfile as sf  # type: ignore[import-not-found]
 
+        self.last_cold_load_ms = 0
         log.info("[tts] stage=synth-begin chars=%d", len(text))
         pipeline = self._load()
         # Serialize pipeline iteration — KPipeline is not concurrency-safe.

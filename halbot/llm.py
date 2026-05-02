@@ -418,6 +418,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
     _apply_model_and_keepalive(body)
 
     try:
+        _t_http = _time.monotonic()
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("Ollama %s response: %s", resp.status_code, resp.text[:500])
@@ -429,6 +430,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
                         log.warning("Ollama retry %s response: %s",
                                     resp.status_code, resp.text[:500])
         resp.raise_for_status()
+        _llm_ms = int((_time.monotonic() - _t_http) * 1000)
         raw_json = resp.json()
         log.debug("Ollama raw response: %s", json.dumps(raw_json, indent=2))
         choice = raw_json["choices"][0]
@@ -438,6 +440,7 @@ def parse_intent(user_text: str, sounds, saved: list[dict], channel_history: lis
         if _stats_out is not None:
             _stats_out["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
             _stats_out["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+            _stats_out["llm_ms"] = _llm_ms
             _stats_out["outcome"] = "ok"
         message_obj = choice.get("message", {}) or {}
         content = (message_obj.get("content") or "").strip()
@@ -1245,6 +1248,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
                        history: list[dict] | None = None,
                        _stats_out: dict | None = None) -> list[dict]:
     """Lightweight LLM call to pick a sound from a voice command transcript."""
+    _t_enter = _time.monotonic()
     pd_block = _format_persona_block()
 
     system = VOICE_COMMAND_PROMPT.format(
@@ -1287,8 +1291,11 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
     }
     _apply_model_and_keepalive(body)
 
+    log.info("[voice-llm] stage=http-send build_ms=%d prompt_chars=%d",
+             int((_time.monotonic() - _t_enter) * 1000), len(system))
     content = ""
     try:
+        _t_http = _time.monotonic()
         resp = requests.post(LLM_URL, json=body, timeout=LLM_TIMEOUT)
         if resp.status_code >= 400:
             log.warning("Voice LLM %s: %s", resp.status_code, resp.text[:300])
@@ -1296,6 +1303,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
                 if ensure_model_loaded(LLM_MODEL):
                     resp = requests.post(LLM_URL, json=body, timeout=LLM_RETRY_TIMEOUT)
         resp.raise_for_status()
+        _llm_ms = int((_time.monotonic() - _t_http) * 1000)
         raw_json = resp.json()
         choice = raw_json["choices"][0]
         message = choice.get("message", {})
@@ -1304,6 +1312,7 @@ def parse_voice_intent(transcript: str, sounds, saved: list[dict],
         if _stats_out is not None:
             _stats_out["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
             _stats_out["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+            _stats_out["llm_ms"] = _llm_ms
             _stats_out["outcome"] = "ok"
         content = (message.get("content") or "").strip()
         reasoning = (message.get("reasoning_content") or message.get("reasoning") or "").strip()

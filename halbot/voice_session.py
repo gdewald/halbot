@@ -199,6 +199,8 @@ async def _speak(session, text: str) -> bool:
         _tts_mod.synth_end(tracker)
     log.info("[voice-cmd] stage=tts-synth-returned bytes=%d fmt=%s", len(audio) if audio else 0, fmt)
     _tts_latency_ms = int((time.monotonic() - _tts_t0) * 1000)
+    _cold_load_ms = int(getattr(engine, "last_cold_load_ms", 0) or 0)
+    _synth_ms = max(0, _tts_latency_ms - _cold_load_ms)
     try:
         gid = session.vc.channel.guild.id
     except Exception:
@@ -208,6 +210,8 @@ async def _speak(session, text: str) -> bool:
         guild_id=gid,
         target=getattr(engine, "name", "unknown"),
         latency_ms=_tts_latency_ms,
+        synth_ms=_synth_ms,
+        cold_load_ms=_cold_load_ms,
         chars=len(clean),
         bytes=len(audio) if audio else 0,
         concurrency_start=tracker.start,
@@ -577,12 +581,17 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
             return
 
     log.info("[voice] user=%s command: %r", user_id, command)
+    _pre_fetch = time.monotonic()
     try:
         import discord
         sounds = list(await guild.fetch_soundboard_sounds())
     except Exception:
         sounds = []
+    _fetch_ms = int((time.monotonic() - _pre_fetch) * 1000)
     saved = db_list()
+    _saved_ms = int((time.monotonic() - _pre_fetch) * 1000) - _fetch_ms
+    log.info("[voice-llm] stage=pre-dispatch fetch_ms=%d db_ms=%d sounds=%d saved=%d",
+             _fetch_ms, _saved_ms, len(sounds), len(saved))
     _llm_t0 = time.monotonic()
     _llm_stats: dict = {}
     actions = await asyncio.to_thread(
@@ -607,6 +616,7 @@ async def handle_voice_command(guild, user_id, transcript, captured_at: float | 
         guild_id=guild.id,
         target="parse_voice_intent",
         latency_ms=int((time.monotonic() - _llm_t0) * 1000),
+        llm_ms=int(_llm_stats.get("llm_ms") or 0),
         action_count=_action_count,
         phrase=(command or "")[:160],
         outcome=_outcome,

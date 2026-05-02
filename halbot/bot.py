@@ -688,6 +688,7 @@ async def on_message(message: discord.Message):
         guild_id=guild.id,
         target="parse_intent",
         latency_ms=_llm_latency_ms,
+        llm_ms=int(_llm_stats.get("llm_ms") or 0),
         action_count=len(actions) if isinstance(actions, list) else 0,
         tokens_out=_llm_tokens_out,
         prompt_tokens=int(_llm_stats.get("prompt_tokens") or 0),
